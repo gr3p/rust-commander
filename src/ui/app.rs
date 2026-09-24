@@ -1,0 +1,1285 @@
+use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
+
+use relm4::gtk;
+use relm4::gtk::gdk::{Key, ModifierType};
+use relm4::gtk::prelude::*;
+use relm4::prelude::*;
+use relm4::RelmWidgetExt;
+
+use comarchy::config::{self, Bookmark, Config};
+use comarchy::entry::Entry;
+use comarchy::lister::{self, ViewMode};
+use comarchy::ops::{self, Choice, Kind, Progress, Report};
+use comarchy::state::{AppState, PaneId};
+use comarchy::theme::{self, Palette};
+
+use super::msg::{Msg, SYNCING};
+use super::row::EntryObject;
+use super::shell::{self, Shell};
+
+enum Ask {
+    Copy,
+    Move,
+    CopyAs,
+    Rename,
+    Mkdir,
+    Trash,
+    Permanent,
+}
+
+struct Job {
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    progress_rx: mpsc::Receiver<Progress>,
+    conflict_rx: mpsc::Receiver<(PathBuf, PathBuf)>,
+    answer_tx: mpsc::Sender<Choice>,
+    done_rx: mpsc::Receiver<Result<Report, String>>,
+    started: Instant,
+    conflict_open: bool,
+}
+
+struct ListerUi {
+    window: gtk::Window,
+    view: gtk::TextView,
+    reader: lister::Reader,
+    mode: ViewMode,
+}
+
+pub struct App {
+    state: AppState,
+    shell: Shell,
+    cfg: Config,
+    status: String,
+    dirty: [bool; 2],
+    job: Option<Job>,
+    ask: Option<Ask>,
+    dialog: Option<gtk::Window>,
+    progress: Option<(gtk::Window, gtk::Label)>,
+    lister: Option<ListerUi>,
+    preview: lister::PreviewSlot,
+    preview_sent: u64,
+    smoke: bool,
+}
+
+pub fn run(smoke: bool) {
+    comarchy::log::info(&format!("start log={}", comarchy::log::path().display()));
+    let args: Vec<String> = std::env::args().filter(|arg| arg != "--smoke").collect();
+    let app = RelmApp::new("se.comarchy.Comarchy").with_args(args);
+    app.allow_multiple_instances(true);
+    app.run::<App>(smoke);
+}
+
+#[relm4::component(pub)]
+impl SimpleComponent for App {
+    type Init = bool;
+    type Input = Msg;
+    type Output = ();
+
+    view! {
+        gtk::Window {
+            set_title: Some("Comarchy"),
+            set_default_width: 1200,
+            set_default_height: 760,
+        }
+    }
+
+    fn init(smoke: bool, root: Self::Root, sender: ComponentSender<Self>) -> ComponentParts<Self> {
+        let widgets = view_output!();
+        let shell = shell::build(&root, sender.input_sender());
+        let cfg = config::load();
+        let (left, right) = if smoke {
+            smoke_dirs()
+        } else {
+            let home = home_dir();
+            (home.clone(), home)
+        };
+        let mut state = AppState::new(left, right);
+        state.show_hidden = cfg.show_hidden;
+        state.sort = cfg.sort_key();
+        state.bookmarks = cfg
+            .bookmarks
+            .iter()
+            .map(|b| (b.name.clone(), b.path.clone()))
+            .collect();
+        let mut model = App {
+            state,
+            shell,
+            cfg,
+            status: String::new(),
+            dirty: [true, true],
+            job: None,
+            ask: None,
+            dialog: None,
+            progress: None,
+            lister: None,
+            preview: lister::PreviewSlot::default(),
+            preview_sent: 0,
+            smoke,
+        };
+        model.apply_css(&theme::load_named(&theme::active_name(
+            &model.cfg.theme,
+            &config::active_theme_path(),
+        )));
+        model.sync();
+        for id in [PaneId::Left, PaneId::Right] {
+            let path = model.state.tab(id).path.clone();
+            let token = model.state.tab(id).token;
+            model.spawn_load(&sender, id, 0, path, token);
+        }
+        let tx = sender.input_sender().clone();
+        gtk::glib::timeout_add_local(Duration::from_millis(50), move || {
+            tx.emit(Msg::Poll);
+            gtk::glib::ControlFlow::Continue
+        });
+        install_usr1();
+        let tx = sender.input_sender().clone();
+        gtk::glib::timeout_add_local(Duration::from_millis(200), move || {
+            if take_usr1() {
+                tx.emit(Msg::ReloadTheme);
+            }
+            gtk::glib::ControlFlow::Continue
+        });
+        if smoke {
+            let tx = sender.input_sender().clone();
+            gtk::glib::idle_add_local(move || {
+                tx.emit(Msg::Smoke);
+                gtk::glib::ControlFlow::Break
+            });
+        }
+        ComponentParts { model, widgets }
+    }
+
+    fn update(&mut self, msg: Msg, sender: ComponentSender<Self>) {
+        let idle_poll = matches!(msg, Msg::Poll);
+        self.on_msg(msg, &sender);
+        if !(idle_poll && self.job.is_none() && !self.dirty.iter().any(|pane| *pane)) {
+            self.sync();
+        }
+        self.kick_preview(&sender);
+    }
+}
+
+impl App {
+    fn on_msg(&mut self, msg: Msg, sender: &ComponentSender<Self>) {
+        match msg {
+            Msg::Key(key, mods) => self.on_key(key, mods, sender),
+            Msg::FKey(n, shift) => self.on_fkey(n, shift, sender),
+            Msg::Listed(pane, tab, token, result) => self.on_listed(pane, tab, token, result),
+            Msg::PathGo(pane, text) => {
+                let id = PaneId::from_index(pane);
+                self.state.active = id;
+                let path = PathBuf::from(text);
+                let token = self.state.navigate(id, path.clone(), true);
+                let tab = self.state.pane(id).active;
+                self.spawn_load(sender, id, tab, path, token);
+            }
+            Msg::Cursor(pane, pos) => {
+                self.state.active = PaneId::from_index(pane);
+                let current = self.state.tab(self.state.active).cursor;
+                if current != pos as usize {
+                    self.state.set_cursor(pos as usize);
+                }
+            }
+            Msg::Activate(pane) => {
+                self.state.active = PaneId::from_index(pane);
+                self.activate_cursor(sender);
+            }
+            Msg::FilterChanged(pane, text) => {
+                self.state.pane_mut(PaneId::from_index(pane)).filter = text;
+                self.state.tab_mut(PaneId::from_index(pane)).cursor = 0;
+                self.touch(PaneId::from_index(pane));
+            }
+            Msg::Submit(text) => self.on_submit(&text, sender),
+            Msg::CancelAsk => {
+                self.ask = None;
+                self.close_dialog();
+            }
+            Msg::Conflict(choice) => {
+                if let Some(job) = &self.job {
+                    let _ = job.answer_tx.send(choice);
+                }
+                if let Some(job) = &mut self.job {
+                    job.conflict_open = false;
+                }
+                self.close_dialog();
+            }
+            Msg::Poll => self.poll_job(sender),
+            Msg::Preview { generation, text } => {
+                lister::apply_preview(&mut self.preview, generation, text);
+            }
+            Msg::ReloadTheme => {
+                let name = theme::active_name(&self.cfg.theme, &config::active_theme_path());
+                self.apply_css(&theme::load_named(&name));
+                self.status = format!("Theme {name}");
+            }
+            Msg::PickPlace(pane, path) => {
+                let id = PaneId::from_index(pane);
+                let token = self.state.navigate(id, path.clone(), true);
+                let tab = self.state.pane(id).active;
+                self.close_dialog();
+                self.spawn_load(sender, id, tab, path, token);
+            }
+            Msg::JobDone(result) => self.finish_job(result, sender),
+            Msg::Smoke => self.run_smoke(sender),
+        }
+    }
+
+    fn on_key(&mut self, key: Key, mods: ModifierType, sender: &ComponentSender<Self>) {
+        let ctrl = mods.contains(ModifierType::CONTROL_MASK);
+        let shift = mods.contains(ModifierType::SHIFT_MASK);
+        let alt = mods.contains(ModifierType::ALT_MASK);
+        if self.lister.is_some() && !ctrl && !alt {
+            match key {
+                Key::Escape => self.close_lister(),
+                Key::_1 => self.lister_set_mode(ViewMode::Text),
+                Key::_2 => self.lister_set_mode(ViewMode::Binary),
+                Key::_3 => self.lister_set_mode(ViewMode::Hex),
+                Key::F2 => self.lister_scroll(0),
+                Key::Down | Key::j => self.lister_scroll(64),
+                Key::Up | Key::k => self.lister_scroll(-64),
+                Key::Page_Down => self.lister_scroll(4096),
+                Key::Page_Up => self.lister_scroll(-4096),
+                _ => {}
+            }
+            return;
+        }
+        if ctrl && alt {
+            return;
+        }
+        if ctrl {
+            match key {
+                Key::F3 => self.set_sort(comarchy::listing::SortKey::Name),
+                Key::F4 => self.set_sort(comarchy::listing::SortKey::Ext),
+                Key::F5 => self.set_sort(comarchy::listing::SortKey::Time),
+                Key::F6 => self.set_sort(comarchy::listing::SortKey::Size),
+                Key::s | Key::S => {
+                    let ui = &self.shell.panes[self.state.active.index()];
+                    ui.filter.set_visible(true);
+                    ui.filter.grab_focus();
+                }
+                Key::h | Key::H => {
+                    self.state.show_hidden = !self.state.show_hidden;
+                    self.cfg.show_hidden = self.state.show_hidden;
+                    let _ = config::save(&self.cfg);
+                    self.touch_both();
+                }
+                Key::t | Key::T => self.open_new_tab(sender),
+                Key::w | Key::W => {
+                    let id = self.state.active;
+                    self.state.close_tab(id);
+                    self.touch(id);
+                }
+                Key::d | Key::D => self.add_bookmark(),
+                Key::q | Key::Q => {
+                    self.state.quick_view = !self.state.quick_view;
+                    self.preview_sent = 0;
+                }
+                Key::Tab | Key::ISO_Left_Tab => {
+                    let id = self.state.active;
+                    self.state.next_tab(id, shift);
+                    self.touch(id);
+                }
+                _ => {}
+            }
+            return;
+        }
+        if alt {
+            match key {
+                Key::F1 => self.show_places(PaneId::Left, sender),
+                Key::F2 => self.show_places(PaneId::Right, sender),
+                Key::F3 => self.open_external(true),
+                Key::Left => self.history(true, sender),
+                Key::Right => self.history(false, sender),
+                _ => {}
+            }
+            return;
+        }
+        match key {
+            Key::F2 => self.refresh_active(sender),
+            Key::F3 => self.open_lister(),
+            Key::F4 => self.open_external(false),
+            Key::F5 => self.on_fkey(5, shift, sender),
+            Key::F6 => self.on_fkey(6, shift, sender),
+            Key::F7 => self.on_fkey(7, shift, sender),
+            Key::F8 | Key::Delete => self.on_fkey(8, shift, sender),
+            Key::ISO_Left_Tab | Key::Tab => {
+                self.state.active = self.state.active.other();
+            }
+            Key::Insert => {
+                self.state.toggle_mark();
+                self.touch(self.state.active);
+                self.focus_list();
+            }
+            Key::space | Key::KP_Space => {
+                self.state.toggle_mark_stay();
+                self.touch(self.state.active);
+                self.focus_list();
+            }
+            Key::BackSpace => self.go_up(sender),
+            Key::Return => self.activate_cursor(sender),
+            Key::Up | Key::KP_Up => self.move_list(-1),
+            Key::Down | Key::KP_Down => self.move_list(1),
+            Key::Page_Up | Key::KP_Page_Up => self.move_list(-20),
+            Key::Page_Down | Key::KP_Page_Down => self.move_list(20),
+            Key::Home | Key::KP_Home => {
+                self.state.set_cursor(0);
+                self.focus_list();
+            }
+            Key::End | Key::KP_End => {
+                self.state.set_cursor(usize::MAX);
+                self.focus_list();
+            }
+            Key::Escape => {
+                self.state.quick_view = false;
+                self.state.pane_mut(self.state.active).filter.clear();
+                self.shell.panes[self.state.active.index()].filter.set_text("");
+                self.shell.panes[self.state.active.index()].filter.set_visible(false);
+                self.touch(self.state.active);
+            }
+            _ => {}
+        }
+    }
+
+    fn on_fkey(&mut self, n: u8, shift: bool, sender: &ComponentSender<Self>) {
+        let tx = sender.input_sender().clone();
+        match n {
+            2 => self.refresh_active(sender),
+            3 => self.open_lister(),
+            4 => self.open_external(false),
+            5 if shift => {
+                self.ask = Some(Ask::CopyAs);
+                let name = self.current_name().unwrap_or_default();
+                self.ask_text("Copy as", &name, tx);
+            }
+            5 => {
+                self.ask = Some(Ask::Copy);
+                let dest = self.state.tab(self.state.active.other()).path.display().to_string();
+                self.ask_text("Copy to", &dest, tx);
+            }
+            6 if shift => {
+                self.ask = Some(Ask::Rename);
+                let name = self.current_name().unwrap_or_default();
+                self.ask_text("Rename", &name, tx);
+            }
+            6 => {
+                self.ask = Some(Ask::Move);
+                let dest = self.state.tab(self.state.active.other()).path.display().to_string();
+                self.ask_text("Move to", &dest, tx);
+            }
+            7 => {
+                self.ask = Some(Ask::Mkdir);
+                self.ask_text("New folder", "", tx);
+            }
+            8 => {
+                self.ask = Some(if shift { Ask::Permanent } else { Ask::Trash });
+                let title = if shift { "Delete permanently?" } else { "Move to trash?" };
+                self.ask_confirm(title, tx);
+            }
+            _ => {}
+        }
+    }
+
+    fn on_submit(&mut self, text: &str, sender: &ComponentSender<Self>) {
+        let text = text.to_string();
+        let ask = self.ask.take();
+        self.close_dialog();
+        match ask {
+            Some(Ask::Copy) => {
+                let items = items_into(&self.state, Path::new(&text));
+                self.spawn_transfer(items, Kind::Copy, sender);
+            }
+            Some(Ask::Move) => {
+                let items = items_into(&self.state, Path::new(&text));
+                self.spawn_transfer(items, Kind::Move, sender);
+            }
+            Some(Ask::CopyAs) => {
+                let items = self.state.transfer_items(Some(text.trim()));
+                self.spawn_transfer(items, Kind::Copy, sender);
+            }
+            Some(Ask::Rename) => {
+                if let Some(path) = self.state.selected_paths(self.state.active).into_iter().next() {
+                    match ops::rename_in_place(&path, text.trim()) {
+                        Ok(_) => self.refresh_active(sender),
+                        Err(err) => self.status = err.to_string(),
+                    }
+                }
+            }
+            Some(Ask::Mkdir) => {
+                let parent = self.state.tab(self.state.active).path.clone();
+                let name = text.trim();
+                match ops::make_dir(&parent, name) {
+                    Ok(path) => {
+                        comarchy::log::info(&format!("mkdir {}", path.display()));
+                        self.refresh_active(sender);
+                    }
+                    Err(err) => {
+                        comarchy::log::error(&format!("mkdir {name}: {err}"));
+                        self.status = err.to_string();
+                    }
+                }
+            }
+            Some(Ask::Trash) => self.spawn_delete(false, sender),
+            Some(Ask::Permanent) => self.spawn_delete(true, sender),
+            None => {}
+        }
+    }
+
+    fn on_listed(&mut self, pane: usize, tab: usize, token: u64, result: Result<Vec<Entry>, String>) {
+        let ui = &self.shell.panes[pane];
+        ui.spinner.stop();
+        ui.spinner.set_visible(false);
+        match result {
+            Ok(entries) => {
+                let id = PaneId::from_index(pane);
+                if self.state.apply_listing(id, tab, token, entries) {
+                    self.touch(id);
+                }
+            }
+            Err(err) => {
+                comarchy::log::error(&format!("list pane={pane}: {err}"));
+                self.status = err;
+            }
+        }
+    }
+
+    fn spawn_load(&self, sender: &ComponentSender<Self>, id: PaneId, tab: usize, path: PathBuf, token: u64) {
+        let ui = &self.shell.panes[id.index()];
+        ui.spinner.set_visible(true);
+        ui.spinner.start();
+        comarchy::log::info(&format!("read {}", path.display()));
+        let tx = sender.input_sender().clone();
+        let pane = id.index();
+        std::thread::spawn(move || {
+            let result = comarchy::listing::read_dir(&path).map_err(|e| e.to_string());
+            tx.emit(Msg::Listed(pane, tab, token, result));
+        });
+    }
+
+    fn refresh_active(&mut self, sender: &ComponentSender<Self>) {
+        let id = self.state.active;
+        let (path, token) = self.state.refresh(id);
+        let tab = self.state.pane(id).active;
+        self.spawn_load(sender, id, tab, path, token);
+    }
+
+    fn go_up(&mut self, sender: &ComponentSender<Self>) {
+        let Some((id, path, token)) = self.state.up() else { return };
+        let tab = self.state.pane(id).active;
+        self.spawn_load(sender, id, tab, path, token);
+    }
+
+    fn activate_cursor(&mut self, sender: &ComponentSender<Self>) {
+        if let Some((id, path, token)) = self.state.enter() {
+            let tab = self.state.pane(id).active;
+            self.spawn_load(sender, id, tab, path, token);
+        } else {
+            self.open_external(true);
+        }
+    }
+
+    fn history(&mut self, back: bool, sender: &ComponentSender<Self>) {
+        let id = self.state.active;
+        let step = if back { self.state.go_back(id) } else { self.state.go_forward(id) };
+        if let Some((path, token)) = step {
+            let tab = self.state.pane(id).active;
+            self.spawn_load(sender, id, tab, path, token);
+        }
+    }
+
+    fn open_new_tab(&mut self, sender: &ComponentSender<Self>) {
+        let id = self.state.active;
+        let (tab, path, token) = self.state.new_tab(id);
+        self.touch(id);
+        self.spawn_load(sender, id, tab, path, token);
+    }
+
+    fn set_sort(&mut self, key: comarchy::listing::SortKey) {
+        if self.state.sort == key {
+            self.state.ascending = !self.state.ascending;
+        } else {
+            self.state.sort = key;
+            self.state.ascending = true;
+        }
+        self.cfg.sort = self.state.sort.as_config().into();
+        let _ = config::save(&self.cfg);
+        self.touch_both();
+    }
+
+    fn current_name(&self) -> Option<String> {
+        self.state.cursor_entry(self.state.active).map(|e| e.name.to_string())
+    }
+
+    fn spawn_transfer(&mut self, items: Vec<(PathBuf, PathBuf)>, kind: Kind, sender: &ComponentSender<Self>) {
+        if items.is_empty() {
+            self.status = "Nothing selected".into();
+            return;
+        }
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (progress_tx, progress_rx) = mpsc::channel();
+        let (conflict_tx, conflict_rx) = mpsc::channel();
+        let (answer_tx, answer_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let cancel_flag = Arc::clone(&cancel);
+        std::thread::spawn(move || {
+            let result = ops::transfer(
+                &items,
+                kind,
+                &cancel_flag,
+                &mut |p| {
+                    let _ = progress_tx.send(p.clone());
+                },
+                &mut |src, dst| {
+                    if conflict_tx.send((src.to_path_buf(), dst.to_path_buf())).is_err() {
+                        return Choice::Cancel;
+                    }
+                    answer_rx.recv().unwrap_or(Choice::Cancel)
+                },
+            );
+            let _ = done_tx.send(result.map_err(|e| e.to_string()));
+        });
+        self.job = Some(Job {
+            cancel,
+            progress_rx,
+            conflict_rx,
+            answer_tx,
+            done_rx,
+            started: Instant::now(),
+            conflict_open: false,
+        });
+        let _ = sender;
+    }
+
+    fn spawn_delete(&mut self, permanent: bool, sender: &ComponentSender<Self>) {
+        let paths = self.state.selected_paths(self.state.active);
+        if paths.is_empty() {
+            self.status = "Nothing selected".into();
+            return;
+        }
+        let tx = sender.input_sender().clone();
+        std::thread::spawn(move || {
+            let result = ops::delete_paths(&paths, permanent, &mut |path| {
+                if permanent {
+                    return Ok(());
+                }
+                gio_trash(path)
+            });
+            tx.emit(Msg::JobDone(result.map(|_| Report { cancelled: false, files: 0 }).map_err(|e| e.to_string())));
+        });
+    }
+
+    fn poll_job(&mut self, sender: &ComponentSender<Self>) {
+        let polled = {
+            let Some(job) = self.job.as_mut() else { return };
+            let mut line = None;
+            let mut show = false;
+            while let Ok(progress) = job.progress_rx.try_recv() {
+                line = Some(format!("{}/{}  {}", progress.done, progress.total, progress.current.display()));
+                show = job.started.elapsed() > Duration::from_millis(200);
+            }
+            let conflict = if job.conflict_open { None } else { job.conflict_rx.try_recv().ok() };
+            if conflict.is_some() {
+                job.conflict_open = true;
+            }
+            let done = job.done_rx.try_recv().ok();
+            (line, show, conflict, done)
+        };
+        let (line, show, conflict, done) = polled;
+        if let Some(line) = line {
+            self.status = line;
+        }
+        if show {
+            self.ensure_progress();
+            if let Some((_, label)) = &self.progress {
+                label.set_text(&self.status);
+            }
+        }
+        if let Some((src, dst)) = conflict {
+            self.ask_conflict(&src, &dst, sender.input_sender().clone());
+        }
+        if let Some(result) = done {
+            self.finish_job(result, sender);
+        }
+    }
+
+    fn finish_job(&mut self, result: Result<Report, String>, sender: &ComponentSender<Self>) {
+        self.job = None;
+        if let Some((win, _)) = self.progress.take() {
+            win.close();
+        }
+        self.status = match result {
+            Ok(report) if report.cancelled => "Cancelled".into(),
+            Ok(_) => "Done".into(),
+            Err(err) => {
+                comarchy::log::error(&format!("job {err}"));
+                err
+            }
+        };
+        self.refresh_both(sender);
+    }
+
+    fn refresh_both(&mut self, sender: &ComponentSender<Self>) {
+        for id in [PaneId::Left, PaneId::Right] {
+            let (path, token) = self.state.refresh(id);
+            let tab = self.state.pane(id).active;
+            self.spawn_load(sender, id, tab, path, token);
+        }
+    }
+
+    fn open_lister(&mut self) {
+        let Some(path) = self.file_under_cursor() else { return };
+        let Ok(mut reader) = lister::Reader::open(&path) else {
+            self.status = format!("Cannot open {}", path.display());
+            return;
+        };
+        let bytes = reader.read_window().unwrap_or_default();
+        let text = lister::render(ViewMode::Text, &bytes, reader.offset);
+        self.close_lister();
+        let window = gtk::Window::new();
+        window.set_title(Some(&path.display().to_string()));
+        window.set_transient_for(Some(&self.shell.window));
+        window.set_default_width(800);
+        window.set_default_height(600);
+        let view = gtk::TextView::new();
+        view.set_editable(false);
+        view.set_monospace(true);
+        view.buffer().set_text(&text);
+        let scroll = gtk::ScrolledWindow::new();
+        scroll.set_child(Some(&view));
+        window.set_child(Some(&scroll));
+        window.present();
+        self.lister = Some(ListerUi { window, view, reader, mode: ViewMode::Text });
+    }
+
+    fn lister_set_mode(&mut self, mode: ViewMode) {
+        let Some(lister) = self.lister.as_mut() else { return };
+        lister.mode = mode;
+        if let Ok(bytes) = lister.reader.read_window() {
+            let text = lister::render(mode, &bytes, lister.reader.offset);
+            lister.view.buffer().set_text(&text);
+        }
+    }
+
+    fn lister_scroll(&mut self, delta: i64) {
+        let Some(lister) = self.lister.as_mut() else { return };
+        if delta != 0 {
+            lister.reader.scroll(delta);
+        } else {
+            lister.reader.offset = lister.reader.offset.min(lister.reader.len);
+        }
+        let mode = lister.mode;
+        if let Ok(bytes) = lister.reader.read_window() {
+            let text = lister::render(mode, &bytes, lister.reader.offset);
+            lister.view.buffer().set_text(&text);
+        }
+    }
+
+    fn close_lister(&mut self) {
+        if let Some(lister) = self.lister.take() {
+            lister.window.close();
+        }
+    }
+
+    fn kick_preview(&mut self, sender: &ComponentSender<Self>) {
+        if !self.state.quick_view || self.preview_sent == self.state.preview_gen {
+            return;
+        }
+        let Some(path) = self.file_under_cursor() else { return };
+        let generation = self.state.preview_gen;
+        self.preview.generation = generation;
+        self.preview_sent = generation;
+        let tx = sender.input_sender().clone();
+        std::thread::spawn(move || {
+            let text = match lister::Reader::open(&path) {
+                Ok(mut reader) => reader
+                    .read_window()
+                    .map(|bytes| lister::render(ViewMode::Text, &bytes, 0))
+                    .unwrap_or_else(|e| e.to_string()),
+                Err(err) => err.to_string(),
+            };
+            tx.emit(Msg::Preview { generation, text });
+        });
+    }
+
+    fn file_under_cursor(&self) -> Option<PathBuf> {
+        let entry = self.state.cursor_entry(self.state.active)?;
+        if entry.is_dir() {
+            return None;
+        }
+        Some(comarchy::listing::entry_path(&self.state.tab(self.state.active).path, entry))
+    }
+
+    fn open_external(&self, viewer: bool) {
+        let Some(path) = self.file_under_cursor().or_else(|| {
+            self.state.cursor_entry(self.state.active).map(|e| {
+                comarchy::listing::entry_path(&self.state.tab(self.state.active).path, e)
+            })
+        }) else { return };
+        let argv = if viewer {
+            comarchy::external::viewer_argv(&self.cfg.viewer, &path)
+        } else {
+            comarchy::external::editor_argv(&self.cfg.editor, std::env::var("EDITOR").ok().as_deref(), &path)
+        };
+        if argv.is_empty() {
+            return;
+        }
+        let mut cmd = std::process::Command::new(&argv[0]);
+        cmd.args(&argv[1..]);
+        if let Err(err) = cmd.spawn() {
+            let _ = err;
+        }
+    }
+
+    fn show_places(&mut self, id: PaneId, sender: &ComponentSender<Self>) {
+        let tx = sender.input_sender().clone();
+        let pane = id.index();
+        let places = comarchy::places::places(&home_dir(), &self.cfg.bookmarks);
+        self.close_dialog();
+        let win = gtk::Window::new();
+        win.set_title(Some(if pane == 0 { "Left places" } else { "Right places" }));
+        win.set_modal(true);
+        win.set_transient_for(Some(&self.shell.window));
+        win.set_default_width(420);
+        win.set_default_height(360);
+        let list = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        list.set_margin_all(8);
+        for (label, path) in places {
+            let button = gtk::Button::with_label(&format!("{label}  {}", path.display()));
+            button.set_halign(gtk::Align::Start);
+            let tx = tx.clone();
+            button.connect_clicked(move |_| {
+                tx.emit(Msg::PickPlace(pane, path.clone()));
+            });
+            list.append(&button);
+        }
+        let scroll = gtk::ScrolledWindow::new();
+        scroll.set_child(Some(&list));
+        win.set_child(Some(&scroll));
+        win.present();
+        self.dialog = Some(win);
+    }
+
+    fn add_bookmark(&mut self) {
+        let path = self.state.tab(self.state.active).path.clone();
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        if !self.cfg.bookmarks.iter().any(|b| b.path == path) {
+            self.cfg.bookmarks.push(Bookmark { name: name.clone(), path: path.clone() });
+            self.state.bookmarks.push((name, path));
+            let _ = config::save(&self.cfg);
+            self.status = "Bookmark saved".into();
+        }
+    }
+
+    fn ask_text(&mut self, title: &str, initial: &str, tx: relm4::Sender<Msg>) {
+        self.close_dialog();
+        let win = gtk::Window::new();
+        win.set_title(Some(title));
+        win.set_modal(true);
+        win.set_transient_for(Some(&self.shell.window));
+        win.set_default_width(520);
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        column.set_margin_all(12);
+        let entry = gtk::Entry::new();
+        entry.set_text(initial);
+        let tx_ok = tx.clone();
+        entry.connect_activate(move |entry| tx_ok.emit(Msg::Submit(entry.text().to_string())));
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let ok = gtk::Button::with_label("OK");
+        let entry_ok = entry.clone();
+        let tx_ok = tx.clone();
+        ok.connect_clicked(move |_| tx_ok.emit(Msg::Submit(entry_ok.text().to_string())));
+        let cancel = gtk::Button::with_label("Cancel");
+        cancel.connect_clicked(move |_| tx.emit(Msg::CancelAsk));
+        row.append(&ok);
+        row.append(&cancel);
+        column.append(&entry);
+        column.append(&row);
+        win.set_child(Some(&column));
+        win.present();
+        entry.grab_focus();
+        self.dialog = Some(win);
+    }
+
+    fn ask_confirm(&mut self, title: &str, tx: relm4::Sender<Msg>) {
+        self.close_dialog();
+        let win = gtk::Window::new();
+        win.set_title(Some(title));
+        win.set_modal(true);
+        win.set_transient_for(Some(&self.shell.window));
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.set_margin_all(12);
+        let ok = gtk::Button::with_label("OK");
+        let tx_ok = tx.clone();
+        ok.connect_clicked(move |_| tx_ok.emit(Msg::Submit(String::new())));
+        let cancel = gtk::Button::with_label("Cancel");
+        cancel.connect_clicked(move |_| tx.emit(Msg::CancelAsk));
+        row.append(&ok);
+        row.append(&cancel);
+        win.set_child(Some(&row));
+        win.present();
+        self.dialog = Some(win);
+    }
+
+    fn ask_conflict(&mut self, src: &Path, dst: &Path, tx: relm4::Sender<Msg>) {
+        self.close_dialog();
+        let win = gtk::Window::new();
+        win.set_title(Some("File exists"));
+        win.set_modal(true);
+        win.set_transient_for(Some(&self.shell.window));
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        column.set_margin_all(12);
+        let label = gtk::Label::new(Some(&format!("{}\nalready exists as\n{}", src.display(), dst.display())));
+        label.set_wrap(true);
+        column.append(&label);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        for (caption, choice) in [
+            ("Overwrite", Choice::Overwrite),
+            ("All", Choice::OverwriteAll),
+            ("Skip", Choice::Skip),
+            ("Skip all", Choice::SkipAll),
+            ("Cancel", Choice::Cancel),
+        ] {
+            let button = gtk::Button::with_label(caption);
+            let tx = tx.clone();
+            button.connect_clicked(move |_| tx.emit(Msg::Conflict(choice)));
+            row.append(&button);
+        }
+        column.append(&row);
+        win.set_child(Some(&column));
+        win.present();
+        self.dialog = Some(win);
+    }
+
+    fn ensure_progress(&mut self) {
+        if self.progress.is_some() {
+            return;
+        }
+        let win = gtk::Window::new();
+        win.set_title(Some("Working"));
+        win.set_modal(false);
+        win.set_transient_for(Some(&self.shell.window));
+        win.set_default_width(420);
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        column.set_margin_all(12);
+        let label = gtk::Label::new(Some("Working"));
+        label.set_wrap(true);
+        let cancel = gtk::Button::with_label("Cancel");
+        if let Some(job) = &self.job {
+            let flag = Arc::clone(&job.cancel);
+            cancel.connect_clicked(move |_| flag.store(true, Ordering::Relaxed));
+        }
+        column.append(&label);
+        column.append(&cancel);
+        win.set_child(Some(&column));
+        win.present();
+        self.progress = Some((win, label));
+    }
+
+    fn close_dialog(&mut self) {
+        if let Some(win) = self.dialog.take() {
+            win.close();
+        }
+    }
+
+    fn apply_css(&self, palette: &Palette) {
+        let sheet = format!(
+            "window, label, entry, textview, button {{ font-family: \"JetBrainsMono Nerd Font\", \"JetBrains Mono\", monospace; font-size: 13px; }}\n{}",
+            theme::stylesheet(palette)
+        );
+        self.shell.css.load_from_data(&sheet);
+    }
+
+    fn sync(&mut self) {
+        SYNCING.store(true, Ordering::Relaxed);
+        for pane in 0..2 {
+            let id = PaneId::from_index(pane);
+            let active = self.state.active == id;
+            let show_preview = self.state.quick_view && !active;
+            let path = self.state.tab(id).path.display().to_string();
+            let cursor = self.state.tab(id).cursor;
+            let filter_on = !self.state.pane(id).filter.is_empty();
+            let tab_titles: Vec<String> = self.state.pane(id).tabs.iter().map(|t| {
+                t.path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "/".into())
+            }).collect();
+            let tab_active = self.state.pane(id).active;
+            let pane_dirty = self.dirty[pane];
+            let rows: Vec<(Entry, bool)> = if pane_dirty {
+                let vis = self.state.visible(id);
+                let dir = self.state.tab(id).path.clone();
+                let marked = self.state.tab(id).marked.clone();
+                vis.iter().map(|&i| {
+                    let entry = self.state.tab(id).entries[i].clone();
+                    let path = comarchy::listing::entry_path(&dir, &entry);
+                    (entry, marked.contains(&path))
+                }).collect()
+            } else {
+                Vec::new()
+            };
+            let preview = self.preview.text.clone();
+            let ui = &self.shell.panes[pane];
+            let class = if active { "pane-active" } else { "pane" };
+            if !ui.frame.has_css_class(class) {
+                ui.frame.set_css_classes(&[class]);
+            }
+            if !ui.path.has_focus() && ui.path.text().as_str() != path {
+                ui.path.set_text(&path);
+            }
+            let show_filter = filter_on || ui.filter.has_focus();
+            if gtk::prelude::WidgetExt::is_visible(&ui.filter) != show_filter {
+                ui.filter.set_visible(show_filter);
+            }
+            let page = if show_preview { "preview" } else { "list" };
+            if ui.stack.visible_child_name().as_deref() != Some(page) {
+                ui.stack.set_visible_child_name(page);
+            }
+            if show_preview {
+                let buf = ui.preview.buffer();
+                let current = buf.text(&buf.start_iter(), &buf.end_iter(), false);
+                if current.as_str() != preview {
+                    buf.set_text(&preview);
+                }
+            }
+            let labels = tab_labels(&tab_titles, tab_active);
+            if tabs_current(&ui.tabs) != labels {
+                comarchy::log::info(&format!("tabs rebuild pane={pane}"));
+                while let Some(child) = ui.tabs.first_child() {
+                    ui.tabs.remove(&child);
+                }
+                for label in &labels {
+                    ui.tabs.append(&gtk::Button::with_label(label));
+                }
+            }
+            if pane_dirty {
+                comarchy::log::info(&format!("list reload pane={pane} rows={}", rows.len()));
+                ui.store.remove_all();
+                for (entry, marked) in rows {
+                    ui.store.append(&EntryObject::from_entry(&entry, marked));
+                }
+                self.dirty[pane] = false;
+            }
+            let n = ui.selection.n_items();
+            if n > 0 {
+                let want = (cursor as u32).min(n - 1);
+                if ui.selection.selected() != want {
+                    ui.selection.set_selected(want);
+                }
+            }
+        }
+        if self.shell.status.text().as_str() != self.status {
+            self.shell.status.set_text(&self.status);
+        }
+        SYNCING.store(false, Ordering::Relaxed);
+    }
+
+    fn run_smoke(&mut self, sender: &ComponentSender<Self>) {
+        if !self.smoke {
+            return;
+        }
+        let mut errors = Vec::new();
+        let want = ["F3 View", "F4 Edit", "F5 Copy", "F6 Move", "F7 Mkdir", "F8 Delete"];
+        for label in want {
+            if !self.shell.f_labels.iter().any(|have| have == label) {
+                errors.push(format!("missing {label}"));
+            }
+        }
+        for id in [PaneId::Left, PaneId::Right] {
+            self.reload_pane(id);
+        }
+        self.sync();
+        let tab_widget = self.shell.panes[0].tabs.first_child();
+        self.sync();
+        if self.shell.panes[0].tabs.first_child() != tab_widget {
+            errors.push("tabs rebuilt".into());
+        }
+        let left = self.state.tab(PaneId::Left).path.clone();
+        let right = self.state.tab(PaneId::Right).path.clone();
+        if self.shell.panes[0].path.text().as_str() != left.display().to_string() {
+            errors.push("left path".into());
+        }
+        if self.shell.panes[1].path.text().as_str() != right.display().to_string() {
+            errors.push("right path".into());
+        }
+        if !self.shell.panes[0].frame.has_css_class("pane-active") {
+            errors.push("left frame".into());
+        }
+        let before = self.shell.panes[0].selection.selected();
+        self.state.active = PaneId::Left;
+        self.state.move_cursor(1);
+        self.sync();
+        if self.shell.panes[0].selection.selected() == before {
+            errors.push("arrow cursor".into());
+        }
+        self.state.active = PaneId::Right;
+        self.sync();
+        if !self.shell.panes[1].frame.has_css_class("pane-active") || self.shell.panes[0].frame.has_css_class("pane-active") {
+            errors.push("tab frame".into());
+        }
+        self.state.active = PaneId::Left;
+        self.state.navigate(PaneId::Left, left.join("sub"), true);
+        self.sync();
+        if self.shell.panes[0].path.text().as_str() != left.join("sub").display().to_string()
+            || self.shell.panes[1].path.text().as_str() != right.display().to_string()
+        {
+            errors.push("navigate".into());
+        }
+        self.state.navigate(PaneId::Left, left.clone(), true);
+        self.reload_pane(PaneId::Left);
+        self.state.tab_mut(PaneId::Left).marked.insert(left.join("note.txt"));
+        self.state.tab_mut(PaneId::Left).marked.insert(left.join("sub"));
+        self.on_fkey(5, false, sender);
+        self.on_submit(&right.display().to_string(), sender);
+        if !self.wait_job(sender) || !right.join("note.txt").is_file() || !right.join("sub/b.txt").is_file() {
+            errors.push("copy failed".into());
+        }
+        self.reload_pane(PaneId::Left);
+        self.reload_pane(PaneId::Right);
+        self.state.tab_mut(PaneId::Left).marked.clear();
+        if !self.point_at(PaneId::Left, "move-me.txt") {
+            errors.push("missing move-me".into());
+        }
+        self.on_fkey(6, false, sender);
+        self.on_submit(&right.display().to_string(), sender);
+        if !self.wait_job(sender) || left.join("move-me.txt").exists() || !right.join("move-me.txt").is_file() {
+            errors.push("move failed".into());
+        }
+        self.reload_pane(PaneId::Right);
+        self.state.tab_mut(PaneId::Right).marked.clear();
+        if !self.point_at(PaneId::Right, "move-me.txt") {
+            errors.push("missing moved file".into());
+        }
+        self.on_fkey(6, false, sender);
+        self.on_submit(&left.display().to_string(), sender);
+        if !self.wait_job(sender) || !left.join("move-me.txt").is_file() {
+            errors.push("move back failed".into());
+        }
+
+        self.state.active = PaneId::Left;
+        self.on_fkey(7, false, sender);
+        self.on_submit("created", sender);
+        if !left.join("created").is_dir() {
+            errors.push("mkdir failed".into());
+        }
+        self.reload_pane(PaneId::Left);
+        self.state.tab_mut(PaneId::Left).marked.clear();
+        if !self.point_at(PaneId::Left, "created") {
+            errors.push("missing created".into());
+        }
+        self.on_fkey(6, true, sender);
+        self.on_submit("renamed", sender);
+        if !left.join("renamed").is_dir() {
+            errors.push("rename failed".into());
+        }
+
+        let trash_me = left.join("trash-me.txt");
+        let _ = std::fs::write(&trash_me, b"trash");
+        self.reload_pane(PaneId::Left);
+        self.state.tab_mut(PaneId::Left).marked.clear();
+        if !self.point_at(PaneId::Left, "trash-me.txt") {
+            errors.push("missing trash file".into());
+        }
+        self.on_fkey(8, false, sender);
+        self.on_submit("", sender);
+        let mut trashed = false;
+        for _ in 0..300 {
+            if !trash_me.exists() {
+                trashed = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !trashed {
+            errors.push("trash failed".into());
+        }
+
+        self.reload_pane(PaneId::Left);
+        if !self.point_at(PaneId::Left, "note.txt") {
+            errors.push("missing note".into());
+        }
+        self.open_lister();
+        let lister_text = self.lister.as_ref().map(|ui| {
+            let buf = ui.view.buffer();
+            buf.text(&buf.start_iter(), &buf.end_iter(), false).to_string()
+        });
+        if !lister_text.unwrap_or_default().contains("hello comarchy") {
+            errors.push("lister text".into());
+        }
+        self.close_lister();
+
+        self.state.quick_view = true;
+        self.preview.generation = self.state.preview_gen;
+        self.preview.text = "hello comarchy\n".into();
+        self.sync();
+        if self.shell.panes[1].stack.visible_child_name().as_deref() != Some("preview") {
+            errors.push("quick view hidden".into());
+        }
+        let preview = self.shell.panes[1].preview.buffer();
+        if !preview.text(&preview.start_iter(), &preview.end_iter(), false).contains("hello comarchy") {
+            errors.push("quick view text".into());
+        }
+        let stale_gen = self.state.preview_gen;
+        if !self.point_at(PaneId::Left, "move-me.txt") {
+            errors.push("missing preview target".into());
+        }
+        let mut slot = lister::PreviewSlot { generation: self.state.preview_gen, text: String::new() };
+        if lister::apply_preview(&mut slot, stale_gen, "stale".into()) {
+            errors.push("stale preview applied".into());
+        }
+        self.preview.generation = self.state.preview_gen;
+        self.preview.text = "move\n".into();
+        self.sync();
+        let preview = self.shell.panes[1].preview.buffer();
+        if !preview.text(&preview.start_iter(), &preview.end_iter(), false).contains("move") {
+            errors.push("quick view follow".into());
+        }
+        self.state.quick_view = false;
+        self.sync();
+        if self.shell.panes[1].stack.visible_child_name().as_deref() != Some("list") {
+            errors.push("quick view stayed".into());
+        }
+
+        if errors.is_empty() {
+            println!("SMOKE_OK");
+            std::process::exit(0);
+        }
+        eprintln!("SMOKE_FAIL {}", errors.join("; "));
+        std::process::exit(1);
+    }
+
+    fn wait_job(&mut self, sender: &ComponentSender<Self>) -> bool {
+        for _ in 0..300 {
+            self.poll_job(sender);
+            if self.job.is_none() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    fn reload_pane(&mut self, id: PaneId) {
+        let path = self.state.tab(id).path.clone();
+        let Ok(entries) = comarchy::listing::read_dir(&path) else { return };
+        let tab = self.state.pane(id).active;
+        let token = self.state.tab(id).token;
+        self.state.apply_listing(id, tab, token, entries);
+        self.touch(id);
+    }
+
+    fn touch(&mut self, id: PaneId) {
+        self.dirty[id.index()] = true;
+    }
+
+    fn touch_both(&mut self) {
+        self.dirty = [true, true];
+    }
+
+    fn move_list(&mut self, delta: isize) {
+        self.state.move_cursor(delta);
+        self.focus_list();
+    }
+
+    fn focus_list(&self) {
+        self.shell.panes[self.state.active.index()].list.grab_focus();
+    }
+
+    fn point_at(&mut self, id: PaneId, name: &str) -> bool {
+        self.state.active = id;
+        let pos = {
+            let vis = self.state.visible(id);
+            let entries = &self.state.tab(id).entries;
+            vis.iter().position(|&i| entries[i].name.as_ref() == name)
+        };
+        let Some(pos) = pos else { return false };
+        self.state.tab_mut(id).cursor = pos;
+        self.state.preview_gen = self.state.preview_gen.wrapping_add(1);
+        true
+    }
+}
+
+fn tab_labels(titles: &[String], active: usize) -> Vec<String> {
+    titles
+        .iter()
+        .enumerate()
+        .map(|(i, title)| if i == active { format!("[{title}]") } else { title.clone() })
+        .collect()
+}
+
+fn tabs_current(tabs: &gtk::Box) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut child = tabs.first_child();
+    while let Some(widget) = child {
+        if let Some(button) = widget.downcast_ref::<gtk::Button>() {
+            out.push(button.label().map(|s| s.to_string()).unwrap_or_default());
+        }
+        child = widget.next_sibling();
+    }
+    out
+}
+
+fn items_into(state: &AppState, dest_dir: &Path) -> Vec<(PathBuf, PathBuf)> {
+    state.selected_paths(state.active).into_iter().map(|src| {
+        let name = src.file_name().unwrap_or_default().to_os_string();
+        (src, dest_dir.join(name))
+    }).collect()
+}
+
+fn install_usr1() {
+    unsafe {
+        libc::signal(libc::SIGUSR1, on_usr1 as *const () as libc::sighandler_t);
+    }
+}
+
+fn on_usr1(_: i32) {
+    USR1.store(true, Ordering::Relaxed);
+}
+
+fn take_usr1() -> bool {
+    USR1.swap(false, Ordering::Relaxed)
+}
+
+static USR1: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME").map(PathBuf::from).filter(|p| p.exists()).unwrap_or_else(|| PathBuf::from("/"))
+}
+
+fn smoke_dirs() -> (PathBuf, PathBuf) {
+    let base = home_dir().join("comarchy-smoke");
+    let left = base.join("left");
+    let right = base.join("right");
+    let _ = std::fs::remove_dir_all(&base);
+    let _ = std::fs::create_dir_all(left.join("sub"));
+    let _ = std::fs::create_dir_all(&right);
+    let _ = std::fs::write(left.join("note.txt"), "hello comarchy\n");
+    let _ = std::fs::write(left.join("sub").join("b.txt"), "nested\n");
+    let _ = std::fs::write(left.join("move-me.txt"), "move\n");
+    (left, right)
+}
+
+fn gio_trash(path: &Path) -> std::io::Result<()> {
+    let file = gtk::gio::File::for_path(path);
+    if file.trash(gtk::gio::Cancellable::NONE).is_ok() {
+        return Ok(());
+    }
+    let root = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".local/share"));
+    let files = root.join("Trash/files");
+    std::fs::create_dir_all(&files)?;
+    let name = path.file_name().unwrap_or_default();
+    let dest = files.join(name);
+    if std::fs::rename(path, &dest).is_err() {
+        std::fs::copy(path, &dest)?;
+        let meta = std::fs::symlink_metadata(path)?;
+        if meta.is_dir() && !meta.file_type().is_symlink() {
+            std::fs::remove_dir_all(path)?;
+        } else {
+            std::fs::remove_file(path)?;
+        }
+    }
+    Ok(())
+}
