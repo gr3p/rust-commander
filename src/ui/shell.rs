@@ -3,6 +3,8 @@ use relm4::gtk::gio;
 use relm4::gtk::prelude::*;
 use relm4::RelmWidgetExt;
 
+use comarchy::listing::SortKey;
+
 use super::row::{self, EntryObject};
 
 pub struct PaneUi {
@@ -11,7 +13,7 @@ pub struct PaneUi {
     pub tabs: gtk::Box,
     pub filter: gtk::Entry,
     pub stack: gtk::Stack,
-    pub list: gtk::ListView,
+    pub list: gtk::ColumnView,
     pub store: gio::ListStore,
     pub selection: gtk::SingleSelection,
     pub preview: gtk::TextView,
@@ -22,6 +24,7 @@ pub struct Shell {
     pub window: gtk::Window,
     pub panes: [PaneUi; 2],
     pub status: gtk::Label,
+    pub command: gtk::Entry,
     pub css: gtk::CssProvider,
     pub f_labels: Vec<String>,
 }
@@ -54,6 +57,17 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
     status.set_margin_start(8);
     root.append(&status);
 
+    let command = gtk::Entry::new();
+    command.set_hexpand(true);
+    command.set_margin_start(4);
+    command.set_margin_end(4);
+    command.set_margin_top(4);
+    let tx = sender.clone();
+    command.connect_activate(move |entry| {
+        tx.emit(super::msg::Msg::Command(entry.text().to_string()));
+    });
+    root.append(&command);
+
     let fbar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     fbar.add_css_class("fbar");
     fbar.set_margin_all(4);
@@ -81,9 +95,15 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     let tx = sender.clone();
     let win = window.clone();
+    let command_keys = command.clone();
     keys.connect_key_pressed(move |_, key, _, mods| {
         let focused = relm4::gtk::prelude::GtkWindowExt::focus(&win);
         let typing = focused.is_some_and(|w| w.downcast_ref::<gtk::Entry>().is_some());
+        let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+        let ctrl_arrow = ctrl && matches!(key, gtk::gdk::Key::Left | gtk::gdk::Key::Right | gtk::gdk::Key::KP_Left | gtk::gdk::Key::KP_Right);
+        if gtk::prelude::WidgetExt::has_focus(&command_keys) && ctrl_arrow {
+            return gtk::glib::Propagation::Proceed;
+        }
         if typing && !is_command(key, mods) {
             return gtk::glib::Propagation::Proceed;
         }
@@ -96,8 +116,67 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
         window: window.clone(),
         panes: [left, right],
         status,
+        command,
         css,
         f_labels,
+    }
+}
+
+fn bind_header_clicks(list: &gtk::ColumnView, index: usize, sender: &relm4::Sender<super::msg::Msg>) {
+    let keys = [SortKey::Name, SortKey::Ext, SortKey::Size, SortKey::Time, SortKey::Attr];
+    let sender = sender.clone();
+    let bound = std::rc::Rc::new(std::cell::Cell::new(false));
+    let list_for_map = list.clone();
+    let try_bind = {
+        let bound = std::rc::Rc::clone(&bound);
+        move |list: &gtk::ColumnView| {
+            if bound.get() {
+                return;
+            }
+            let titles = header_titles(list);
+            if titles.len() != keys.len() {
+                return;
+            }
+            for (title, key) in titles.into_iter().zip(keys) {
+                let Some(label) = title_label(&title) else { continue };
+                label.set_can_target(true);
+                let click = gtk::GestureClick::new();
+                let tx = sender.clone();
+                click.connect_released(move |_, n, _, _| {
+                    if n == 1 {
+                        tx.emit(super::msg::Msg::Sort(index, key));
+                    }
+                });
+                label.add_controller(click);
+            }
+            bound.set(true);
+        }
+    };
+    try_bind(list);
+    if !bound.get() {
+        list_for_map.connect_map(move |list| try_bind(list));
+    }
+}
+
+pub fn header_titles(list: &gtk::ColumnView) -> Vec<gtk::Widget> {
+    let mut titles = Vec::new();
+    collect_titles(list.upcast_ref(), &mut titles);
+    titles
+}
+
+fn title_label(title: &gtk::Widget) -> Option<gtk::Label> {
+    title.first_child()?.first_child()?.downcast().ok()
+}
+
+fn collect_titles(widget: &gtk::Widget, out: &mut Vec<gtk::Widget>) {
+    if widget.type_().name() == "GtkColumnViewTitle" {
+        out.push(widget.clone());
+        return;
+    }
+    let mut child = widget.first_child();
+    while let Some(next) = child {
+        collect_titles(&next, out);
+        child = next.next_sibling();
     }
 }
 
@@ -141,8 +220,9 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>) -> PaneUi {
     let frame = gtk::Frame::new(None);
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let tabs = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    tabs.set_margin_all(4);
+    tabs.set_visible(false);
     let path = gtk::Entry::new();
+    path.add_css_class("path");
     path.set_hexpand(true);
     let tx = sender.clone();
     path.connect_activate(move |entry| {
@@ -165,9 +245,14 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>) -> PaneUi {
         }
         tx.emit(super::msg::Msg::Cursor(index, sel.selected()));
     });
-    let list = gtk::ListView::new(Some(selection.clone()), Some(row::factory()));
+    let list = gtk::ColumnView::new(Some(selection.clone()));
     list.set_hexpand(true);
     list.set_vexpand(true);
+    list.set_show_column_separators(true);
+    for col in row::file_columns() {
+        list.append_column(&col);
+    }
+    bind_header_clicks(&list, index, sender);
     let tx = sender.clone();
     list.connect_activate(move |_, _| tx.emit(super::msg::Msg::Activate(index)));
     let scroll = gtk::ScrolledWindow::new();
@@ -176,7 +261,11 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>) -> PaneUi {
     let preview = gtk::TextView::new();
     preview.set_editable(false);
     preview.set_monospace(true);
-    preview.set_wrap_mode(gtk::WrapMode::WordChar);
+    preview.set_wrap_mode(gtk::WrapMode::None);
+    preview.set_left_margin(8);
+    preview.set_right_margin(8);
+    preview.set_top_margin(8);
+    preview.set_bottom_margin(8);
     let preview_scroll = gtk::ScrolledWindow::new();
     preview_scroll.set_child(Some(&preview));
     preview_scroll.set_vexpand(true);

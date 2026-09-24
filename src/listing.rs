@@ -1,5 +1,6 @@
 use std::fs;
 use std::io;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
@@ -11,6 +12,7 @@ pub enum SortKey {
     Ext,
     Time,
     Size,
+    Attr,
 }
 
 impl SortKey {
@@ -19,6 +21,7 @@ impl SortKey {
             "ext" => Self::Ext,
             "time" => Self::Time,
             "size" => Self::Size,
+            "attr" => Self::Attr,
             _ => Self::Name,
         }
     }
@@ -29,6 +32,7 @@ impl SortKey {
             Self::Ext => "ext",
             Self::Time => "time",
             Self::Size => "size",
+            Self::Attr => "attr",
         }
     }
 }
@@ -70,6 +74,7 @@ pub fn read_dir(path: &Path) -> io::Result<Vec<Entry>> {
             name: name.into(),
             size: if is_dir { 0 } else { meta.len() },
             mtime,
+            mode: meta.permissions().mode(),
             flags,
         });
     }
@@ -106,9 +111,10 @@ fn cmp_entries(a: &Entry, b: &Entry, sort: SortKey, ascending: bool) -> std::cmp
     }
     let ord = match sort {
         SortKey::Name => cmp_name(&a.name, &b.name),
-        SortKey::Ext => ext_key(&a.name).cmp(ext_key(&b.name)).then(cmp_name(&a.name, &b.name)),
+        SortKey::Ext => extension(&a.name).cmp(extension(&b.name)).then(cmp_name(&a.name, &b.name)),
         SortKey::Time => a.mtime.cmp(&b.mtime).then(cmp_name(&a.name, &b.name)),
         SortKey::Size => a.size.cmp(&b.size).then(cmp_name(&a.name, &b.name)),
+        SortKey::Attr => (a.mode & 0o7777).cmp(&(b.mode & 0o7777)).then(cmp_name(&a.name, &b.name)),
     };
     if ascending { ord } else { ord.reverse() }
 }
@@ -117,11 +123,38 @@ fn cmp_name(a: &str, b: &str) -> std::cmp::Ordering {
     a.to_lowercase().cmp(&b.to_lowercase())
 }
 
-fn ext_key(name: &str) -> &str {
+pub fn extension(name: &str) -> &str {
     match name.rsplit_once('.') {
         Some((base, ext)) if !base.is_empty() => ext,
         _ => "",
     }
+}
+
+// st_mode: file type, then rwx for user, group and other.
+pub fn format_attr(mode: u32) -> String {
+    if mode == 0 {
+        return String::new();
+    }
+    let mut out = String::with_capacity(10);
+    out.push(match mode & 0o170000 {
+        0o040000 => 'd',
+        0o120000 => 'l',
+        _ => '-',
+    });
+    for (bit, ch) in [
+        (0o400, 'r'),
+        (0o200, 'w'),
+        (0o100, 'x'),
+        (0o040, 'r'),
+        (0o020, 'w'),
+        (0o010, 'x'),
+        (0o004, 'r'),
+        (0o002, 'w'),
+        (0o001, 'x'),
+    ] {
+        out.push(if mode & bit != 0 { ch } else { '-' });
+    }
+    out
 }
 
 pub fn format_size(n: u64) -> String {

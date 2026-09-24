@@ -16,7 +16,13 @@ mod imp {
         #[property(get, set)]
         name: RefCell<String>,
         #[property(get, set)]
-        meta: RefCell<String>,
+        ext: RefCell<String>,
+        #[property(get, set)]
+        size_text: RefCell<String>,
+        #[property(get, set)]
+        date: RefCell<String>,
+        #[property(get, set)]
+        attr: RefCell<String>,
         #[property(get, set)]
         marked: Cell<bool>,
         #[property(get, set)]
@@ -39,64 +45,99 @@ glib::wrapper! {
 
 impl EntryObject {
     pub fn from_entry(entry: &Entry, marked: bool) -> Self {
-        let meta = if entry.name.as_ref() == ".." {
-            String::new()
-        } else if entry.is_dir() {
-            format!("<DIR>  {}", listing::format_mtime(entry.mtime))
-        } else {
-            format!(
-                "{:>10}  {}",
-                listing::format_size(entry.size),
-                listing::format_mtime(entry.mtime)
-            )
-        };
+        let skip = entry.name.as_ref() == "..";
         let name = if entry.is_symlink() {
             format!("{}@", entry.name)
-        } else if entry.is_dir() && entry.name.as_ref() != ".." {
+        } else if entry.is_dir() && !skip {
             format!("{}/", entry.name)
         } else {
             entry.name.to_string()
         };
         glib::Object::builder()
             .property("name", name)
-            .property("meta", meta)
+            .property("ext", if skip { String::new() } else { listing::extension(&entry.name).to_string() })
+            .property("size-text", size_text(entry, skip))
+            .property("date", if skip { String::new() } else { listing::format_mtime(entry.mtime) })
+            .property("attr", listing::format_attr(entry.mode))
             .property("marked", marked)
             .property("is-dir", entry.is_dir())
             .build()
     }
 }
 
-pub fn factory() -> relm4::gtk::SignalListItemFactory {
+fn size_text(entry: &Entry, skip: bool) -> String {
+    if skip {
+        String::new()
+    } else if entry.is_dir() {
+        "<DIR>".into()
+    } else {
+        listing::format_size(entry.size)
+    }
+}
+
+pub fn file_columns() -> [relm4::gtk::ColumnViewColumn; 5] {
+    [
+        column("name", "Name", true, -1, 0.0, 8, 8, true, true),
+        column("ext", "Ext", false, 80, 0.0, 8, 8, false, false),
+        column("size", "Size", false, 96, 1.0, 8, 8, false, false),
+        column("time", "Date", false, 188, 0.0, 8, 16, false, false),
+        column("attr", "Attr", false, 120, 0.0, 8, 8, false, false),
+    ]
+}
+
+fn column(
+    id: &'static str,
+    title: &str,
+    expand: bool,
+    width: i32,
+    align: f32,
+    margin_start: i32,
+    margin_end: i32,
+    ellipsize: bool,
+    marked: bool,
+) -> relm4::gtk::ColumnViewColumn {
     use relm4::gtk;
     let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, item| {
+    factory.connect_setup(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().unwrap();
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        let name = gtk::Label::new(None);
-        name.set_xalign(0.0);
-        name.set_hexpand(true);
-        name.set_widget_name("name");
-        let meta = gtk::Label::new(None);
-        meta.set_xalign(1.0);
-        meta.set_widget_name("meta");
-        row.append(&name);
-        row.append(&meta);
-        item.set_child(Some(&row));
+        let label = gtk::Label::new(None);
+        label.set_xalign(align);
+        label.set_hexpand(expand);
+        label.set_margin_start(margin_start);
+        label.set_margin_end(margin_end);
+        if ellipsize {
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        }
+        item.set_child(Some(&label));
     });
-    factory.connect_bind(|_, item| {
+    factory.connect_bind(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().unwrap();
         let obj = item.item().unwrap().downcast::<EntryObject>().unwrap();
-        let row = item.child().unwrap().downcast::<gtk::Box>().unwrap();
-        let name = row.first_child().unwrap().downcast::<gtk::Label>().unwrap();
-        let meta = name.next_sibling().unwrap().downcast::<gtk::Label>().unwrap();
-        let prefix = if obj.marked() { "● " } else { "  " };
-        name.set_label(&format!("{prefix}{}", obj.name()));
-        meta.set_label(&obj.meta());
-        if obj.marked() {
-            name.add_css_class("marked");
-        } else {
-            name.remove_css_class("marked");
+        let label = item.child().unwrap().downcast::<gtk::Label>().unwrap();
+        let text = match id {
+            "ext" => obj.ext(),
+            "size" => obj.size_text(),
+            "time" => obj.date(),
+            "attr" => obj.attr(),
+            _ => {
+                let prefix = if obj.marked() { "● " } else { "  " };
+                format!("{prefix}{}", obj.name())
+            }
+        };
+        label.set_label(&text);
+        if marked {
+            if obj.marked() {
+                label.add_css_class("marked");
+            } else {
+                label.remove_css_class("marked");
+            }
         }
     });
-    factory
+    let col = gtk::ColumnViewColumn::new(Some(title), Some(factory));
+    col.set_expand(expand);
+    col.set_resizable(true);
+    if width > 0 {
+        col.set_fixed_width(width);
+    }
+    col
 }

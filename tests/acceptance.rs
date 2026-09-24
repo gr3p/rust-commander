@@ -92,6 +92,7 @@ const MEMORY: &[(&str, fn() -> Result<(), String>)] = &[
     ("visible_keeps_raw_order", visible_keeps_raw_order),
     ("hidden_files_follow_toggle", hidden_files_follow_toggle),
     ("sort_keys_order_entries", sort_keys_order_entries),
+    ("columns_ext_date_attr", columns_ext_date_attr),
     ("filter_keeps_substring", filter_keeps_substring),
     ("insert_mark_is_used", insert_mark_is_used),
     ("space_marks_without_moving_cursor", space_marks_without_moving_cursor),
@@ -105,6 +106,8 @@ const MEMORY: &[(&str, fn() -> Result<(), String>)] = &[
     ("theme_fallback_without_file", theme_fallback_without_file),
     ("places_include_home_and_root", places_include_home_and_root),
     ("external_argv", external_argv),
+    ("ctrl_arrow_shows_active_dir_on_other_pane", ctrl_arrow_shows_active_dir_on_other_pane),
+    ("terminal_argv_without_starting", terminal_argv_without_starting),
     ("quick_view_ignores_stale_generation", quick_view_ignores_stale_generation),
 ];
 
@@ -171,8 +174,8 @@ fn hidden_files_follow_toggle() -> Result<(), String> {
 
 fn sort_keys_order_entries() -> Result<(), String> {
     let entries = vec![
-        Entry { name: "b.txt".into(), size: 2, mtime: 20, flags: 0 },
-        Entry { name: "a.md".into(), size: 9, mtime: 10, flags: 0 },
+        Entry { name: "b.txt".into(), size: 2, mtime: 20, mode: 0, flags: 0 },
+        Entry { name: "a.md".into(), size: 9, mtime: 10, mode: 0, flags: 0 },
     ];
     let name = listing::visible_indices(&entries, SortKey::Name, true, true, "");
     eq(entries[name[0]].name.as_ref(), "a.md", "name")?;
@@ -182,6 +185,19 @@ fn sort_keys_order_entries() -> Result<(), String> {
     eq(entries[time[0]].name.as_ref(), "a.md", "time")?;
     let size = listing::visible_indices(&entries, SortKey::Size, true, true, "");
     eq(entries[size[0]].name.as_ref(), "b.txt", "size")
+}
+
+fn columns_ext_date_attr() -> Result<(), String> {
+    eq(listing::extension("a.md"), "md", "ext")?;
+    eq(listing::extension(".."), "", "dot ext")?;
+    eq(listing::format_attr(0o100644), "-rw-r--r--".into(), "file attr")?;
+    eq(listing::format_attr(0o040755), "drwxr-xr-x".into(), "dir attr")?;
+    let entries = vec![
+        Entry { name: "a".into(), size: 1, mtime: 1, mode: 0o100644, flags: 0 },
+        Entry { name: "b".into(), size: 1, mtime: 1, mode: 0o100755, flags: 0 },
+    ];
+    let vis = listing::visible_indices(&entries, SortKey::Attr, true, true, "");
+    eq(entries[vis[0]].name.as_ref(), "a", "attr sort")
 }
 
 fn filter_keeps_substring() -> Result<(), String> {
@@ -291,6 +307,33 @@ fn places_include_home_and_root() -> Result<(), String> {
     let places = comarchy::places::places(&home, &[]);
     if !places.iter().any(|(_, path)| path == &home) || !places.iter().any(|(_, path)| path == Path::new("/")) {
         return Err("places".into());
+    }
+    Ok(())
+}
+
+fn ctrl_arrow_shows_active_dir_on_other_pane() -> Result<(), String> {
+    let mut state = AppState::new(pb("/left"), pb("/right"));
+    state.tab_mut(PaneId::Left).cursor = 2;
+    let (dest, path, _) = state.mirror_to_other();
+    if dest != PaneId::Right || state.tab(PaneId::Left).cursor != 2 {
+        return Err("source moved".into());
+    }
+    eq(path, pb("/left"), "mirrored")?;
+    eq(state.tab(PaneId::Right).path.clone(), pb("/left"), "other pane")
+}
+
+fn terminal_argv_without_starting() -> Result<(), String> {
+    let dir = pb("/work");
+    let foot = external::terminal_start_with(Some("foot"), |_| false, &dir).ok_or("foot")?;
+    eq(foot, vec!["foot".to_string()], "env")?;
+    let gnome = external::terminal_start_with(None, |name| name == "gnome-terminal", &dir).ok_or("gnome")?;
+    eq(
+        gnome,
+        vec!["gnome-terminal".to_string(), "--working-directory".into(), "/work".into()],
+        "gnome",
+    )?;
+    if external::terminal_start_with(None, |_| false, &dir).is_some() {
+        return Err("missing terminal started".into());
     }
     Ok(())
 }
@@ -556,7 +599,7 @@ fn transfer(items: &[(PathBuf, PathBuf)], kind: Kind) -> Result<(), String> {
 }
 
 fn file(name: &str, size: u64) -> Entry {
-    Entry { name: name.into(), size, mtime: 1, flags: 0 }
+    Entry { name: name.into(), size, mtime: 1, mode: 0, flags: 0 }
 }
 
 fn pb(path: &str) -> PathBuf {

@@ -7,6 +7,7 @@ pub struct Entry {
     pub name: Box<str>,
     pub size: u64,
     pub mtime: i64,
+    pub mode: u32,
     pub flags: u8,
 }
 
@@ -16,6 +17,7 @@ impl Entry {
             name: "..".into(),
             size: 0,
             mtime: 0,
+            mode: 0,
             flags: DIR,
         }
     }

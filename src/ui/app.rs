@@ -58,6 +58,7 @@ pub struct App {
     dialog: Option<gtk::Window>,
     progress: Option<(gtk::Window, gtk::Label)>,
     lister: Option<ListerUi>,
+    output: Option<gtk::Window>,
     preview: lister::PreviewSlot,
     preview_sent: u64,
     smoke: bool,
@@ -114,6 +115,7 @@ impl SimpleComponent for App {
             dialog: None,
             progress: None,
             lister: None,
+            output: None,
             preview: lister::PreviewSlot::default(),
             preview_sent: 0,
             smoke,
@@ -123,6 +125,7 @@ impl SimpleComponent for App {
             &config::active_theme_path(),
         )));
         model.sync();
+        model.show_sort_indicator();
         for id in [PaneId::Left, PaneId::Right] {
             let path = model.state.tab(id).path.clone();
             let token = model.state.tab(id).token;
@@ -186,12 +189,18 @@ impl App {
                 self.state.active = PaneId::from_index(pane);
                 self.activate_cursor(sender);
             }
+            Msg::Sort(pane, key) => {
+                self.state.active = PaneId::from_index(pane);
+                self.set_sort(key);
+            }
             Msg::FilterChanged(pane, text) => {
                 self.state.pane_mut(PaneId::from_index(pane)).filter = text;
                 self.state.tab_mut(PaneId::from_index(pane)).cursor = 0;
                 self.touch(PaneId::from_index(pane));
             }
             Msg::Submit(text) => self.on_submit(&text, sender),
+            Msg::Command(line) => self.run_command(&line, sender),
+            Msg::CommandDone(text) => self.show_command_output(text),
             Msg::CancelAsk => {
                 self.ask = None;
                 self.close_dialog();
@@ -274,13 +283,18 @@ impl App {
                 Key::d | Key::D => self.add_bookmark(),
                 Key::q | Key::Q => {
                     self.state.quick_view = !self.state.quick_view;
-                    self.preview_sent = 0;
+                    if self.state.quick_view {
+                        self.note_preview_target();
+                        self.focus_list();
+                    }
                 }
                 Key::Tab | Key::ISO_Left_Tab => {
                     let id = self.state.active;
                     self.state.next_tab(id, shift);
                     self.touch(id);
+                    self.note_preview_target();
                 }
+                Key::Left | Key::KP_Left | Key::Right | Key::KP_Right => self.show_active_on_other(sender),
                 _ => {}
             }
             return;
@@ -306,6 +320,8 @@ impl App {
             Key::F8 | Key::Delete => self.on_fkey(8, shift, sender),
             Key::ISO_Left_Tab | Key::Tab => {
                 self.state.active = self.state.active.other();
+                self.note_preview_target();
+                self.focus_list();
             }
             Key::Insert => {
                 self.state.toggle_mark();
@@ -435,6 +451,9 @@ impl App {
                 let id = PaneId::from_index(pane);
                 if self.state.apply_listing(id, tab, token, entries) {
                     self.touch(id);
+                    if self.state.quick_view && id == self.state.active {
+                        self.state.preview_gen = self.state.preview_gen.wrapping_add(1);
+                    }
                 }
             }
             Err(err) => {
@@ -505,6 +524,34 @@ impl App {
         self.cfg.sort = self.state.sort.as_config().into();
         let _ = config::save(&self.cfg);
         self.touch_both();
+        self.show_sort_indicator();
+    }
+
+    fn show_sort_indicator(&self) {
+        let keys = [
+            comarchy::listing::SortKey::Name,
+            comarchy::listing::SortKey::Ext,
+            comarchy::listing::SortKey::Size,
+            comarchy::listing::SortKey::Time,
+            comarchy::listing::SortKey::Attr,
+        ];
+        let titles = ["Name", "Ext", "Size", "Date", "Attr"];
+        let arrow = if self.state.ascending { "↑" } else { "↓" };
+        for pane in &self.shell.panes {
+            let cols = pane.list.columns();
+            for i in 0..cols.n_items() {
+                let Some(col) = cols.item(i).and_then(|obj| obj.downcast::<gtk::ColumnViewColumn>().ok()) else { continue };
+                let Some(title) = titles.get(i as usize) else { continue };
+                let text = if keys[i as usize] == self.state.sort {
+                    format!("{title} {arrow}")
+                } else {
+                    (*title).to_string()
+                };
+                if col.title().as_deref() != Some(text.as_str()) {
+                    col.set_title(Some(&text));
+                }
+            }
+        }
     }
 
     fn current_name(&self) -> Option<String> {
@@ -681,14 +728,29 @@ impl App {
         }
     }
 
+    fn note_preview_target(&mut self) {
+        if self.state.quick_view {
+            self.state.preview_gen = self.state.preview_gen.wrapping_add(1);
+        }
+    }
+
     fn kick_preview(&mut self, sender: &ComponentSender<Self>) {
         if !self.state.quick_view || self.preview_sent == self.state.preview_gen {
             return;
         }
-        let Some(path) = self.file_under_cursor() else { return };
         let generation = self.state.preview_gen;
         self.preview.generation = generation;
         self.preview_sent = generation;
+        let Some(path) = self.file_under_cursor() else {
+            self.preview.text = self
+                .state
+                .cursor_entry(self.state.active)
+                .filter(|entry| entry.is_dir())
+                .map(|entry| format!("{}/", entry.name))
+                .unwrap_or_default();
+            self.paint_preview();
+            return;
+        };
         let tx = sender.input_sender().clone();
         std::thread::spawn(move || {
             let text = match lister::Reader::open(&path) {
@@ -700,6 +762,15 @@ impl App {
             };
             tx.emit(Msg::Preview { generation, text });
         });
+    }
+
+    fn paint_preview(&self) {
+        let ui = &self.shell.panes[self.state.active.other().index()];
+        let buf = ui.preview.buffer();
+        let current = buf.text(&buf.start_iter(), &buf.end_iter(), false);
+        if current.as_str() != self.preview.text {
+            buf.set_text(&self.preview.text);
+        }
     }
 
     fn file_under_cursor(&self) -> Option<PathBuf> {
@@ -972,6 +1043,10 @@ impl App {
         if self.shell.status.text().as_str() != self.status {
             self.shell.status.set_text(&self.status);
         }
+        let prompt = self.state.tab(self.state.active).path.display().to_string();
+        if self.shell.command.placeholder_text().as_deref() != Some(prompt.as_str()) {
+            self.shell.command.set_placeholder_text(Some(&prompt));
+        }
         SYNCING.store(false, Ordering::Relaxed);
     }
 
@@ -1005,6 +1080,31 @@ impl App {
         }
         if !self.shell.panes[0].frame.has_css_class("pane-active") {
             errors.push("left frame".into());
+        }
+        for pane in &self.shell.panes {
+            let cols = pane.list.columns();
+            let mut titles = Vec::new();
+            let mut date_resizable = false;
+            for i in 0..cols.n_items() {
+                let Some(col) = cols.item(i).and_then(|obj| obj.downcast::<gtk::ColumnViewColumn>().ok()) else { continue };
+                if let Some(title) = col.title() {
+                    if title.contains("Date") {
+                        date_resizable = col.is_resizable();
+                    }
+                    titles.push(title.to_string());
+                }
+            }
+            for want in ["Name", "Ext", "Size", "Date", "Attr"] {
+                if !titles.iter().any(|text| text.contains(want)) {
+                    errors.push(format!("missing column {want}"));
+                }
+            }
+            if !date_resizable {
+                errors.push("date column fixed".into());
+            }
+            if super::shell::header_titles(&pane.list).len() != 5 {
+                errors.push("header titles".into());
+            }
         }
         let before = self.shell.panes[0].selection.selected();
         self.state.active = PaneId::Left;
@@ -1175,6 +1275,71 @@ impl App {
 
     fn touch_both(&mut self) {
         self.dirty = [true, true];
+    }
+
+    fn show_active_on_other(&mut self, sender: &ComponentSender<Self>) {
+        let (dest, path, token) = self.state.mirror_to_other();
+        let tab = self.state.pane(dest).active;
+        self.spawn_load(sender, dest, tab, path, token);
+    }
+
+    fn run_command(&mut self, line: &str, sender: &ComponentSender<Self>) {
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            return;
+        }
+        self.shell.command.set_text("");
+        let dir = self.state.tab(self.state.active).path.clone();
+        if line == "terminal" {
+            self.open_terminal(&dir);
+            return;
+        }
+        comarchy::log::info(&format!("cmd {line} in {}", dir.display()));
+        let tx = sender.input_sender().clone();
+        std::thread::spawn(move || {
+            let text = comarchy::external::run_shell(&dir, &line).unwrap_or_else(|err| err.to_string());
+            tx.emit(Msg::CommandDone(text));
+        });
+    }
+
+    fn open_terminal(&mut self, dir: &std::path::Path) {
+        let Some(argv) = comarchy::external::terminal_start(dir) else {
+            let msg = "No terminal emulator".to_string();
+            comarchy::log::error(&msg);
+            self.status = msg;
+            return;
+        };
+        let mut cmd = std::process::Command::new(&argv[0]);
+        cmd.args(&argv[1..]).current_dir(dir);
+        if let Err(err) = cmd.spawn() {
+            let msg = format!("terminal: {err}");
+            comarchy::log::error(&msg);
+            self.status = msg;
+        }
+    }
+
+    fn show_command_output(&mut self, text: String) {
+        if text.trim().is_empty() {
+            self.status = "Done".into();
+            return;
+        }
+        if let Some(win) = self.output.take() {
+            win.close();
+        }
+        let win = gtk::Window::new();
+        win.set_title(Some("Command"));
+        win.set_transient_for(Some(&self.shell.window));
+        win.set_default_width(720);
+        win.set_default_height(420);
+        let view = gtk::TextView::new();
+        view.set_editable(false);
+        view.set_monospace(true);
+        view.buffer().set_text(&text);
+        let scroll = gtk::ScrolledWindow::new();
+        scroll.set_child(Some(&view));
+        win.set_child(Some(&scroll));
+        win.present();
+        self.output = Some(win);
     }
 
     fn move_list(&mut self, delta: isize) {

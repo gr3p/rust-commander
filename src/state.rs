@@ -190,6 +190,17 @@ impl AppState {
         if advance && cursor + 1 < vis.len() {
             tab.cursor = cursor + 1;
         }
+        if advance && cursor + 1 < vis.len() {
+            self.preview_gen = self.preview_gen.wrapping_add(1);
+        }
+    }
+
+    pub fn mirror_to_other(&mut self) -> (PaneId, PathBuf, u64) {
+        let src = self.active;
+        let path = self.tab(src).path.clone();
+        let dest = src.other();
+        let token = self.navigate(dest, path.clone(), true);
+        (dest, path, token)
     }
 
     pub fn navigate(&mut self, id: PaneId, path: PathBuf, record: bool) -> u64 {

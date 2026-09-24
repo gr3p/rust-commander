@@ -84,6 +84,22 @@ pub fn load_named(name: &str) -> Palette {
 pub fn stylesheet(p: &Palette) -> String {
     format!(
         r#"
+window,
+window.csd,
+decoration,
+headerbar,
+.titlebar,
+frame,
+frame > border,
+.pane,
+.pane-active,
+entry,
+button,
+listview,
+listview > row,
+scrolledwindow {{
+  border-radius: 0;
+}}
 window {{
   background: {bg};
   color: {fg};
@@ -110,6 +126,19 @@ entry {{
   background: {sel};
   color: {fg};
   caret-color: {bright};
+}}
+entry.path {{
+  background: {bg};
+  border: none;
+  border-bottom: 1px solid {muted};
+}}
+columnview > header > button {{
+  background: transparent;
+  color: {fg};
+  border-radius: 0;
+  box-shadow: none;
+  padding: 2px 8px;
+  min-height: 0;
 }}
 textview, textview text {{
   background: {bg};
