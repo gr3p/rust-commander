@@ -15,7 +15,6 @@ pub enum Msg {
     Key(Key, ModifierType),
     FKey(u8, bool),
     Listed(usize, usize, u64, Result<Vec<comarchy::entry::Entry>, String>),
-    PathGo(usize, String),
     Cursor(usize, u32),
     Activate(usize),
     FilterChanged(usize, String),
@@ -29,6 +28,10 @@ pub enum Msg {
     Preview { generation: u64, text: String },
     ReloadTheme,
     PickPlace(usize, std::path::PathBuf),
+    Mount(std::path::PathBuf),
+    ColumnSized(usize),
+    ToggleAutoColumns,
+    CloseSettings,
     Smoke,
     JobDone(Result<ops::Report, String>),
 }

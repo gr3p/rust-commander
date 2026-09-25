@@ -11,12 +11,14 @@ use relm4::RelmWidgetExt;
 
 use comarchy::config::{self, Bookmark, Config};
 use comarchy::entry::Entry;
-use comarchy::lister::{self, ViewMode};
+use comarchy::lister::{self, Charset, ViewMode};
 use comarchy::ops::{self, Choice, Kind, Progress, Report};
 use comarchy::state::{AppState, PaneId};
 use comarchy::theme::{self, Palette};
 
 use super::msg::{Msg, SYNCING};
+
+static SIZING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 use super::row::EntryObject;
 use super::shell::{self, Shell};
 
@@ -47,6 +49,11 @@ struct ListerUi {
     mode: ViewMode,
 }
 
+struct SettingsUi {
+    window: gtk::Window,
+    value: gtk::Label,
+}
+
 pub struct App {
     state: AppState,
     shell: Shell,
@@ -58,9 +65,11 @@ pub struct App {
     dialog: Option<gtk::Window>,
     progress: Option<(gtk::Window, gtk::Label)>,
     lister: Option<ListerUi>,
+    charset: Charset,
     output: Option<gtk::Window>,
     preview: lister::PreviewSlot,
     preview_sent: u64,
+    settings: Option<SettingsUi>,
     smoke: bool,
 }
 
@@ -80,7 +89,7 @@ impl SimpleComponent for App {
 
     view! {
         gtk::Window {
-            set_title: Some("Comarchy"),
+            set_title: Some("Commander"),
             set_default_width: 1200,
             set_default_height: 760,
         }
@@ -115,15 +124,18 @@ impl SimpleComponent for App {
             dialog: None,
             progress: None,
             lister: None,
+            charset: Charset::Utf8,
             output: None,
             preview: lister::PreviewSlot::default(),
             preview_sent: 0,
+            settings: None,
             smoke,
         };
         model.apply_css(&theme::load_named(&theme::active_name(
             &model.cfg.theme,
             &config::active_theme_path(),
         )));
+        model.watch_columns(&sender);
         model.sync();
         model.show_sort_indicator();
         for id in [PaneId::Left, PaneId::Right] {
@@ -170,14 +182,6 @@ impl App {
             Msg::Key(key, mods) => self.on_key(key, mods, sender),
             Msg::FKey(n, shift) => self.on_fkey(n, shift, sender),
             Msg::Listed(pane, tab, token, result) => self.on_listed(pane, tab, token, result),
-            Msg::PathGo(pane, text) => {
-                let id = PaneId::from_index(pane);
-                self.state.active = id;
-                let path = PathBuf::from(text);
-                let token = self.state.navigate(id, path.clone(), true);
-                let tab = self.state.pane(id).active;
-                self.spawn_load(sender, id, tab, path, token);
-            }
             Msg::Cursor(pane, pos) => {
                 self.state.active = PaneId::from_index(pane);
                 let current = self.state.tab(self.state.active).cursor;
@@ -230,12 +234,26 @@ impl App {
                 self.close_dialog();
                 self.spawn_load(sender, id, tab, path, token);
             }
+            Msg::ColumnSized(pane) => self.on_column_sized(pane),
+            Msg::ToggleAutoColumns => self.toggle_auto_columns(),
+            Msg::CloseSettings => self.close_settings(),
+            Msg::Mount(path) => {
+                let id = self.state.active;
+                let token = self.state.navigate(id, path.clone(), true);
+                let tab = self.state.pane(id).active;
+                self.spawn_load(sender, id, tab, path, token);
+                self.focus_list();
+            }
             Msg::JobDone(result) => self.finish_job(result, sender),
             Msg::Smoke => self.run_smoke(sender),
         }
     }
 
     fn on_key(&mut self, key: Key, mods: ModifierType, sender: &ComponentSender<Self>) {
+        if key == Key::F12 && !mods.contains(ModifierType::CONTROL_MASK) && !mods.contains(ModifierType::ALT_MASK) {
+            self.toggle_settings(sender);
+            return;
+        }
         let ctrl = mods.contains(ModifierType::CONTROL_MASK);
         let shift = mods.contains(ModifierType::SHIFT_MASK);
         let alt = mods.contains(ModifierType::ALT_MASK);
@@ -245,6 +263,9 @@ impl App {
                 Key::_1 => self.lister_set_mode(ViewMode::Text),
                 Key::_2 => self.lister_set_mode(ViewMode::Binary),
                 Key::_3 => self.lister_set_mode(ViewMode::Hex),
+                Key::a | Key::A => self.set_charset(Charset::Ansi, sender),
+                // S is ASCII/DOS in Total Commander. D does the same.
+                Key::s | Key::S | Key::d | Key::D => self.set_charset(Charset::Ascii, sender),
                 Key::F2 => self.lister_scroll(0),
                 Key::Down | Key::j => self.lister_scroll(64),
                 Key::Up | Key::k => self.lister_scroll(-64),
@@ -312,7 +333,7 @@ impl App {
         }
         match key {
             Key::F2 => self.refresh_active(sender),
-            Key::F3 => self.open_lister(),
+            Key::F3 => self.open_lister(sender),
             Key::F4 => self.open_external(false),
             Key::F5 => self.on_fkey(5, shift, sender),
             Key::F6 => self.on_fkey(6, shift, sender),
@@ -347,6 +368,8 @@ impl App {
                 self.state.set_cursor(usize::MAX);
                 self.focus_list();
             }
+            Key::a | Key::A if self.state.quick_view => self.set_charset(Charset::Ansi, sender),
+            Key::s | Key::S | Key::d | Key::D if self.state.quick_view => self.set_charset(Charset::Ascii, sender),
             Key::Escape => {
                 self.state.quick_view = false;
                 self.state.pane_mut(self.state.active).filter.clear();
@@ -362,7 +385,8 @@ impl App {
         let tx = sender.input_sender().clone();
         match n {
             2 => self.refresh_active(sender),
-            3 => self.open_lister(),
+            3 => self.open_lister(sender),
+            12 => self.toggle_settings(sender),
             4 => self.open_external(false),
             5 if shift => {
                 self.ask = Some(Ask::CopyAs);
@@ -674,14 +698,14 @@ impl App {
         }
     }
 
-    fn open_lister(&mut self) {
+    fn open_lister(&mut self, sender: &ComponentSender<Self>) {
         let Some(path) = self.file_under_cursor() else { return };
         let Ok(mut reader) = lister::Reader::open(&path) else {
             self.status = format!("Cannot open {}", path.display());
             return;
         };
         let bytes = reader.read_window().unwrap_or_default();
-        let text = lister::render(ViewMode::Text, &bytes, reader.offset);
+        let text = lister::render(ViewMode::Text, self.charset, &bytes, reader.offset);
         self.close_lister();
         let window = gtk::Window::new();
         window.set_title(Some(&path.display().to_string()));
@@ -695,30 +719,57 @@ impl App {
         let scroll = gtk::ScrolledWindow::new();
         scroll.set_child(Some(&view));
         window.set_child(Some(&scroll));
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let tx = sender.input_sender().clone();
+        keys.connect_key_pressed(move |_, key, _, mods| {
+            tx.emit(Msg::Key(key, mods));
+            gtk::glib::Propagation::Stop
+        });
+        window.add_controller(keys);
         window.present();
         self.lister = Some(ListerUi { window, view, reader, mode: ViewMode::Text });
     }
 
     fn lister_set_mode(&mut self, mode: ViewMode) {
+        if let Some(lister) = self.lister.as_mut() {
+            lister.mode = mode;
+        }
+        self.lister_redraw();
+    }
+
+    fn lister_scroll(&mut self, delta: i64) {
+        if let Some(lister) = self.lister.as_mut() {
+            if delta != 0 {
+                lister.reader.scroll(delta);
+            } else {
+                lister.reader.offset = lister.reader.offset.min(lister.reader.len);
+            }
+        }
+        self.lister_redraw();
+    }
+
+    fn lister_redraw(&mut self) {
+        let charset = self.charset;
         let Some(lister) = self.lister.as_mut() else { return };
-        lister.mode = mode;
+        let mode = lister.mode;
         if let Ok(bytes) = lister.reader.read_window() {
-            let text = lister::render(mode, &bytes, lister.reader.offset);
+            let text = lister::render(mode, charset, &bytes, lister.reader.offset);
             lister.view.buffer().set_text(&text);
         }
     }
 
-    fn lister_scroll(&mut self, delta: i64) {
-        let Some(lister) = self.lister.as_mut() else { return };
-        if delta != 0 {
-            lister.reader.scroll(delta);
-        } else {
-            lister.reader.offset = lister.reader.offset.min(lister.reader.len);
-        }
-        let mode = lister.mode;
-        if let Ok(bytes) = lister.reader.read_window() {
-            let text = lister::render(mode, &bytes, lister.reader.offset);
-            lister.view.buffer().set_text(&text);
+    fn set_charset(&mut self, charset: Charset, sender: &ComponentSender<Self>) {
+        self.charset = charset;
+        self.status = match charset {
+            Charset::Utf8 => "UTF-8".into(),
+            Charset::Ansi => "ANSI".into(),
+            Charset::Ascii => "ASCII".into(),
+        };
+        self.lister_redraw();
+        if self.state.quick_view {
+            self.note_preview_target();
+            self.kick_preview(sender);
         }
     }
 
@@ -752,11 +803,12 @@ impl App {
             return;
         };
         let tx = sender.input_sender().clone();
+        let charset = self.charset;
         std::thread::spawn(move || {
             let text = match lister::Reader::open(&path) {
                 Ok(mut reader) => reader
                     .read_window()
-                    .map(|bytes| lister::render(ViewMode::Text, &bytes, 0))
+                    .map(|bytes| lister::render(ViewMode::Text, charset, &bytes, 0))
                     .unwrap_or_else(|e| e.to_string()),
                 Err(err) => err.to_string(),
             };
@@ -964,8 +1016,176 @@ impl App {
         self.shell.css.load_from_data(&sheet);
     }
 
+    fn watch_columns(&self, sender: &ComponentSender<Self>) {
+        for pane in 0..2 {
+            let cols = self.shell.panes[pane].list.columns();
+            for i in 0..cols.n_items() {
+                let Some(col) = cols.item(i).and_then(|obj| obj.downcast::<gtk::ColumnViewColumn>().ok()) else { continue };
+                let tx = sender.input_sender().clone();
+                col.connect_fixed_width_notify(move |_| {
+                    if SIZING.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    tx.emit(Msg::ColumnSized(pane));
+                });
+            }
+        }
+    }
+
+    fn char_unit(&self) -> i32 {
+        let layout = self.shell.panes[0].path.create_pango_layout(Some("00000000"));
+        (layout.pixel_size().0 / 8).max(7)
+    }
+
+    fn layout_columns(&mut self, pane: usize, entries: &[Entry]) {
+        let widths = if self.cfg.auto_columns {
+            let px = comarchy::listing::column_pixels(comarchy::listing::column_chars(entries), self.char_unit());
+            [-1, px[0], px[1], px[2], px[3]]
+        } else if self.cfg.column_widths.len() == 5 {
+            let w = &self.cfg.column_widths;
+            [w[0], w[1], w[2], w[3], w[4]]
+        } else {
+            return;
+        };
+        self.apply_widths(pane, widths);
+    }
+
+    fn apply_widths(&mut self, pane: usize, widths: [i32; 5]) {
+        SIZING.store(true, Ordering::Relaxed);
+        let cols = self.shell.panes[pane].list.columns();
+        for (i, width) in widths.iter().enumerate() {
+            let Some(col) = cols.item(i as u32).and_then(|obj| obj.downcast::<gtk::ColumnViewColumn>().ok()) else { continue };
+            if col.fixed_width() != *width {
+                col.set_fixed_width(*width);
+            }
+        }
+        SIZING.store(false, Ordering::Relaxed);
+    }
+
+    fn pane_widths(&self, pane: usize) -> Vec<i32> {
+        let cols = self.shell.panes[pane].list.columns();
+        let mut out = Vec::new();
+        for i in 0..cols.n_items() {
+            if let Some(col) = cols.item(i).and_then(|obj| obj.downcast::<gtk::ColumnViewColumn>().ok()) {
+                out.push(col.fixed_width());
+            }
+        }
+        out
+    }
+
+    fn on_column_sized(&mut self, pane: usize) {
+        let widths = self.pane_widths(pane);
+        if widths == self.cfg.column_widths {
+            return;
+        }
+        let turned_off = self.cfg.auto_columns;
+        self.cfg.auto_columns = false;
+        self.cfg.column_widths = widths.clone();
+        let _ = config::save(&self.cfg);
+        if widths.len() == 5 {
+            let other = 1 - pane;
+            self.apply_widths(other, [widths[0], widths[1], widths[2], widths[3], widths[4]]);
+        }
+        if turned_off {
+            self.status = "Column widths kept".into();
+        }
+        self.paint_settings_switch();
+    }
+
+    fn toggle_settings(&mut self, sender: &ComponentSender<Self>) {
+        if self.settings.is_some() {
+            self.close_settings();
+            return;
+        }
+        self.open_settings(sender);
+    }
+
+    fn open_settings(&mut self, sender: &ComponentSender<Self>) {
+        let tx = sender.input_sender().clone();
+        let win = gtk::Window::new();
+        win.set_title(Some("Settings"));
+        win.set_modal(true);
+        win.set_transient_for(Some(&self.shell.window));
+        win.set_default_width(380);
+        win.set_default_height(88);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let name = gtk::Label::new(Some("Auto column size"));
+        name.set_xalign(0.0);
+        name.set_hexpand(true);
+        let on = self.cfg.auto_columns;
+        let value = gtk::Label::new(Some(if on { "on" } else { "off" }));
+        if on {
+            value.add_css_class("settings-on");
+        }
+        row.append(&name);
+        row.append(&value);
+        row.add_css_class("settings-row");
+        let click = gtk::GestureClick::new();
+        let tx_click = tx.clone();
+        click.connect_released(move |_, _, _, _| tx_click.emit(Msg::ToggleAutoColumns));
+        row.add_controller(click);
+        win.set_child(Some(&row));
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        keys.connect_key_pressed(move |_, key, _, _| {
+            match key {
+                Key::Escape | Key::F12 => tx.emit(Msg::CloseSettings),
+                Key::Return | Key::KP_Enter | Key::space | Key::KP_Space => tx.emit(Msg::ToggleAutoColumns),
+                _ => {}
+            }
+            gtk::glib::Propagation::Stop
+        });
+        win.add_controller(keys);
+        win.present();
+        win.grab_focus();
+        self.settings = Some(SettingsUi { window: win, value });
+    }
+
+    fn close_settings(&mut self) {
+        if let Some(ui) = self.settings.take() {
+            ui.window.close();
+        }
+    }
+
+    fn toggle_auto_columns(&mut self) {
+        self.cfg.auto_columns = !self.cfg.auto_columns;
+        if self.cfg.auto_columns {
+            self.cfg.column_widths.clear();
+            self.relayout_columns();
+        } else {
+            self.cfg.column_widths = self.pane_widths(self.state.active.index());
+        }
+        let _ = config::save(&self.cfg);
+        self.paint_settings_switch();
+    }
+
+    fn relayout_columns(&mut self) {
+        for pane in 0..2 {
+            let id = PaneId::from_index(pane);
+            let entries: Vec<Entry> = self
+                .state
+                .visible(id)
+                .into_iter()
+                .map(|i| self.state.tab(id).entries[i].clone())
+                .collect();
+            self.layout_columns(pane, &entries);
+        }
+    }
+
+    fn paint_settings_switch(&self) {
+        let Some(ui) = &self.settings else { return };
+        let on = self.cfg.auto_columns;
+        ui.value.set_text(if on { "on" } else { "off" });
+        if on {
+            ui.value.add_css_class("settings-on");
+        } else {
+            ui.value.remove_css_class("settings-on");
+        }
+    }
+
     fn sync(&mut self) {
         SYNCING.store(true, Ordering::Relaxed);
+        let mut pending: [Option<Vec<Entry>>; 2] = [None, None];
         for pane in 0..2 {
             let id = PaneId::from_index(pane);
             let active = self.state.active == id;
@@ -996,7 +1216,7 @@ impl App {
             if !ui.frame.has_css_class(class) {
                 ui.frame.set_css_classes(&[class]);
             }
-            if !ui.path.has_focus() && ui.path.text().as_str() != path {
+            if ui.path.text().as_str() != path {
                 ui.path.set_text(&path);
             }
             let show_filter = filter_on || ui.filter.has_focus();
@@ -1027,10 +1247,11 @@ impl App {
             if pane_dirty {
                 comarchy::log::info(&format!("list reload pane={pane} rows={}", rows.len()));
                 ui.store.remove_all();
-                for (entry, marked) in rows {
-                    ui.store.append(&EntryObject::from_entry(&entry, marked));
+                for (entry, marked) in &rows {
+                    ui.store.append(&EntryObject::from_entry(entry, *marked));
                 }
                 self.dirty[pane] = false;
+                pending[pane] = Some(rows.iter().map(|(entry, _)| entry.clone()).collect());
             }
             let n = ui.selection.n_items();
             if n > 0 {
@@ -1038,6 +1259,11 @@ impl App {
                 if ui.selection.selected() != want {
                     ui.selection.set_selected(want);
                 }
+            }
+        }
+        for (pane, entries) in pending.into_iter().enumerate() {
+            if let Some(entries) = entries {
+                self.layout_columns(pane, &entries);
             }
         }
         if self.shell.status.text().as_str() != self.status {
@@ -1055,7 +1281,7 @@ impl App {
             return;
         }
         let mut errors = Vec::new();
-        let want = ["F3 View", "F4 Edit", "F5 Copy", "F6 Move", "F7 Mkdir", "F8 Delete"];
+        let want = ["F3 View", "F4 Edit", "F5 Copy", "F6 Move", "F7 Mkdir", "F8 Delete", "F12 Settings"];
         for label in want {
             if !self.shell.f_labels.iter().any(|have| have == label) {
                 errors.push(format!("missing {label}"));
@@ -1199,7 +1425,7 @@ impl App {
         if !self.point_at(PaneId::Left, "note.txt") {
             errors.push("missing note".into());
         }
-        self.open_lister();
+        self.open_lister(sender);
         let lister_text = self.lister.as_ref().map(|ui| {
             let buf = ui.view.buffer();
             buf.text(&buf.start_iter(), &buf.end_iter(), false).to_string()
@@ -1240,6 +1466,21 @@ impl App {
         if self.shell.panes[1].stack.visible_child_name().as_deref() != Some("list") {
             errors.push("quick view stayed".into());
         }
+
+        self.toggle_settings(sender);
+        let shown = self.settings.as_ref().map(|ui| ui.value.text().to_string());
+        if shown.as_deref() != Some("on") {
+            errors.push("settings".into());
+        }
+        self.toggle_auto_columns();
+        if self.cfg.auto_columns {
+            errors.push("auto columns stayed on".into());
+        }
+        self.toggle_auto_columns();
+        if !self.cfg.auto_columns {
+            errors.push("auto columns stayed off".into());
+        }
+        self.close_settings();
 
         if errors.is_empty() {
             println!("SMOKE_OK");

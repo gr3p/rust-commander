@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use comarchy::config::{self, Bookmark, Config};
 use comarchy::entry::{Entry, DIR, HIDDEN};
 use comarchy::external;
-use comarchy::lister::{self, ViewMode};
+use comarchy::lister::{self, Charset, ViewMode};
 use comarchy::listing::{self, SortKey};
 use comarchy::ops::{self, Choice, Kind};
 use comarchy::state::{AppState, PaneId};
@@ -93,6 +93,7 @@ const MEMORY: &[(&str, fn() -> Result<(), String>)] = &[
     ("hidden_files_follow_toggle", hidden_files_follow_toggle),
     ("sort_keys_order_entries", sort_keys_order_entries),
     ("columns_ext_date_attr", columns_ext_date_attr),
+    ("column_widths_follow_text", column_widths_follow_text),
     ("filter_keeps_substring", filter_keeps_substring),
     ("insert_mark_is_used", insert_mark_is_used),
     ("space_marks_without_moving_cursor", space_marks_without_moving_cursor),
@@ -105,10 +106,12 @@ const MEMORY: &[(&str, fn() -> Result<(), String>)] = &[
     ("new_tab_has_own_listing", new_tab_has_own_listing),
     ("theme_fallback_without_file", theme_fallback_without_file),
     ("places_include_home_and_root", places_include_home_and_root),
+    ("mounts_lists_disks", mounts_lists_disks),
     ("external_argv", external_argv),
     ("ctrl_arrow_shows_active_dir_on_other_pane", ctrl_arrow_shows_active_dir_on_other_pane),
     ("terminal_argv_without_starting", terminal_argv_without_starting),
     ("quick_view_ignores_stale_generation", quick_view_ignores_stale_generation),
+    ("lister_ansi_and_ascii", lister_ansi_and_ascii),
 ];
 
 const FS: &[&str] = &[
@@ -198,6 +201,20 @@ fn columns_ext_date_attr() -> Result<(), String> {
     ];
     let vis = listing::visible_indices(&entries, SortKey::Attr, true, true, "");
     eq(entries[vis[0]].name.as_ref(), "a", "attr sort")
+}
+
+fn column_widths_follow_text() -> Result<(), String> {
+    let short = Entry { name: "a.md".into(), size: 12, mtime: 1_700_000_000, mode: 0o100644, flags: 0 };
+    let long = Entry { name: "readme.markdown".into(), size: 12, mtime: 1_700_000_000, mode: 0o100644, flags: 0 };
+    let a = listing::column_pixels(listing::column_chars(&[short]), 8);
+    let b = listing::column_pixels(listing::column_chars(&[long]), 8);
+    if b[0] <= a[0] {
+        return Err(format!("ext {} <= {}", b[0], a[0]));
+    }
+    if b[2] < 16 * 8 {
+        return Err(format!("date {}", b[2]));
+    }
+    Ok(())
 }
 
 fn filter_keeps_substring() -> Result<(), String> {
@@ -311,6 +328,38 @@ fn places_include_home_and_root() -> Result<(), String> {
     Ok(())
 }
 
+fn mounts_lists_disks() -> Result<(), String> {
+    let text = "\
+/dev/nvme0n1p2 / ext4 rw 0 0
+tmpfs /run tmpfs rw 0 0
+/dev/sda1 /media/marcus/USB vfat rw 0 0
+/dev/nvme0n1p1 /boot/efi vfat rw 0 0
+/dev/sdb1 /run/media/marcus/Stick exfat rw 0 0
+//smb.lan/seagate12tb /mnt/seagate12tb cifs rw 0 0
+";
+    let mounts = comarchy::places::parse_mounts(text);
+    let paths: Vec<_> = mounts.iter().map(|m| m.path.clone()).collect();
+    eq(paths.first().cloned().unwrap_or_default(), pb("/"), "root first")?;
+    if paths.iter().any(|p| p.starts_with("/run") && !p.starts_with("/run/media")) {
+        return Err("tmp run listed".into());
+    }
+    if !paths.iter().any(|p| p == Path::new("/media/marcus/USB")) || !paths.iter().any(|p| p == Path::new("/run/media/marcus/Stick")) {
+        return Err("usb missing".into());
+    }
+    let usb = mounts.iter().find(|m| m.path == pb("/media/marcus/USB")).ok_or("usb")?;
+    if !usb.removable || usb.label != "USB" {
+        return Err("usb label".into());
+    }
+    if paths.iter().any(|p| p.starts_with("/boot")) {
+        return Err("efi listed".into());
+    }
+    let share = mounts.iter().find(|m| m.path == pb("/mnt/seagate12tb")).ok_or("share")?;
+    if !share.network || share.removable || share.label != "seagate12tb" {
+        return Err("share".into());
+    }
+    Ok(())
+}
+
 fn ctrl_arrow_shows_active_dir_on_other_pane() -> Result<(), String> {
     let mut state = AppState::new(pb("/left"), pb("/right"));
     state.tab_mut(PaneId::Left).cursor = 2;
@@ -344,6 +393,22 @@ fn external_argv() -> Result<(), String> {
     let viewer = external::viewer_argv("less -N", Path::new("/tmp/a"));
     eq(viewer[0].as_str(), "less", "viewer")?;
     eq(viewer[1].as_str(), "-N", "viewer arg")
+}
+
+fn lister_ansi_and_ascii() -> Result<(), String> {
+    let ansi = lister::render(ViewMode::Text, Charset::Ansi, &[0x84], 0);
+    if ansi != "\u{201e}" {
+        return Err(format!("ansi {ansi}"));
+    }
+    let dos = lister::render(ViewMode::Text, Charset::Ascii, &[0x84, b'\n', 0xC4], 0);
+    if dos != "ä\n\u{2500}" {
+        return Err(format!("dos {dos}"));
+    }
+    let hex = lister::render(ViewMode::Hex, Charset::Ascii, &[0xC4], 0);
+    if !hex.contains('\u{2500}') {
+        return Err("hex dos".into());
+    }
+    Ok(())
 }
 
 fn quick_view_ignores_stale_generation() -> Result<(), String> {
@@ -546,15 +611,15 @@ fn lister_text_hex_binary_window(dir: &Path) -> Result<(), String> {
     fs::write(&path, "hello\ncomarchy").map_err(s)?;
     let mut reader = lister::Reader::open(&path).map_err(s)?;
     let bytes = reader.read_window().map_err(s)?;
-    let text = lister::render(ViewMode::Text, &bytes, 0);
+    let text = lister::render(ViewMode::Text, Charset::Utf8, &bytes, 0);
     if !text.contains("hello") {
         return Err("text".into());
     }
-    let hex = lister::render(ViewMode::Hex, &bytes, 0);
+    let hex = lister::render(ViewMode::Hex, Charset::Utf8, &bytes, 0);
     if !hex.contains("68") {
         return Err("hex".into());
     }
-    let binary = lister::render(ViewMode::Binary, &bytes, 0);
+    let binary = lister::render(ViewMode::Binary, Charset::Utf8, &bytes, 0);
     if !binary.contains("hello") {
         return Err("binary".into());
     }
@@ -581,10 +646,15 @@ fn bookmark_roundtrip_config(dir: &Path) -> Result<(), String> {
     let path = dir.join("config.toml");
     let mut cfg = Config::default();
     cfg.bookmarks.push(Bookmark { name: "Work".into(), path: pb("/work") });
+    cfg.auto_columns = false;
+    cfg.column_widths = vec![10, 20, 30, 40, 50];
     config::save_to(&path, &cfg).map_err(s)?;
     let loaded = config::load_from(&path);
     if loaded.bookmarks.len() != 1 || loaded.bookmarks[0].name != "Work" {
         return Err("bookmark".into());
+    }
+    if loaded.auto_columns || loaded.column_widths != vec![10, 20, 30, 40, 50] {
+        return Err("columns".into());
     }
     Ok(())
 }

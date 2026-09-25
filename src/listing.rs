@@ -198,6 +198,37 @@ fn civil_from_unix_days(days: i64) -> (i32, u32, u32) {
     (y as i32, m as u32, d as u32)
 }
 
+pub fn column_chars(entries: &[Entry]) -> [usize; 4] {
+    let mut ext = 3;
+    let mut size = 4;
+    let mut date = 4;
+    let mut attr = 4;
+    for entry in entries {
+        if entry.name.as_ref() == ".." {
+            continue;
+        }
+        ext = ext.max(extension(&entry.name).len());
+        let size_len = if entry.is_dir() { 5 } else { format_size(entry.size).len() };
+        size = size.max(size_len);
+        date = date.max(format_mtime(entry.mtime).len());
+        attr = attr.max(format_attr(entry.mode).len());
+    }
+    [ext, size, date, attr]
+}
+
+pub fn column_pixels(chars: [usize; 4], unit: i32) -> [i32; 4] {
+    let unit = unit.max(7);
+    // Cell padding plus the label's horizontal margins. Date has a wider end margin.
+    let pad = [28, 28, 36, 28];
+    let min = [48, 64, 140, 96];
+    let max = [200, 140, 240, 160];
+    let mut out = [0; 4];
+    for i in 0..4 {
+        out[i] = ((chars[i] as i32) * unit + pad[i]).clamp(min[i], max[i]);
+    }
+    out
+}
+
 pub fn entry_path(dir: &Path, entry: &Entry) -> std::path::PathBuf {
     if entry.name.as_ref() == ".." {
         dir.parent().unwrap_or(dir).to_path_buf()

@@ -9,7 +9,7 @@ use super::row::{self, EntryObject};
 
 pub struct PaneUi {
     pub frame: gtk::Frame,
-    pub path: gtk::Entry,
+    pub path: gtk::Label,
     pub tabs: gtk::Box,
     pub filter: gtk::Entry,
     pub stack: gtk::Stack,
@@ -39,6 +39,9 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
         );
     }
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    if let Some(drives) = drive_bar(sender) {
+        root.append(&drives);
+    }
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
     paned.set_hexpand(true);
     paned.set_vexpand(true);
@@ -79,8 +82,13 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
         (6, "F6 Move"),
         (7, "F7 Mkdir"),
         (8, "F8 Delete"),
+        (12, "F12 Settings"),
     ] {
-        let button = gtk::Button::with_label(label);
+        let text = gtk::Label::new(Some(label));
+        text.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        text.set_hexpand(true);
+        let button = gtk::Button::new();
+        button.set_child(Some(&text));
         button.add_css_class("fkey");
         button.set_hexpand(true);
         f_labels.push(label.to_string());
@@ -122,6 +130,53 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
     }
 }
 
+fn drive_bar(sender: &relm4::Sender<super::msg::Msg>) -> Option<gtk::Box> {
+    let mounts = comarchy::places::mounts();
+    if mounts.is_empty() {
+        return None;
+    }
+    let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    bar.add_css_class("drives");
+    bar.set_margin_start(6);
+    bar.set_margin_end(6);
+    bar.set_margin_top(4);
+    for mount in mounts {
+        let button = gtk::Button::new();
+        button.add_css_class("drive");
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        column.append(&drive_icon(mount.removable, mount.network));
+        let caption = gtk::Label::new(Some(&mount.label));
+        caption.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        caption.set_max_width_chars(12);
+        column.append(&caption);
+        button.set_child(Some(&column));
+        button.set_tooltip_text(Some(&format!("{}  {}", mount.device, mount.path.display())));
+        let tx = sender.clone();
+        let path = mount.path;
+        button.connect_clicked(move |_| tx.emit(super::msg::Msg::Mount(path.clone())));
+        bar.append(&button);
+    }
+    Some(bar)
+}
+
+fn drive_icon(removable: bool, network: bool) -> gtk::Widget {
+    let (name, fallback) = if network {
+        ("network-server-symbolic", "⇄")
+    } else if removable {
+        ("drive-removable-media-symbolic", "⏏")
+    } else {
+        ("drive-harddisk-symbolic", "▮")
+    };
+    let theme = gtk::gdk::Display::default().map(|display| gtk::IconTheme::for_display(&display));
+    if theme.is_some_and(|theme| theme.has_icon(name)) {
+        let icon = gtk::Image::from_icon_name(name);
+        icon.set_pixel_size(22);
+        icon.upcast()
+    } else {
+        gtk::Label::new(Some(fallback)).upcast()
+    }
+}
+
 fn bind_header_clicks(list: &gtk::ColumnView, index: usize, sender: &relm4::Sender<super::msg::Msg>) {
     let keys = [SortKey::Name, SortKey::Ext, SortKey::Size, SortKey::Time, SortKey::Attr];
     let sender = sender.clone();
@@ -139,6 +194,13 @@ fn bind_header_clicks(list: &gtk::ColumnView, index: usize, sender: &relm4::Send
             }
             for (title, key) in titles.into_iter().zip(keys) {
                 let Some(label) = title_label(&title) else { continue };
+                label.set_xalign(0.0);
+                label.set_halign(gtk::Align::Start);
+                label.set_hexpand(true);
+                if let Some(parent) = label.parent() {
+                    parent.set_halign(gtk::Align::Start);
+                    parent.set_hexpand(true);
+                }
                 label.set_can_target(true);
                 let click = gtk::GestureClick::new();
                 let tx = sender.clone();
@@ -196,6 +258,7 @@ fn is_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
             | Key::F8
             | Key::F9
             | Key::F10
+            | Key::F12
             | Key::Escape
             |         Key::Insert
             | Key::Tab
@@ -221,13 +284,13 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>) -> PaneUi {
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let tabs = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     tabs.set_visible(false);
-    let path = gtk::Entry::new();
+    let path = gtk::Label::new(None);
     path.add_css_class("path");
+    path.set_xalign(0.0);
     path.set_hexpand(true);
-    let tx = sender.clone();
-    path.connect_activate(move |entry| {
-        tx.emit(super::msg::Msg::PathGo(index, entry.text().to_string()));
-    });
+    path.set_can_focus(false);
+    path.set_selectable(false);
+    path.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     let filter = gtk::Entry::new();
     filter.set_placeholder_text(Some("Filter"));
     filter.set_visible(false);

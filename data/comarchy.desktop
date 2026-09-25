@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Comarchy
+Name=Commander
 Comment=Dual-pane file manager
 Exec=comarchy
 Icon=system-file-manager

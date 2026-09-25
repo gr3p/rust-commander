@@ -26,6 +26,10 @@ pub struct Config {
     pub editor: String,
     #[serde(default)]
     pub bookmarks: Vec<Bookmark>,
+    #[serde(default = "default_true")]
+    pub auto_columns: bool,
+    #[serde(default)]
+    pub column_widths: Vec<i32>,
 }
 
 fn default_theme() -> String {
@@ -49,6 +53,8 @@ impl Default for Config {
             viewer: String::new(),
             editor: String::new(),
             bookmarks: Vec::new(),
+            auto_columns: true,
+            column_widths: Vec::new(),
         }
     }
 }

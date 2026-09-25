@@ -127,10 +127,13 @@ entry {{
   color: {fg};
   caret-color: {bright};
 }}
-entry.path {{
-  background: {bg};
-  border: none;
+label.path {{
+  padding: 2px 8px;
   border-bottom: 1px solid {muted};
+}}
+columnview > listview > row > cell {{
+  padding: 0 6px;
+  min-height: 0;
 }}
 columnview > header > button {{
   background: transparent;
@@ -144,9 +147,31 @@ textview, textview text {{
   background: {bg};
   color: {fg};
 }}
+button.drive {{
+  background: transparent;
+  padding: 4px 8px;
+  min-width: 0;
+}}
+button.drive:hover {{
+  background: {sel};
+}}
 button.fkey {{
   background: {sel};
   color: {fg};
+  min-width: 0;
+  padding: 4px 2px;
+}}
+button.fkey label {{
+  min-width: 0;
+}}
+.settings-row {{
+  padding: 10px 12px;
+}}
+.settings-row:hover {{
+  background: {sel};
+}}
+label.settings-on {{
+  color: {accent};
 }}
 "#,
         bg = p.background,

@@ -46,7 +46,9 @@ glib::wrapper! {
 impl EntryObject {
     pub fn from_entry(entry: &Entry, marked: bool) -> Self {
         let skip = entry.name.as_ref() == "..";
-        let name = if entry.is_symlink() {
+        let name = if skip {
+            "↑ [..]".into()
+        } else if entry.is_symlink() {
             format!("{}@", entry.name)
         } else if entry.is_dir() && !skip {
             format!("{}/", entry.name)
@@ -77,11 +79,11 @@ fn size_text(entry: &Entry, skip: bool) -> String {
 
 pub fn file_columns() -> [relm4::gtk::ColumnViewColumn; 5] {
     [
-        column("name", "Name", true, -1, 0.0, 8, 8, true, true),
-        column("ext", "Ext", false, 80, 0.0, 8, 8, false, false),
-        column("size", "Size", false, 96, 1.0, 8, 8, false, false),
-        column("time", "Date", false, 188, 0.0, 8, 16, false, false),
-        column("attr", "Attr", false, 120, 0.0, 8, 8, false, false),
+        column("name", "Name", true, -1, 0.0, 0, 8, true, true),
+        column("ext", "Ext", false, 80, 0.0, 0, 8, false, false),
+        column("size", "Size", false, 96, 0.0, 0, 8, false, false),
+        column("time", "Date", false, 188, 0.0, 0, 16, false, false),
+        column("attr", "Attr", false, 120, 0.0, 0, 8, false, false),
     ]
 }
 
@@ -114,17 +116,22 @@ fn column(
         let item = item.downcast_ref::<gtk::ListItem>().unwrap();
         let obj = item.item().unwrap().downcast::<EntryObject>().unwrap();
         let label = item.child().unwrap().downcast::<gtk::Label>().unwrap();
-        let text = match id {
-            "ext" => obj.ext(),
-            "size" => obj.size_text(),
-            "time" => obj.date(),
-            "attr" => obj.attr(),
-            _ => {
-                let prefix = if obj.marked() { "● " } else { "  " };
-                format!("{prefix}{}", obj.name())
-            }
-        };
-        label.set_label(&text);
+        if id == "name" && obj.name() == "↑ [..]" {
+            let prefix = if obj.marked() { "● " } else { "" };
+            label.set_markup(&format!("{prefix}<span size=\"xx-large\">↑</span> [..]"));
+        } else {
+            let text = match id {
+                "ext" => obj.ext(),
+                "size" => obj.size_text(),
+                "time" => obj.date(),
+                "attr" => obj.attr(),
+                _ => {
+                    let prefix = if obj.marked() { "● " } else { "" };
+                    format!("{prefix}{}", obj.name())
+                }
+            };
+            label.set_label(&text);
+        }
         if marked {
             if obj.marked() {
                 label.add_css_class("marked");
