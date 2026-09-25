@@ -1,6 +1,7 @@
 pub mod config;
 pub mod log;
 pub mod entry;
+pub mod hotlist;
 pub mod external;
 pub mod listing;
 pub mod lister;

@@ -51,7 +51,10 @@ struct ListerUi {
 
 struct SettingsUi {
     window: gtk::Window,
-    value: gtk::Label,
+    columns: gtk::Label,
+    hidden: gtk::Label,
+    image: gtk::Label,
+    strength: gtk::Scale,
 }
 
 pub struct App {
@@ -66,10 +69,12 @@ pub struct App {
     progress: Option<(gtk::Window, gtk::Label)>,
     lister: Option<ListerUi>,
     charset: Charset,
-    output: Option<gtk::Window>,
+    hot: Option<gtk::Window>,
+    hot_stack: Vec<Option<usize>>,
     preview: lister::PreviewSlot,
     preview_sent: u64,
     settings: Option<SettingsUi>,
+    chooser: Option<gtk::FileChooserNative>,
     smoke: bool,
 }
 
@@ -125,10 +130,12 @@ impl SimpleComponent for App {
             progress: None,
             lister: None,
             charset: Charset::Utf8,
-            output: None,
+            hot: None,
+            hot_stack: Vec::new(),
             preview: lister::PreviewSlot::default(),
             preview_sent: 0,
             settings: None,
+            chooser: None,
             smoke,
         };
         model.apply_css(&theme::load_named(&theme::active_name(
@@ -203,8 +210,6 @@ impl App {
                 self.touch(PaneId::from_index(pane));
             }
             Msg::Submit(text) => self.on_submit(&text, sender),
-            Msg::Command(line) => self.run_command(&line, sender),
-            Msg::CommandDone(text) => self.show_command_output(text),
             Msg::CancelAsk => {
                 self.ask = None;
                 self.close_dialog();
@@ -236,7 +241,21 @@ impl App {
             }
             Msg::ColumnSized(pane) => self.on_column_sized(pane),
             Msg::ToggleAutoColumns => self.toggle_auto_columns(),
+            Msg::ToggleHidden => self.toggle_hidden(),
+            Msg::PickBackground => self.pick_background(sender),
+            Msg::BackgroundImage(path) => self.set_background_image(path),
+            Msg::BackgroundColor(color) => self.set_background_color(color),
+            Msg::BackgroundAlpha(alpha) => self.set_background_alpha(alpha),
             Msg::CloseSettings => self.close_settings(),
+            Msg::Hotlist => self.toggle_hotlist(sender),
+            Msg::HotlistPick(index) => self.hot_go(index, sender),
+            Msg::HotlistMenu(index) => self.hot_menu(index, sender),
+            Msg::HotlistBack => self.hot_back(sender),
+            Msg::HotlistAdd => self.hot_add(sender),
+            Msg::HotlistRemove => self.hot_remove(sender),
+            Msg::HotlistConfigure => self.hot_configure(sender),
+            Msg::HotlistAdded(title, path, with_target) => self.hot_added(title, path, with_target, sender),
+            Msg::HotlistStored(marks) => self.hot_stored(marks),
             Msg::Mount(path) => {
                 let id = self.state.active;
                 let token = self.state.navigate(id, path.clone(), true);
@@ -289,19 +308,14 @@ impl App {
                     ui.filter.set_visible(true);
                     ui.filter.grab_focus();
                 }
-                Key::h | Key::H => {
-                    self.state.show_hidden = !self.state.show_hidden;
-                    self.cfg.show_hidden = self.state.show_hidden;
-                    let _ = config::save(&self.cfg);
-                    self.touch_both();
-                }
+                Key::h | Key::H => self.toggle_hidden(),
                 Key::t | Key::T => self.open_new_tab(sender),
                 Key::w | Key::W => {
                     let id = self.state.active;
                     self.state.close_tab(id);
                     self.touch(id);
                 }
-                Key::d | Key::D => self.add_bookmark(),
+                Key::d | Key::D => self.toggle_hotlist(sender),
                 Key::q | Key::Q => {
                     self.state.quick_view = !self.state.quick_view;
                     if self.state.quick_view {
@@ -883,18 +897,145 @@ impl App {
         self.dialog = Some(win);
     }
 
-    fn add_bookmark(&mut self) {
+    fn toggle_hotlist(&mut self, sender: &ComponentSender<Self>) {
+        if self.hot.is_some() {
+            self.close_hot();
+            return;
+        }
+        self.hot_stack = vec![None];
+        self.present_hot(sender);
+    }
+
+    fn present_hot(&mut self, sender: &ComponentSender<Self>) {
+        if let Some(win) = self.hot.take() {
+            win.close();
+        }
+        let view = self.hot_stack.last().copied().flatten();
+        let current = self.state.tab(self.state.active).path.clone();
+        let win = super::hotlist::popup(
+            &self.shell.window,
+            &self.cfg.bookmarks,
+            view,
+            &current,
+            sender.input_sender(),
+        );
+        win.present();
+        self.hot = Some(win);
+    }
+
+    fn close_hot(&mut self) {
+        self.hot_stack.clear();
+        if let Some(win) = self.hot.take() {
+            win.close();
+        }
+    }
+
+    fn hot_back(&mut self, sender: &ComponentSender<Self>) {
+        self.hot_stack.pop();
+        if self.hot_stack.is_empty() {
+            self.close_hot();
+        } else {
+            self.present_hot(sender);
+        }
+    }
+
+    fn hot_menu(&mut self, index: usize, sender: &ComponentSender<Self>) {
+        self.hot_stack.push(Some(index));
+        self.present_hot(sender);
+    }
+
+    fn hot_go(&mut self, index: usize, sender: &ComponentSender<Self>) {
+        let Some(mark) = self.cfg.bookmarks.get(index).cloned() else { return };
+        if !comarchy::hotlist::is_dir(&mark) || mark.path.as_os_str().is_empty() {
+            return;
+        }
+        let source = self.state.active;
+        let target = mark.target.clone();
+        let path = mark.path.clone();
+        self.close_hot();
+        if !path.is_dir() {
+            self.status = format!("Not a directory: {}", path.display());
+            return;
+        }
+        let token = self.state.navigate(source, path.clone(), true);
+        let tab = self.state.pane(source).active;
+        self.spawn_load(sender, source, tab, path, token);
+        if !target.as_os_str().is_empty() {
+            let other = source.other();
+            let token = self.state.navigate(other, target.clone(), true);
+            let tab = self.state.pane(other).active;
+            self.spawn_load(sender, other, tab, target, token);
+        }
+        self.focus_list();
+    }
+
+    fn hot_add(&mut self, sender: &ComponentSender<Self>) {
         let path = self.state.tab(self.state.active).path.clone();
-        let name = path
+        if comarchy::hotlist::dir_index(&self.cfg.bookmarks, &path).is_some() {
+            return;
+        }
+        let title = path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
-        if !self.cfg.bookmarks.iter().any(|b| b.path == path) {
-            self.cfg.bookmarks.push(Bookmark { name: name.clone(), path: path.clone() });
-            self.state.bookmarks.push((name, path));
-            let _ = config::save(&self.cfg);
-            self.status = "Bookmark saved".into();
+        let path_text = path.display().to_string();
+        self.close_dialog();
+        let win = super::hotlist::add_dialog(&self.shell.window, &title, &path_text, sender.input_sender());
+        win.present();
+        self.dialog = Some(win);
+    }
+
+    fn hot_added(&mut self, title: String, path: String, with_target: bool, sender: &ComponentSender<Self>) {
+        self.close_dialog();
+        let title = title.trim().to_string();
+        let path = PathBuf::from(path.trim());
+        if title.is_empty() || path.as_os_str().is_empty() {
+            return;
         }
+        let target = if with_target {
+            self.state.tab(self.state.active.other()).path.clone()
+        } else {
+            std::path::PathBuf::new()
+        };
+        self.cfg.bookmarks.push(Bookmark { name: title, path, target, kind: String::new() });
+        let _ = config::save(&self.cfg);
+        if self.hot_stack.is_empty() {
+            self.hot_stack = vec![None];
+        }
+        self.present_hot(sender);
+    }
+
+    fn hot_remove(&mut self, sender: &ComponentSender<Self>) {
+        let path = self.state.tab(self.state.active).path.clone();
+        let Some(index) = comarchy::hotlist::dir_index(&self.cfg.bookmarks, &path) else { return };
+        self.cfg.bookmarks.remove(index);
+        let _ = config::save(&self.cfg);
+        for slot in &mut self.hot_stack {
+            if let Some(i) = slot {
+                if *i == index {
+                    *slot = None;
+                } else if *i > index {
+                    *i -= 1;
+                }
+            }
+        }
+        if self.hot.is_some() {
+            self.present_hot(sender);
+        }
+    }
+
+    fn hot_configure(&mut self, sender: &ComponentSender<Self>) {
+        self.close_hot();
+        self.close_dialog();
+        let win = super::hotlist::configure(&self.shell.window, self.cfg.bookmarks.clone(), sender.input_sender());
+        win.present();
+        self.dialog = Some(win);
+    }
+
+    fn hot_stored(&mut self, marks: Vec<Bookmark>) {
+        self.cfg.bookmarks = marks;
+        let _ = config::save(&self.cfg);
+        self.close_dialog();
     }
 
     fn ask_text(&mut self, title: &str, initial: &str, tx: relm4::Sender<Msg>) {
@@ -1009,9 +1150,11 @@ impl App {
     }
 
     fn apply_css(&self, palette: &Palette) {
+        let image = self.background_path();
         let sheet = format!(
-            "window, label, entry, textview, button {{ font-family: \"JetBrainsMono Nerd Font\", \"JetBrains Mono\", monospace; font-size: 13px; }}\n{}",
-            theme::stylesheet(palette)
+            "window, label, entry, textview, button {{ font-family: \"JetBrainsMono Nerd Font\", \"JetBrains Mono\", monospace; font-size: 13px; }}\n{}{}",
+            theme::stylesheet(palette),
+            theme::list_background(palette, &self.cfg.background_color, &image, self.cfg.background_alpha),
         );
         self.shell.css.load_from_data(&sheet);
     }
@@ -1106,31 +1249,79 @@ impl App {
         win.set_title(Some("Settings"));
         win.set_modal(true);
         win.set_transient_for(Some(&self.shell.window));
-        win.set_default_width(380);
-        win.set_default_height(88);
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        let name = gtk::Label::new(Some("Auto column size"));
-        name.set_xalign(0.0);
-        name.set_hexpand(true);
-        let on = self.cfg.auto_columns;
-        let value = gtk::Label::new(Some(if on { "on" } else { "off" }));
-        if on {
-            value.add_css_class("settings-on");
-        }
-        row.append(&name);
-        row.append(&value);
-        row.add_css_class("settings-row");
+        win.set_default_width(420);
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let (columns_row, columns) = settings_row("Auto column size", self.cfg.auto_columns);
+        let tx_columns = tx.clone();
         let click = gtk::GestureClick::new();
-        let tx_click = tx.clone();
-        click.connect_released(move |_, _, _, _| tx_click.emit(Msg::ToggleAutoColumns));
-        row.add_controller(click);
-        win.set_child(Some(&row));
+        click.connect_released(move |_, _, _, _| tx_columns.emit(Msg::ToggleAutoColumns));
+        columns_row.add_controller(click);
+        let (hidden_row, hidden) = settings_row("Show hidden files    Ctrl+H", self.state.show_hidden);
+        let tx_hidden = tx.clone();
+        let click = gtk::GestureClick::new();
+        click.connect_released(move |_, _, _, _| tx_hidden.emit(Msg::ToggleHidden));
+        hidden_row.add_controller(click);
+        column.append(&columns_row);
+        column.append(&hidden_row);
+        let palette = theme::load_named(&theme::active_name(&self.cfg.theme, &config::active_theme_path()));
+        let color_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        color_row.add_css_class("settings-row");
+        let color_name = gtk::Label::new(Some("Background color"));
+        color_name.set_xalign(0.0);
+        color_name.set_hexpand(true);
+        let color_btn = gtk::ColorButton::new();
+        let shown = if self.cfg.background_color.is_empty() { palette.background.as_str() } else { self.cfg.background_color.as_str() };
+        if let Ok(rgba) = gtk::gdk::RGBA::parse(shown) {
+            color_btn.set_rgba(&rgba);
+        }
+        let tx_color = tx.clone();
+        color_btn.connect_color_set(move |btn| tx_color.emit(Msg::BackgroundColor(hex_rgb(&btn.rgba()))));
+        color_row.append(&color_name);
+        color_row.append(&color_btn);
+        let image_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        image_row.add_css_class("settings-row");
+        let image_name = gtk::Label::new(Some("Background image"));
+        image_name.set_xalign(0.0);
+        image_name.set_hexpand(true);
+        let image = gtk::Label::new(Some(&image_caption(&self.cfg.background)));
+        image.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        image.set_max_width_chars(22);
+        image_row.append(&image_name);
+        image_row.append(&image);
+        let tx_image = tx.clone();
+        let click = gtk::GestureClick::new();
+        click.connect_released(move |_, _, _, _| tx_image.emit(Msg::PickBackground));
+        image_row.add_controller(click);
+        let strength_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        strength_row.add_css_class("settings-row");
+        let strength_name = gtk::Label::new(Some("Image strength"));
+        strength_name.set_xalign(0.0);
+        let strength = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
+        strength.set_value(f64::from(self.cfg.background_alpha));
+        strength.set_digits(0);
+        strength.set_hexpand(true);
+        strength.set_draw_value(true);
+        strength.set_value_pos(gtk::PositionType::Right);
+        let tx_strength = tx.clone();
+        strength.connect_value_changed(move |scale| tx_strength.emit(Msg::BackgroundAlpha(scale.value().round() as u8)));
+        strength_row.append(&strength_name);
+        strength_row.append(&strength);
+        column.append(&color_row);
+        column.append(&image_row);
+        column.append(&strength_row);
+        win.set_child(Some(&column));
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let keys_win = win.clone();
         keys.connect_key_pressed(move |_, key, _, _| {
+            let on_control = relm4::gtk::prelude::GtkWindowExt::focus(&keys_win).is_some_and(|widget| {
+                widget.downcast_ref::<gtk::Scale>().is_some() || widget.downcast_ref::<gtk::ColorButton>().is_some()
+            });
             match key {
                 Key::Escape | Key::F12 => tx.emit(Msg::CloseSettings),
-                Key::Return | Key::KP_Enter | Key::space | Key::KP_Space => tx.emit(Msg::ToggleAutoColumns),
+                Key::Return | Key::KP_Enter | Key::space | Key::KP_Space if !on_control => tx.emit(Msg::ToggleAutoColumns),
+                Key::h | Key::H if !on_control => tx.emit(Msg::ToggleHidden),
+                _ if on_control => return gtk::glib::Propagation::Proceed,
                 _ => {}
             }
             gtk::glib::Propagation::Stop
@@ -1138,7 +1329,7 @@ impl App {
         win.add_controller(keys);
         win.present();
         win.grab_focus();
-        self.settings = Some(SettingsUi { window: win, value });
+        self.settings = Some(SettingsUi { window: win, columns, hidden, image, strength });
     }
 
     fn close_settings(&mut self) {
@@ -1159,6 +1350,14 @@ impl App {
         self.paint_settings_switch();
     }
 
+    fn toggle_hidden(&mut self) {
+        self.state.show_hidden = !self.state.show_hidden;
+        self.cfg.show_hidden = self.state.show_hidden;
+        let _ = config::save(&self.cfg);
+        self.touch_both();
+        self.paint_settings_switch();
+    }
+
     fn relayout_columns(&mut self) {
         for pane in 0..2 {
             let id = PaneId::from_index(pane);
@@ -1174,13 +1373,91 @@ impl App {
 
     fn paint_settings_switch(&self) {
         let Some(ui) = &self.settings else { return };
-        let on = self.cfg.auto_columns;
-        ui.value.set_text(if on { "on" } else { "off" });
-        if on {
-            ui.value.add_css_class("settings-on");
+        paint_switch(&ui.columns, self.cfg.auto_columns);
+        paint_switch(&ui.hidden, self.state.show_hidden);
+        ui.image.set_text(&image_caption(&self.cfg.background));
+    }
+
+    fn background_path(&self) -> String {
+        let path = self.cfg.background.trim();
+        if Path::new(path).is_file() { path.to_string() } else { String::new() }
+    }
+
+    fn restyle(&self) {
+        let name = theme::active_name(&self.cfg.theme, &config::active_theme_path());
+        self.apply_css(&theme::load_named(&name));
+    }
+
+    fn pick_background(&mut self, sender: &ComponentSender<Self>) {
+        let Some(parent) = self.settings.as_ref().map(|ui| ui.window.clone()) else { return };
+        let dialog = gtk::FileChooserNative::new(
+            Some("Background image"),
+            Some(&parent),
+            gtk::FileChooserAction::Open,
+            Some("Open"),
+            Some("Cancel"),
+        );
+        dialog.set_modal(true);
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("Images"));
+        filter.add_mime_type("image/png");
+        filter.add_mime_type("image/jpeg");
+        filter.add_mime_type("image/webp");
+        filter.add_mime_type("image/gif");
+        dialog.set_filter(&filter);
+        let path = PathBuf::from(&self.cfg.background);
+        if path.is_file() {
+            let _ = dialog.set_file(&gtk::gio::File::for_path(&path));
         } else {
-            ui.value.remove_css_class("settings-on");
+            let pictures = home_dir().join("Pictures");
+            if pictures.is_dir() {
+                let _ = dialog.set_current_folder(Some(&gtk::gio::File::for_path(&pictures)));
+            }
         }
+        let tx = sender.input_sender().clone();
+        dialog.connect_response(move |dialog, response| {
+            if response == gtk::ResponseType::Accept {
+                if let Some(path) = dialog.file().and_then(|file| file.path()) {
+                    tx.emit(Msg::BackgroundImage(path));
+                }
+            }
+            dialog.hide();
+        });
+        dialog.show();
+        self.chooser = Some(dialog);
+    }
+
+    fn set_background_image(&mut self, path: PathBuf) {
+        self.chooser = None;
+        self.cfg.background = path.display().to_string();
+        if self.cfg.background_alpha == 0 {
+            self.cfg.background_alpha = 70;
+            if let Some(ui) = &self.settings {
+                ui.strength.set_value(70.0);
+            }
+        }
+        let _ = config::save(&self.cfg);
+        self.restyle();
+        self.paint_settings_switch();
+    }
+
+    fn set_background_color(&mut self, color: String) {
+        if self.cfg.background_color == color {
+            return;
+        }
+        self.cfg.background_color = color;
+        let _ = config::save(&self.cfg);
+        self.restyle();
+    }
+
+    fn set_background_alpha(&mut self, alpha: u8) {
+        let alpha = alpha.min(100);
+        if self.cfg.background_alpha == alpha {
+            return;
+        }
+        self.cfg.background_alpha = alpha;
+        let _ = config::save(&self.cfg);
+        self.restyle();
     }
 
     fn sync(&mut self) {
@@ -1268,10 +1545,6 @@ impl App {
         }
         if self.shell.status.text().as_str() != self.status {
             self.shell.status.set_text(&self.status);
-        }
-        let prompt = self.state.tab(self.state.active).path.display().to_string();
-        if self.shell.command.placeholder_text().as_deref() != Some(prompt.as_str()) {
-            self.shell.command.set_placeholder_text(Some(&prompt));
         }
         SYNCING.store(false, Ordering::Relaxed);
     }
@@ -1468,9 +1741,17 @@ impl App {
         }
 
         self.toggle_settings(sender);
-        let shown = self.settings.as_ref().map(|ui| ui.value.text().to_string());
+        let shown = self.settings.as_ref().map(|ui| ui.columns.text().to_string());
         if shown.as_deref() != Some("on") {
             errors.push("settings".into());
+        }
+        let hidden = self.settings.as_ref().map(|ui| ui.hidden.text().to_string());
+        if hidden.as_deref() != Some("off") {
+            errors.push("hidden files".into());
+        }
+        let image = self.settings.as_ref().map(|ui| ui.image.text().to_string());
+        if image.as_deref() != Some("none") {
+            errors.push("background image".into());
         }
         self.toggle_auto_columns();
         if self.cfg.auto_columns {
@@ -1524,65 +1805,6 @@ impl App {
         self.spawn_load(sender, dest, tab, path, token);
     }
 
-    fn run_command(&mut self, line: &str, sender: &ComponentSender<Self>) {
-        let line = line.trim().to_string();
-        if line.is_empty() {
-            return;
-        }
-        self.shell.command.set_text("");
-        let dir = self.state.tab(self.state.active).path.clone();
-        if line == "terminal" {
-            self.open_terminal(&dir);
-            return;
-        }
-        comarchy::log::info(&format!("cmd {line} in {}", dir.display()));
-        let tx = sender.input_sender().clone();
-        std::thread::spawn(move || {
-            let text = comarchy::external::run_shell(&dir, &line).unwrap_or_else(|err| err.to_string());
-            tx.emit(Msg::CommandDone(text));
-        });
-    }
-
-    fn open_terminal(&mut self, dir: &std::path::Path) {
-        let Some(argv) = comarchy::external::terminal_start(dir) else {
-            let msg = "No terminal emulator".to_string();
-            comarchy::log::error(&msg);
-            self.status = msg;
-            return;
-        };
-        let mut cmd = std::process::Command::new(&argv[0]);
-        cmd.args(&argv[1..]).current_dir(dir);
-        if let Err(err) = cmd.spawn() {
-            let msg = format!("terminal: {err}");
-            comarchy::log::error(&msg);
-            self.status = msg;
-        }
-    }
-
-    fn show_command_output(&mut self, text: String) {
-        if text.trim().is_empty() {
-            self.status = "Done".into();
-            return;
-        }
-        if let Some(win) = self.output.take() {
-            win.close();
-        }
-        let win = gtk::Window::new();
-        win.set_title(Some("Command"));
-        win.set_transient_for(Some(&self.shell.window));
-        win.set_default_width(720);
-        win.set_default_height(420);
-        let view = gtk::TextView::new();
-        view.set_editable(false);
-        view.set_monospace(true);
-        view.buffer().set_text(&text);
-        let scroll = gtk::ScrolledWindow::new();
-        scroll.set_child(Some(&view));
-        win.set_child(Some(&scroll));
-        win.present();
-        self.output = Some(win);
-    }
-
     fn move_list(&mut self, delta: isize) {
         self.state.move_cursor(delta);
         self.focus_list();
@@ -1603,6 +1825,50 @@ impl App {
         self.state.tab_mut(id).cursor = pos;
         self.state.preview_gen = self.state.preview_gen.wrapping_add(1);
         true
+    }
+}
+
+fn image_caption(path: &str) -> String {
+    let path = path.trim();
+    if path.is_empty() {
+        return "none".into();
+    }
+    Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn hex_rgb(rgba: &gtk::gdk::RGBA) -> String {
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        (rgba.red() * 255.0).round() as u8,
+        (rgba.green() * 255.0).round() as u8,
+        (rgba.blue() * 255.0).round() as u8,
+    )
+}
+
+fn settings_row(title: &str, on: bool) -> (gtk::Box, gtk::Label) {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let name = gtk::Label::new(Some(title));
+    name.set_xalign(0.0);
+    name.set_hexpand(true);
+    let value = gtk::Label::new(Some(if on { "on" } else { "off" }));
+    if on {
+        value.add_css_class("settings-on");
+    }
+    row.append(&name);
+    row.append(&value);
+    row.add_css_class("settings-row");
+    (row, value)
+}
+
+fn paint_switch(label: &gtk::Label, on: bool) {
+    label.set_text(if on { "on" } else { "off" });
+    if on {
+        label.add_css_class("settings-on");
+    } else {
+        label.remove_css_class("settings-on");
     }
 }
 

@@ -10,13 +10,17 @@ use crate::listing::SortKey;
 pub struct Bookmark {
     pub name: String,
     pub path: PathBuf,
+    #[serde(default)]
+    pub target: PathBuf,
+    #[serde(default)]
+    pub kind: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "default_theme")]
     pub theme: String,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub show_hidden: bool,
     #[serde(default = "default_sort")]
     pub sort: String,
@@ -30,6 +34,12 @@ pub struct Config {
     pub auto_columns: bool,
     #[serde(default)]
     pub column_widths: Vec<i32>,
+    #[serde(default)]
+    pub background: String,
+    #[serde(default)]
+    pub background_color: String,
+    #[serde(default)]
+    pub background_alpha: u8,
 }
 
 fn default_theme() -> String {
@@ -48,13 +58,16 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             theme: default_theme(),
-            show_hidden: true,
+            show_hidden: false,
             sort: default_sort(),
             viewer: String::new(),
             editor: String::new(),
             bookmarks: Vec::new(),
             auto_columns: true,
             column_widths: Vec::new(),
+            background: String::new(),
+            background_color: String::new(),
+            background_alpha: 0,
         }
     }
 }

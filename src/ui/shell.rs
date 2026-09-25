@@ -24,7 +24,6 @@ pub struct Shell {
     pub window: gtk::Window,
     pub panes: [PaneUi; 2],
     pub status: gtk::Label,
-    pub command: gtk::Entry,
     pub css: gtk::CssProvider,
     pub f_labels: Vec<String>,
 }
@@ -60,17 +59,6 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
     status.set_margin_start(8);
     root.append(&status);
 
-    let command = gtk::Entry::new();
-    command.set_hexpand(true);
-    command.set_margin_start(4);
-    command.set_margin_end(4);
-    command.set_margin_top(4);
-    let tx = sender.clone();
-    command.connect_activate(move |entry| {
-        tx.emit(super::msg::Msg::Command(entry.text().to_string()));
-    });
-    root.append(&command);
-
     let fbar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     fbar.add_css_class("fbar");
     fbar.set_margin_all(4);
@@ -103,15 +91,9 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     let tx = sender.clone();
     let win = window.clone();
-    let command_keys = command.clone();
     keys.connect_key_pressed(move |_, key, _, mods| {
         let focused = relm4::gtk::prelude::GtkWindowExt::focus(&win);
         let typing = focused.is_some_and(|w| w.downcast_ref::<gtk::Entry>().is_some());
-        let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
-        let ctrl_arrow = ctrl && matches!(key, gtk::gdk::Key::Left | gtk::gdk::Key::Right | gtk::gdk::Key::KP_Left | gtk::gdk::Key::KP_Right);
-        if gtk::prelude::WidgetExt::has_focus(&command_keys) && ctrl_arrow {
-            return gtk::glib::Propagation::Proceed;
-        }
         if typing && !is_command(key, mods) {
             return gtk::glib::Propagation::Proceed;
         }
@@ -124,7 +106,6 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
         window: window.clone(),
         panes: [left, right],
         status,
-        command,
         css,
         f_labels,
     }
@@ -291,6 +272,14 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>) -> PaneUi {
     path.set_can_focus(false);
     path.set_selectable(false);
     path.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    let path_click = gtk::GestureClick::new();
+    let tx = sender.clone();
+    path_click.connect_released(move |_, n, _, _| {
+        if n == 2 {
+            tx.emit(super::msg::Msg::Hotlist);
+        }
+    });
+    path.add_controller(path_click);
     let filter = gtk::Entry::new();
     filter.set_placeholder_text(Some("Filter"));
     filter.set_visible(false);

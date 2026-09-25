@@ -1,4 +1,5 @@
 mod app;
+mod hotlist;
 mod msg;
 mod row;
 mod shell;

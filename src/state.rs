@@ -97,7 +97,7 @@ impl AppState {
             active: PaneId::Left,
             sort: SortKey::Name,
             ascending: true,
-            show_hidden: true,
+            show_hidden: false,
             quick_view: false,
             preview_gen: 0,
             bookmarks: Vec::new(),

@@ -81,6 +81,63 @@ pub fn load_named(name: &str) -> Palette {
     builtin()
 }
 
+pub fn css_file_url(path: &str) -> String {
+    let mut out = String::from("file://");
+    for b in path.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn hex_color(color: &str) -> Option<&str> {
+    let color = color.trim();
+    if color.len() == 7 && color.starts_with('#') && color.bytes().skip(1).all(|b| b.is_ascii_hexdigit()) {
+        Some(color)
+    } else {
+        None
+    }
+}
+
+// Image strength 0 is the solid color. 100 is the picture alone.
+pub fn list_background(p: &Palette, color: &str, image: &str, strength: u8) -> String {
+    let chosen = hex_color(color);
+    let strength = strength.min(100);
+    let image = image.trim();
+    let show_image = strength > 0 && !image.is_empty();
+    if !show_image && chosen.is_none() {
+        return String::new();
+    }
+    let fill = chosen.unwrap_or(p.background.as_str());
+    let selected = format!(
+        "columnview > listview > row:selected,\ncolumnview > listview > row:selected > cell {{\n  background: {sel};\n  color: {bright};\n}}\n",
+        sel = p.selection,
+        bright = p.bright,
+    );
+    if !show_image {
+        return format!(
+            "columnview,\ncolumnview > listview,\ncolumnview > listview > row,\ncolumnview > listview > row > cell {{\n  background: {fill};\n}}\n{selected}"
+        );
+    }
+    let url = css_file_url(image);
+    let veil = f64::from(100 - strength) / 100.0;
+    let (picture, size, at, repeat) = if veil <= 0.0 {
+        (format!("url(\"{url}\")"), "cover", "center", "no-repeat")
+    } else {
+        (
+            format!("linear-gradient(alpha({fill}, {veil:.2}), alpha({fill}, {veil:.2})), url(\"{url}\")"),
+            "cover, cover",
+            "center, center",
+            "no-repeat, no-repeat",
+        )
+    };
+    format!(
+        "columnview {{\n  background: {fill};\n}}\ncolumnview > listview {{\n  background-color: {fill};\n  background-image: {picture};\n  background-size: {size};\n  background-position: {at};\n  background-repeat: {repeat};\n}}\ncolumnview > listview > row,\ncolumnview > listview > row > cell {{\n  background: transparent;\n}}\n{selected}"
+    )
+}
+
 pub fn stylesheet(p: &Palette) -> String {
     format!(
         r#"
@@ -172,6 +229,22 @@ button.fkey label {{
 }}
 label.settings-on {{
   color: {accent};
+}}
+button.hot {{
+  background: transparent;
+  color: {fg};
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 4px 12px;
+  min-height: 0;
+  min-width: 0;
+}}
+button.hot:hover, button.hot:focus {{
+  background: {sel};
+}}
+button.hot-on {{
+  background: {sel};
 }}
 "#,
         bg = p.background,

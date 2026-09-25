@@ -27,31 +27,52 @@ pub fn mounts() -> Vec<Mount> {
 pub fn parse_mounts(text: &str) -> Vec<Mount> {
     let mut out = Vec::new();
     let mut labels = std::collections::HashSet::new();
+    let mut automounts = Vec::new();
     for line in text.lines() {
         let mut parts = line.split_whitespace();
         let Some(dev) = parts.next() else { continue };
         let Some(mnt) = parts.next() else { continue };
         let Some(fstype) = parts.next() else { continue };
-        if !REAL_FS.contains(&fstype) {
-            continue;
-        }
         let path = PathBuf::from(unescape_mount(mnt));
-        if skip_mount(&path) || out.iter().any(|m: &Mount| m.path == path) {
+        if skip_mount(&path) {
             continue;
         }
-        let label = unique_label(&path, &mut labels);
-        let removable = path.starts_with("/media") || path.starts_with("/run/media");
-        let network = matches!(fstype, "cifs" | "smb3" | "nfs" | "nfs4" | "fuse.sshfs");
-        out.push(Mount {
-            label,
-            path,
-            device: dev.to_string(),
-            removable,
-            network,
-        });
+        // Idle systemd automounts stay autofs until the directory is opened.
+        if fstype == "autofs" {
+            if user_automount(&path) {
+                automounts.push((path, dev.to_string()));
+            }
+            continue;
+        }
+        if !REAL_FS.contains(&fstype) || out.iter().any(|m: &Mount| m.path == path) {
+            continue;
+        }
+        out.push(mount_at(path, dev, fstype, &mut labels));
+    }
+    for (path, dev) in automounts {
+        if out.iter().any(|m| m.path == path) {
+            continue;
+        }
+        out.push(mount_at(path, &dev, "autofs", &mut labels));
     }
     out.sort_by(|a, b| (a.path != Path::new("/")).cmp(&(b.path != Path::new("/"))).then(a.path.cmp(&b.path)));
     out
+}
+
+fn mount_at(path: PathBuf, dev: &str, fstype: &str, labels: &mut std::collections::HashSet<String>) -> Mount {
+    let removable = path.starts_with("/media") || path.starts_with("/run/media");
+    let network = matches!(fstype, "cifs" | "smb3" | "nfs" | "nfs4" | "fuse.sshfs");
+    Mount {
+        label: unique_label(&path, labels),
+        path,
+        device: dev.to_string(),
+        removable,
+        network,
+    }
+}
+
+fn user_automount(path: &Path) -> bool {
+    path.starts_with("/mnt") || path.starts_with("/media") || path.starts_with("/run/media")
 }
 
 fn skip_mount(path: &Path) -> bool {
@@ -83,6 +104,9 @@ pub fn places(home: &Path, bookmarks: &[Bookmark]) -> Vec<(String, PathBuf)> {
         ("/".into(), PathBuf::from("/")),
     ];
     for mark in bookmarks {
+        if mark.path.as_os_str().is_empty() || mark.kind == "menu" || mark.kind == "sep" || mark.kind == "end" {
+            continue;
+        }
         if !out.iter().any(|(_, path)| path == &mark.path) {
             out.push((mark.name.clone(), mark.path.clone()));
         }

@@ -98,6 +98,7 @@ const MEMORY: &[(&str, fn() -> Result<(), String>)] = &[
     ("insert_mark_is_used", insert_mark_is_used),
     ("space_marks_without_moving_cursor", space_marks_without_moving_cursor),
     ("colors_toml_overrides_palette", colors_toml_overrides_palette),
+    ("list_background_color_and_image", list_background_color_and_image),
     ("enter_opens_directory", enter_opens_directory),
     ("up_goes_to_parent", up_goes_to_parent),
     ("refresh_bumps_token", refresh_bumps_token),
@@ -112,6 +113,7 @@ const MEMORY: &[(&str, fn() -> Result<(), String>)] = &[
     ("terminal_argv_without_starting", terminal_argv_without_starting),
     ("quick_view_ignores_stale_generation", quick_view_ignores_stale_generation),
     ("lister_ansi_and_ascii", lister_ansi_and_ascii),
+    ("hotlist_accel_submenu", hotlist_accel_submenu),
 ];
 
 const FS: &[&str] = &[
@@ -259,6 +261,24 @@ bright_foreground = \"#555555\"
     eq(palette.background.as_str(), "#111111", "colors")
 }
 
+fn list_background_color_and_image() -> Result<(), String> {
+    let palette = theme::builtin();
+    let plain = theme::list_background(&palette, "", "", 0);
+    if !plain.is_empty() {
+        return Err(format!("plain {plain}"));
+    }
+    let color = theme::list_background(&palette, "#abcdef", "", 0);
+    if !color.contains("#abcdef") || color.contains("url(") {
+        return Err(format!("color {color}"));
+    }
+    eq(theme::css_file_url("/My Pictures/a.png").as_str(), "file:///My%20Pictures/a.png", "url")?;
+    let image = theme::list_background(&palette, "#abcdef", "/My Pictures/a.png", 70);
+    if !image.contains("file:///My%20Pictures/a.png") || !image.contains("0.30") {
+        return Err(format!("image {image}"));
+    }
+    Ok(())
+}
+
 fn enter_opens_directory() -> Result<(), String> {
     let mut state = AppState::new(pb("/left"), pb("/right"));
     let mut dir = file("sub", 0);
@@ -335,6 +355,9 @@ tmpfs /run tmpfs rw 0 0
 /dev/sda1 /media/marcus/USB vfat rw 0 0
 /dev/nvme0n1p1 /boot/efi vfat rw 0 0
 /dev/sdb1 /run/media/marcus/Stick exfat rw 0 0
+systemd-1 /proc/sys/fs/binfmt_misc autofs rw 0 0
+systemd-1 /mnt/wd4tb autofs rw 0 0
+systemd-1 /mnt/seagate12tb autofs rw 0 0
 //smb.lan/seagate12tb /mnt/seagate12tb cifs rw 0 0
 ";
     let mounts = comarchy::places::parse_mounts(text);
@@ -356,6 +379,13 @@ tmpfs /run tmpfs rw 0 0
     let share = mounts.iter().find(|m| m.path == pb("/mnt/seagate12tb")).ok_or("share")?;
     if !share.network || share.removable || share.label != "seagate12tb" {
         return Err("share".into());
+    }
+    let idle = mounts.iter().find(|m| m.path == pb("/mnt/wd4tb")).ok_or("wd")?;
+    if idle.network || idle.label != "wd4tb" {
+        return Err("idle automount".into());
+    }
+    if paths.iter().any(|p| p.starts_with("/proc")) {
+        return Err("binfmt listed".into());
     }
     Ok(())
 }
@@ -642,15 +672,48 @@ fn lister_large_file_reads_window_only(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn hotlist_accel_submenu() -> Result<(), String> {
+    let (label, accel) = comarchy::hotlist::split_accel("Dropbox &d");
+    eq(label, "Dropbox d".into(), "label")?;
+    eq(accel, Some('d'), "accel")?;
+    let (label, accel) = comarchy::hotlist::split_accel("A && B");
+    eq(label, "A & B".into(), "amp")?;
+    eq(accel, None, "no accel")?;
+    let marks = vec![
+        Bookmark { name: "Dropbox &d".into(), path: pb("/drop"), target: PathBuf::new(), kind: String::new() },
+        Bookmark { name: "Work".into(), path: PathBuf::new(), target: PathBuf::new(), kind: "menu".into() },
+        Bookmark { name: "Projects &p".into(), path: pb("/proj"), target: PathBuf::new(), kind: String::new() },
+        Bookmark { name: "--".into(), path: PathBuf::new(), target: PathBuf::new(), kind: "end".into() },
+        Bookmark { name: "-".into(), path: PathBuf::new(), target: PathBuf::new(), kind: "sep".into() },
+    ];
+    let root = comarchy::hotlist::rows(&marks, None);
+    if root.len() != 3 {
+        return Err(format!("root {}", root.len()));
+    }
+    let kids = comarchy::hotlist::rows(&marks, Some(1));
+    if kids.len() != 1 {
+        return Err(format!("submenu {}", kids.len()));
+    }
+    if comarchy::hotlist::dir_index(&marks, Path::new("/drop")) != Some(0) {
+        return Err("index".into());
+    }
+    Ok(())
+}
+
 fn bookmark_roundtrip_config(dir: &Path) -> Result<(), String> {
     let path = dir.join("config.toml");
     let mut cfg = Config::default();
-    cfg.bookmarks.push(Bookmark { name: "Work".into(), path: pb("/work") });
+    cfg.bookmarks.push(Bookmark {
+        name: "Work".into(),
+        path: pb("/work"),
+        target: pb("/other"),
+        kind: String::new(),
+    });
     cfg.auto_columns = false;
     cfg.column_widths = vec![10, 20, 30, 40, 50];
     config::save_to(&path, &cfg).map_err(s)?;
     let loaded = config::load_from(&path);
-    if loaded.bookmarks.len() != 1 || loaded.bookmarks[0].name != "Work" {
+    if loaded.bookmarks.len() != 1 || loaded.bookmarks[0].name != "Work" || loaded.bookmarks[0].target != pb("/other") {
         return Err("bookmark".into());
     }
     if loaded.auto_columns || loaded.column_widths != vec![10, 20, 30, 40, 50] {
