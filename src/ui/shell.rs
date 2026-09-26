@@ -9,7 +9,7 @@ use relm4::gtk::gio;
 use relm4::gtk::prelude::*;
 use relm4::RelmWidgetExt;
 
-use comarchy::listing::SortKey;
+use rust_commander::listing::SortKey;
 
 use super::row::{self, EntryObject};
 
@@ -53,7 +53,8 @@ pub struct Shell {
 }
 
 pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> Shell {
-    window.add_css_class("comarchy");
+    window.add_css_class("rust-commander");
+    set_logo(window);
     let css = gtk::CssProvider::new();
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
@@ -236,9 +237,9 @@ pub fn charset_bar(sender: &relm4::Sender<super::msg::Msg>) -> CharsetBar {
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     bar.add_css_class("fbar");
     bar.set_margin_all(4);
-    let ansi = hint_button("A ANSI", || super::msg::Msg::SetCharset(comarchy::lister::Charset::Ansi), sender);
-    let ascii = hint_button("S ASCII", || super::msg::Msg::SetCharset(comarchy::lister::Charset::Ascii), sender);
-    let json = hint_button("J JSON", || super::msg::Msg::SetCharset(comarchy::lister::Charset::Json), sender);
+    let ansi = hint_button("A ANSI", || super::msg::Msg::SetCharset(rust_commander::lister::Charset::Ansi), sender);
+    let ascii = hint_button("S ASCII", || super::msg::Msg::SetCharset(rust_commander::lister::Charset::Ascii), sender);
+    let json = hint_button("J JSON", || super::msg::Msg::SetCharset(rust_commander::lister::Charset::Json), sender);
     ansi.set_visible(true);
     ascii.set_visible(true);
     json.set_visible(true);
@@ -276,7 +277,7 @@ fn drive_bar(
     sender: &relm4::Sender<super::msg::Msg>,
     active: &Rc<Cell<usize>>,
 ) -> (Option<gtk::Box>, Vec<(PathBuf, gtk::Button)>) {
-    let mounts = comarchy::places::mounts();
+    let mounts = rust_commander::places::mounts();
     if mounts.is_empty() {
         return (None, Vec::new());
     }
@@ -376,6 +377,16 @@ pub fn blink_widget(widget: &gtk::Widget) {
 
 pub fn set_flash_enabled(enabled: bool) {
     FLASH_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+fn set_logo(window: &gtk::Window) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("img/rustcommander_no white.png");
+    let Ok(texture) = gtk::gdk::Texture::from_filename(path) else { return };
+    window.connect_realize(move |window| {
+        let Some(surface) = window.surface() else { return };
+        let Ok(toplevel) = surface.downcast::<gtk::gdk::Toplevel>() else { return };
+        toplevel.set_icon_list(&[texture.clone()]);
+    });
 }
 
 fn drive_icon(removable: bool, network: bool) -> gtk::Widget {

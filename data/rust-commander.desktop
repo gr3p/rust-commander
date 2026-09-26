@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=Comarchy
+Name=Rust Commander
 Comment=Dual-pane file manager
-Exec=comarchy
-Icon=system-file-manager
+Exec=rust-commander
+Icon=rust-commander
 Terminal=false
 Categories=System;FileManager;
-StartupWMClass=comarchy
+StartupWMClass=se.rustcommander.RustCommander

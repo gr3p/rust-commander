@@ -1,6 +1,6 @@
 #!/bin/sh
 name=${1:-}
-dir=${XDG_CONFIG_HOME:-$HOME/.config}/comarchy
+dir=${XDG_CONFIG_HOME:-$HOME/.config}/rust-commander
 mkdir -p "$dir"
 printf '%s\n' "$name" > "$dir/active-theme"
-killall -USR1 comarchy 2>/dev/null || true
+killall -USR1 rust-commander 2>/dev/null || true

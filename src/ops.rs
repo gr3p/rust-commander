@@ -327,7 +327,7 @@ fn try_reflink(src: &File, dst: &File) -> bool {
 
 fn partial_path(dest: &Path) -> PathBuf {
     let name = dest.file_name().and_then(|s| s.to_str()).unwrap_or("file");
-    dest.with_file_name(format!(".comarchy-partial-{name}"))
+    dest.with_file_name(format!(".rust-commander-partial-{name}"))
 }
 
 fn count_entries(path: &Path) -> u64 {

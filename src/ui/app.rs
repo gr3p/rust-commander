@@ -11,12 +11,12 @@ use relm4::gtk::prelude::*;
 use relm4::prelude::*;
 use relm4::RelmWidgetExt;
 
-use comarchy::config::{self, Bookmark, Config};
-use comarchy::entry::Entry;
-use comarchy::lister::{self, Charset, PreviewBody, ViewMode};
-use comarchy::ops::{self, Choice, Kind, Progress, Report};
-use comarchy::state::{AppState, PaneId};
-use comarchy::theme;
+use rust_commander::config::{self, Bookmark, Config};
+use rust_commander::entry::Entry;
+use rust_commander::lister::{self, Charset, PreviewBody, ViewMode};
+use rust_commander::ops::{self, Choice, Kind, Progress, Report};
+use rust_commander::state::{AppState, PaneId};
+use rust_commander::theme;
 
 use super::msg::{Msg, SYNCING};
 
@@ -67,7 +67,7 @@ struct PendingUnpack {
 }
 
 enum Queued {
-    Pack(PathBuf, comarchy::pack::Options),
+    Pack(PathBuf, rust_commander::pack::Options),
     Sfv(PathBuf),
 }
 
@@ -165,9 +165,9 @@ pub struct App {
 }
 
 pub fn run(smoke: bool) {
-    comarchy::log::info(&format!("start log={}", comarchy::log::path().display()));
+    rust_commander::log::info(&format!("start log={}", rust_commander::log::path().display()));
     let args: Vec<String> = std::env::args().filter(|arg| arg != "--smoke").collect();
-    let app = RelmApp::new("se.comarchy.Comarchy").with_args(args);
+    let app = RelmApp::new("se.rustcommander.RustCommander").with_args(args);
     app.allow_multiple_instances(true);
     app.run::<App>(smoke);
 }
@@ -180,7 +180,7 @@ impl SimpleComponent for App {
 
     view! {
         gtk::Window {
-            set_title: Some("Comarchy"),
+            set_title: Some("Rust Commander"),
             set_default_width: 1200,
             set_default_height: 760,
         }
@@ -489,12 +489,12 @@ impl App {
                 return;
             }
             match key {
-                Key::F3 => self.set_sort(comarchy::listing::SortKey::Name),
-                Key::F4 => self.set_sort(comarchy::listing::SortKey::Ext),
+                Key::F3 => self.set_sort(rust_commander::listing::SortKey::Name),
+                Key::F4 => self.set_sort(rust_commander::listing::SortKey::Ext),
                 Key::F5 if shift => self.start_pack(true, sender),
-                Key::F5 => self.set_sort(comarchy::listing::SortKey::Time),
-                Key::F6 => self.set_sort(comarchy::listing::SortKey::Size),
-                Key::F7 => self.set_sort(comarchy::listing::SortKey::Attr),
+                Key::F5 => self.set_sort(rust_commander::listing::SortKey::Time),
+                Key::F6 => self.set_sort(rust_commander::listing::SortKey::Size),
+                Key::F7 => self.set_sort(rust_commander::listing::SortKey::Attr),
                 Key::s | Key::S => {
                     if shift {
                         self.open_search(sender);
@@ -678,11 +678,11 @@ impl App {
                 let name = text.trim();
                 match ops::make_dir(&parent, name) {
                     Ok(path) => {
-                        comarchy::log::info(&format!("mkdir {}", path.display()));
+                        rust_commander::log::info(&format!("mkdir {}", path.display()));
                         self.refresh_active(sender);
                     }
                     Err(err) => {
-                        comarchy::log::error(&format!("mkdir {name}: {err}"));
+                        rust_commander::log::error(&format!("mkdir {name}: {err}"));
                         self.status = err.to_string();
                     }
                 }
@@ -692,11 +692,11 @@ impl App {
                 let name = text.trim();
                 match ops::make_file(&parent, name) {
                     Ok(path) => {
-                        comarchy::log::info(&format!("create {}", path.display()));
+                        rust_commander::log::info(&format!("create {}", path.display()));
                         self.refresh_active(sender);
                     }
                     Err(err) => {
-                        comarchy::log::error(&format!("create {name}: {err}"));
+                        rust_commander::log::error(&format!("create {name}: {err}"));
                         self.status = err.to_string();
                     }
                 }
@@ -732,7 +732,7 @@ impl App {
                 }
             }
             Err(err) => {
-                comarchy::log::error(&format!("list pane={pane}: {err}"));
+                rust_commander::log::error(&format!("list pane={pane}: {err}"));
                 self.status = err;
             }
         }
@@ -742,13 +742,13 @@ impl App {
         let ui = &self.shell.panes[id.index()];
         ui.spinner.set_visible(true);
         ui.spinner.start();
-        comarchy::log::info(&format!("read {}", path.display()));
+        rust_commander::log::info(&format!("read {}", path.display()));
         let tx = sender.input_sender().clone();
         let pane = id.index();
         let live = Arc::clone(&self.list_live[pane]);
         let epoch = live.fetch_add(1, Ordering::Relaxed) + 1;
         std::thread::spawn(move || {
-            let result = comarchy::listing::read_dir_while(&path, || live.load(Ordering::Relaxed) != epoch)
+            let result = rust_commander::listing::read_dir_while(&path, || live.load(Ordering::Relaxed) != epoch)
                 .map_err(|e| e.to_string());
             tx.emit(Msg::Listed(pane, tab, token, result));
         });
@@ -768,7 +768,7 @@ impl App {
     }
 
     fn activate_cursor(&mut self, sender: &ComponentSender<Self>) {
-        if self.file_under_cursor().is_some_and(|path| comarchy::sfv::is_sfv(&path)) {
+        if self.file_under_cursor().is_some_and(|path| rust_commander::sfv::is_sfv(&path)) {
             self.start_verify(sender);
             return;
         }
@@ -796,7 +796,7 @@ impl App {
         self.spawn_load(sender, id, tab, path, token);
     }
 
-    fn set_sort(&mut self, key: comarchy::listing::SortKey) {
+    fn set_sort(&mut self, key: rust_commander::listing::SortKey) {
         let id = self.state.active;
         let pane = self.state.pane_mut(id);
         if pane.sort == key {
@@ -813,11 +813,11 @@ impl App {
 
     fn show_sort_indicator(&self) {
         let keys = [
-            comarchy::listing::SortKey::Name,
-            comarchy::listing::SortKey::Ext,
-            comarchy::listing::SortKey::Size,
-            comarchy::listing::SortKey::Time,
-            comarchy::listing::SortKey::Attr,
+            rust_commander::listing::SortKey::Name,
+            rust_commander::listing::SortKey::Ext,
+            rust_commander::listing::SortKey::Size,
+            rust_commander::listing::SortKey::Time,
+            rust_commander::listing::SortKey::Attr,
         ];
         let titles = ["Name", "Ext", "Size", "Date", "Attr"];
         for (i, pane) in self.shell.panes.iter().enumerate() {
@@ -852,27 +852,27 @@ impl App {
     fn open_external(&mut self, viewer: bool) {
         let Some(path) = self.file_under_cursor().or_else(|| {
             self.state.cursor_entry(self.state.active).map(|e| {
-                comarchy::listing::entry_path(&self.state.tab(self.state.active).path, e)
+                rust_commander::listing::entry_path(&self.state.tab(self.state.active).path, e)
             })
         }) else { return };
         if viewer && self.cfg.viewer.trim().is_empty() {
             if let Err(err) = launch_default(&path) {
-                comarchy::log::error(&err);
+                rust_commander::log::error(&err);
                 self.status = err;
             }
             return;
         }
         let argv = if viewer {
-            comarchy::external::viewer_argv(&self.cfg.viewer, &path)
+            rust_commander::external::viewer_argv(&self.cfg.viewer, &path)
         } else {
-            comarchy::external::editor_argv(&self.cfg.editor, std::env::var("EDITOR").ok().as_deref(), &path)
+            rust_commander::external::editor_argv(&self.cfg.editor, std::env::var("EDITOR").ok().as_deref(), &path)
         };
         if argv.is_empty() {
             self.status = if viewer { "No viewer found".into() } else { "No editor found".into() };
             return;
         }
         if let Err(err) = spawn_argv(&argv) {
-            comarchy::log::error(&err);
+            rust_commander::log::error(&err);
             self.status = err;
         }
     }
@@ -880,7 +880,7 @@ impl App {
     fn show_places(&mut self, id: PaneId, sender: &ComponentSender<Self>) {
         let tx = sender.input_sender().clone();
         let pane = id.index();
-        let places = comarchy::places::places(&home_dir(), &self.cfg.bookmarks);
+        let places = rust_commander::places::places(&home_dir(), &self.cfg.bookmarks);
         self.close_dialog();
         let win = gtk::Window::new();
         win.set_title(Some(if pane == 0 { "Left places" } else { "Right places" }));
@@ -955,7 +955,7 @@ impl App {
 
     fn hot_go(&mut self, index: usize, sender: &ComponentSender<Self>) {
         let Some(mark) = self.cfg.bookmarks.get(index).cloned() else { return };
-        if !comarchy::hotlist::is_dir(&mark) || mark.path.as_os_str().is_empty() {
+        if !rust_commander::hotlist::is_dir(&mark) || mark.path.as_os_str().is_empty() {
             return;
         }
         let source = self.state.active;
@@ -980,7 +980,7 @@ impl App {
 
     fn hot_add(&mut self, sender: &ComponentSender<Self>) {
         let path = self.state.tab(self.state.active).path.clone();
-        if comarchy::hotlist::dir_index(&self.cfg.bookmarks, &path).is_some() {
+        if rust_commander::hotlist::dir_index(&self.cfg.bookmarks, &path).is_some() {
             return;
         }
         let title = path
@@ -1016,7 +1016,7 @@ impl App {
 
     fn hot_remove(&mut self, sender: &ComponentSender<Self>) {
         let path = self.state.tab(self.state.active).path.clone();
-        let Some(index) = comarchy::hotlist::dir_index(&self.cfg.bookmarks, &path) else { return };
+        let Some(index) = rust_commander::hotlist::dir_index(&self.cfg.bookmarks, &path) else { return };
         self.cfg.bookmarks.remove(index);
         let _ = config::save(&self.cfg);
         for slot in &mut self.hot_stack {
@@ -1069,7 +1069,7 @@ impl App {
                 let marked = self.state.tab(id).marked.clone();
                 vis.iter().map(|&i| {
                     let entry = self.state.tab(id).entries[i].clone();
-                    let path = comarchy::listing::entry_path(&dir, &entry);
+                    let path = rust_commander::listing::entry_path(&dir, &entry);
                     (entry, marked.contains(&path))
                 }).collect()
             } else {
@@ -1098,7 +1098,7 @@ impl App {
             }
             let labels = tab_labels(&tab_titles, tab_active);
             if tabs_current(&ui.tabs) != labels {
-                comarchy::log::info(&format!("tabs rebuild pane={pane}"));
+                rust_commander::log::info(&format!("tabs rebuild pane={pane}"));
                 while let Some(child) = ui.tabs.first_child() {
                     ui.tabs.remove(&child);
                 }
@@ -1107,7 +1107,7 @@ impl App {
                 }
             }
             if pane_dirty {
-                comarchy::log::info(&format!("list reload pane={pane} rows={}", rows.len()));
+                rust_commander::log::info(&format!("list reload pane={pane} rows={}", rows.len()));
                 ui.store.remove_all();
                 for (entry, marked) in &rows {
                     ui.store.append(&EntryObject::from_entry(entry, *marked, self.cfg.file_icons));
@@ -1238,8 +1238,8 @@ impl App {
         }
         self.close_dialog();
         let packed = right.join("smoke.zip");
-        self.confirm_pack(packed.clone(), comarchy::pack::Options { level: 9, password: Some("smoke".into()) }, sender);
-        if !self.wait_job(sender) || !comarchy::archive::list(&packed, None).is_ok_and(|listed| listed.needs_password) {
+        self.confirm_pack(packed.clone(), rust_commander::pack::Options { level: 9, password: Some("smoke".into()) }, sender);
+        if !self.wait_job(sender) || !rust_commander::archive::list(&packed, None).is_ok_and(|listed| listed.needs_password) {
             errors.push("pack failed".into());
         }
         let _ = std::fs::remove_file(&packed);
@@ -1321,20 +1321,20 @@ impl App {
             let buf = ui.view.buffer();
             buf.text(&buf.start_iter(), &buf.end_iter(), false).to_string()
         });
-        if !lister_text.unwrap_or_default().contains("hello comarchy") {
+        if !lister_text.unwrap_or_default().contains("hello rust-commander") {
             errors.push("lister text".into());
         }
         self.close_lister();
 
         self.state.quick_view = true;
         self.preview.generation = self.state.preview_gen;
-        self.preview.set_body(PreviewBody::Text("hello comarchy\n".into()));
+        self.preview.set_body(PreviewBody::Text("hello rust-commander\n".into()));
         self.sync();
         if self.shell.panes[1].stack.visible_child_name().as_deref() != Some("preview") {
             errors.push("quick view hidden".into());
         }
         let preview = self.shell.panes[1].preview.buffer();
-        if !preview.text(&preview.start_iter(), &preview.end_iter(), false).contains("hello comarchy") {
+        if !preview.text(&preview.start_iter(), &preview.end_iter(), false).contains("hello rust-commander") {
             errors.push("quick view text".into());
         }
         let stale_gen = self.state.preview_gen;
@@ -1424,7 +1424,7 @@ impl App {
 
     fn reload_pane(&mut self, id: PaneId) {
         let path = self.state.tab(id).path.clone();
-        let Ok(entries) = comarchy::listing::read_dir(&path) else { return };
+        let Ok(entries) = rust_commander::listing::read_dir(&path) else { return };
         let tab = self.state.pane(id).active;
         let token = self.state.tab(id).token;
         self.state.apply_listing(id, tab, token, entries);
@@ -1441,7 +1441,7 @@ impl App {
         };
         let on = self.state.visible(id).get(index).is_some_and(|&slot| {
             let entry = &self.state.tab(id).entries[slot];
-            let path = comarchy::listing::entry_path(&self.state.tab(id).path, entry);
+            let path = rust_commander::listing::entry_path(&self.state.tab(id).path, entry);
             self.state.tab(id).marked.contains(&path)
         });
         obj.set_marked(on);
@@ -1470,7 +1470,7 @@ impl App {
     fn mark_drives(&self) {
         let dir = &self.state.tab(self.state.active).path;
         let mounts: Vec<&Path> = self.shell.drives.iter().map(|(path, _)| path.as_path()).collect();
-        let hit = comarchy::places::current_mount(&mounts, dir);
+        let hit = rust_commander::places::current_mount(&mounts, dir);
         for (index, (_, button)) in self.shell.drives.iter().enumerate() {
             let on = hit == Some(index);
             if button.has_css_class("current") != on {
@@ -1530,14 +1530,14 @@ fn launch_default(path: &Path) -> Result<(), String> {
         .ok()
         .and_then(|info| info.content_type().map(|kind| kind.to_string()));
     let Some(mime) = mime else {
-        return spawn_argv(&comarchy::external::viewer_argv("", path));
+        return spawn_argv(&rust_commander::external::viewer_argv("", path));
     };
     let Some(app) = gtk::gio::AppInfo::default_for_type(&mime, false) else {
-        return spawn_argv(&comarchy::external::viewer_argv("", path));
+        return spawn_argv(&rust_commander::external::viewer_argv("", path));
     };
     let line = app.commandline().map(|cmd| cmd.to_string_lossy().into_owned()).unwrap_or_default();
     if line.contains("--started-from-file") {
-        let argv = comarchy::external::desktop_argv(&line, path);
+        let argv = rust_commander::external::desktop_argv(&line, path);
         if !argv.is_empty() {
             return spawn_argv(&argv);
         }
@@ -1628,13 +1628,13 @@ fn home_dir() -> PathBuf {
 }
 
 fn smoke_dirs() -> (PathBuf, PathBuf) {
-    let base = home_dir().join("comarchy-smoke");
+    let base = home_dir().join("rust-commander-smoke");
     let left = base.join("left");
     let right = base.join("right");
     let _ = std::fs::remove_dir_all(&base);
     let _ = std::fs::create_dir_all(left.join("sub"));
     let _ = std::fs::create_dir_all(&right);
-    let _ = std::fs::write(left.join("note.txt"), "hello comarchy\n");
+    let _ = std::fs::write(left.join("note.txt"), "hello rust-commander\n");
     let _ = std::fs::write(left.join("sub").join("b.txt"), "nested\n");
     let _ = std::fs::write(left.join("move-me.txt"), "move\n");
     (left, right)

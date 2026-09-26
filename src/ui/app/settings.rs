@@ -8,10 +8,10 @@ use relm4::gtk::gdk::Key;
 use relm4::gtk::prelude::*;
 use relm4::prelude::*;
 
-use comarchy::config::{self};
-use comarchy::entry::Entry;
-use comarchy::state::PaneId;
-use comarchy::theme::{self, Palette};
+use rust_commander::config::{self};
+use rust_commander::entry::Entry;
+use rust_commander::state::PaneId;
+use rust_commander::theme::{self, Palette};
 
 use crate::ui::msg::Msg;
 
@@ -52,7 +52,7 @@ impl App {
     pub(in crate::ui::app) fn layout_columns(&mut self, pane: usize, entries: &[Entry]) {
         let widths = if self.cfg.auto_columns {
             let unit = self.char_unit();
-            let mut px = comarchy::listing::column_pixels(comarchy::listing::column_chars(entries), unit);
+            let mut px = rust_commander::listing::column_pixels(rust_commander::listing::column_chars(entries), unit);
             if self.cfg.file_icons {
                 px[0] += unit;
             }
@@ -252,8 +252,8 @@ impl App {
         column.append(&color_row);
         column.append(&image_row);
         column.append(&strength_row);
-        column.append(&tool_row("7-Zip", comarchy::pack::SEVEN_ZIP_HINT, &self.cfg.seven_zip, "/usr/bin/7z", tx.clone(), true));
-        column.append(&tool_row("RAR", comarchy::pack::RAR_HINT, &self.cfg.rar, "/usr/bin/rar", tx.clone(), false));
+        column.append(&tool_row("7-Zip", rust_commander::pack::SEVEN_ZIP_HINT, &self.cfg.seven_zip, "/usr/bin/7z", tx.clone(), true));
+        column.append(&tool_row("RAR", rust_commander::pack::RAR_HINT, &self.cfg.rar, "/usr/bin/rar", tx.clone(), false));
         column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         column.append(&commands_row(&win));
         scroll.set_child(Some(&column));
@@ -279,7 +279,7 @@ impl App {
     }
 
     pub(in crate::ui::app) fn set_editor(&mut self, id: String) {
-        if id == comarchy::external::EDITOR_BROWSE {
+        if id == rust_commander::external::EDITOR_BROWSE {
             return;
         }
         if self.cfg.editor != id {
@@ -312,7 +312,7 @@ impl App {
         dialog.connect_response(move |dialog, response| {
             if response == gtk::ResponseType::Accept {
                 if let Some(path) = dialog.file().and_then(|file| file.path()) {
-                    tx.emit(Msg::SetEditor(comarchy::external::editor_id_for_path(&path)));
+                    tx.emit(Msg::SetEditor(rust_commander::external::editor_id_for_path(&path)));
                 }
             } else {
                 tx.emit(Msg::EditorPickCancelled);
@@ -524,7 +524,7 @@ pub(in crate::ui::app) fn editor_picker(configured: &str, tx: relm4::Sender<Msg>
     row.add_css_class("settings-row");
     let name = gtk::Label::new(Some("Editor    F4"));
     name.set_xalign(0.0);
-    let choices = comarchy::external::editor_choices(configured);
+    let choices = rust_commander::external::editor_choices(configured);
     let labels: Vec<&str> = choices.iter().map(|choice| choice.label.as_str()).collect();
     let drop = gtk::DropDown::from_strings(&labels);
     drop.add_css_class("editor-pick");
@@ -540,7 +540,7 @@ pub(in crate::ui::app) fn editor_picker(configured: &str, tx: relm4::Sender<Msg>
             return;
         }
         let id = ids_notify.borrow().get(drop.selected() as usize).cloned().unwrap_or_default();
-        if id == comarchy::external::EDITOR_BROWSE {
+        if id == rust_commander::external::EDITOR_BROWSE {
             tx.emit(Msg::PickEditor);
             return;
         }
@@ -552,7 +552,7 @@ pub(in crate::ui::app) fn editor_picker(configured: &str, tx: relm4::Sender<Msg>
 }
 
 pub(in crate::ui::app) fn fill_editor(drop: &gtk::DropDown, ids: &Rc<RefCell<Vec<String>>>, guard: &Rc<Cell<bool>>, configured: &str) {
-    let choices = comarchy::external::editor_choices(configured);
+    let choices = rust_commander::external::editor_choices(configured);
     let labels: Vec<&str> = choices.iter().map(|choice| choice.label.as_str()).collect();
     let selected = choices.iter().position(|choice| choice.id == configured).unwrap_or(0) as u32;
     guard.set(true);

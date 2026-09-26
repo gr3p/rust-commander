@@ -8,9 +8,9 @@ use relm4::gtk::prelude::*;
 use relm4::prelude::*;
 use relm4::RelmWidgetExt;
 
-use comarchy::config::{self};
-use comarchy::ops::{self, Choice, Kind, Report};
-use comarchy::state::{AppState, PaneId};
+use rust_commander::config::{self};
+use rust_commander::ops::{self, Choice, Kind, Report};
+use rust_commander::state::{AppState, PaneId};
 
 use crate::ui::msg::Msg;
 
@@ -99,8 +99,8 @@ impl App {
                     amount = Some(format!(
                         "{:.0}%   {} / {}",
                         (progress.done as f64 / progress.total as f64 * 100.0).min(100.0),
-                        comarchy::listing::format_size(progress.done),
-                        comarchy::listing::format_size(progress.total)
+                        rust_commander::listing::format_size(progress.done),
+                        rust_commander::listing::format_size(progress.total)
                     ));
                 }
                 show = job.started.elapsed() > Duration::from_millis(200);
@@ -170,7 +170,7 @@ impl App {
                 };
                 self.show_error(title, err);
             }
-            comarchy::log::error(&format!("job {err}"));
+            rust_commander::log::error(&format!("job {err}"));
             self.status = first_line(err);
             self.refresh_both(sender);
             return;
@@ -222,7 +222,7 @@ impl App {
             self.status = "Not an archive".into();
             return;
         };
-        if !comarchy::archive::is_archive(&path) {
+        if !rust_commander::archive::is_archive(&path) {
             self.status = "Not an archive".into();
             return;
         }
@@ -254,12 +254,12 @@ impl App {
         self.status = "Reading archive".into();
         let tx = sender.input_sender().clone();
         std::thread::spawn(move || {
-            let result = comarchy::archive::list(&path, password.as_deref()).map_err(|err| err.to_string());
+            let result = rust_commander::archive::list(&path, password.as_deref()).map_err(|err| err.to_string());
             tx.emit(Msg::ArchiveListed(result));
         });
     }
 
-    pub(in crate::ui::app) fn on_archive_listed(&mut self, result: Result<comarchy::archive::Listed, String>, sender: &ComponentSender<Self>) {
+    pub(in crate::ui::app) fn on_archive_listed(&mut self, result: Result<rust_commander::archive::Listed, String>, sender: &ComponentSender<Self>) {
         let Some(pending) = &self.pending else { return };
         let pick = pending.pick;
         let password = pending.password.clone();
@@ -314,12 +314,12 @@ impl App {
         let password = pending.password.clone();
         let Some(pipes) = self.open_job(Work::Unpack) else { return };
         self.status = "Unpacking".into();
-        comarchy::log::info(&format!("unpack {}", archive.display()));
+        rust_commander::log::info(&format!("unpack {}", archive.display()));
         self.ensure_progress();
         let _ = sender;
         std::thread::spawn(move || {
             let set = names.map(|names| names.into_iter().collect::<std::collections::HashSet<_>>());
-            let result = comarchy::archive::extract(
+            let result = rust_commander::archive::extract(
                 &archive,
                 &dest,
                 set.as_ref(),
@@ -375,7 +375,7 @@ impl App {
         self.status = first_line(err);
     }
 
-    pub(in crate::ui::app) fn ask_unpack(&mut self, members: &[comarchy::archive::Member], dest: &str, tx: relm4::Sender<Msg>) {
+    pub(in crate::ui::app) fn ask_unpack(&mut self, members: &[rust_commander::archive::Member], dest: &str, tx: relm4::Sender<Msg>) {
         self.close_dialog();
         let win = gtk::Window::new();
         win.set_title(Some("Unpack"));
@@ -447,7 +447,7 @@ impl App {
     }
 
     pub(in crate::ui::app) fn ask_pack(&mut self, sources: &[PathBuf], dest: &str, tx: relm4::Sender<Msg>) {
-        use comarchy::pack::{self, Format, Options};
+        use rust_commander::pack::{self, Format, Options};
         self.close_dialog();
         let win = gtk::Window::new();
         win.set_title(Some("Pack"));
@@ -570,8 +570,8 @@ impl App {
         self.state.tab(pane).path.join(format!("{stem}.zip")).display().to_string()
     }
 
-    pub(in crate::ui::app) fn confirm_pack(&mut self, dest: PathBuf, opts: comarchy::pack::Options, sender: &ComponentSender<Self>) {
-        if comarchy::pack::format_of(&dest).is_none() {
+    pub(in crate::ui::app) fn confirm_pack(&mut self, dest: PathBuf, opts: rust_commander::pack::Options, sender: &ComponentSender<Self>) {
+        if rust_commander::pack::format_of(&dest).is_none() {
             self.status = "Use a .zip, .7z or .rar name".into();
             return;
         }
@@ -584,24 +584,24 @@ impl App {
         self.spawn_pack(dest, opts, sender);
     }
 
-    pub(in crate::ui::app) fn spawn_pack(&mut self, dest: PathBuf, opts: comarchy::pack::Options, sender: &ComponentSender<Self>) {
-        let Some(format) = comarchy::pack::format_of(&dest) else {
+    pub(in crate::ui::app) fn spawn_pack(&mut self, dest: PathBuf, opts: rust_commander::pack::Options, sender: &ComponentSender<Self>) {
+        let Some(format) = rust_commander::pack::format_of(&dest) else {
             self.status = "Use a .zip, .7z or .rar name".into();
             return;
         };
         let bin = match format {
-            comarchy::pack::Format::Zip => None,
+            rust_commander::pack::Format::Zip => None,
             other => {
                 let configured = match other {
-                    comarchy::pack::Format::SevenZ => self.cfg.seven_zip.as_str(),
-                    comarchy::pack::Format::Rar => self.cfg.rar.as_str(),
-                    comarchy::pack::Format::Zip => "",
+                    rust_commander::pack::Format::SevenZ => self.cfg.seven_zip.as_str(),
+                    rust_commander::pack::Format::Rar => self.cfg.rar.as_str(),
+                    rust_commander::pack::Format::Zip => "",
                 };
-                match comarchy::pack::find_program(configured, comarchy::pack::names(other)) {
+                match rust_commander::pack::find_program(configured, rust_commander::pack::names(other)) {
                     Some(path) => Some(path),
                     None => {
-                        self.show_error("Pack failed", comarchy::pack::hint(other));
-                        self.status = first_line(comarchy::pack::hint(other));
+                        self.show_error("Pack failed", rust_commander::pack::hint(other));
+                        self.status = first_line(rust_commander::pack::hint(other));
                         return;
                     }
                 }
@@ -611,11 +611,11 @@ impl App {
         let cwd = self.state.tab(self.state.active).path.clone();
         let Some(pipes) = self.open_job(Work::Pack) else { return };
         self.status = "Packing".into();
-        comarchy::log::info(&format!("pack {}", dest.display()));
+        rust_commander::log::info(&format!("pack {}", dest.display()));
         self.ensure_progress();
         let _ = sender;
         std::thread::spawn(move || {
-            let result = comarchy::pack::pack(format, bin.as_deref(), &sources, &cwd, &dest, &opts, &pipes.cancel, &mut |progress| {
+            let result = rust_commander::pack::pack(format, bin.as_deref(), &sources, &cwd, &dest, &opts, &pipes.cancel, &mut |progress| {
                 let _ = pipes.progress_tx.send(progress.clone());
             });
             let _ = pipes.done_tx.send(result.map_err(|err| err.to_string()));
@@ -653,7 +653,7 @@ impl App {
         let Some(pipes) = self.open_job(Work::Sfv) else { return };
         let _ = sender;
         std::thread::spawn(move || {
-            let result = comarchy::sfv::create(&root, &sources, &dest, &pipes.cancel, &mut |progress| {
+            let result = rust_commander::sfv::create(&root, &sources, &dest, &pipes.cancel, &mut |progress| {
                 let _ = pipes.progress_tx.send(progress.clone());
             });
             let _ = pipes.done_tx.send(result.map_err(|err| err.to_string()));
@@ -661,14 +661,14 @@ impl App {
     }
 
     pub(in crate::ui::app) fn start_verify(&mut self, sender: &ComponentSender<Self>) {
-        let Some(path) = self.file_under_cursor().filter(|path| comarchy::sfv::is_sfv(path)) else {
+        let Some(path) = self.file_under_cursor().filter(|path| rust_commander::sfv::is_sfv(path)) else {
             self.status = "Not an SFV file".into();
             return;
         };
         let Some(pipes) = self.open_job(Work::Verify) else { return };
         let _ = sender;
         std::thread::spawn(move || {
-            let result = comarchy::sfv::verify(&path, &pipes.cancel, &mut |progress| {
+            let result = rust_commander::sfv::verify(&path, &pipes.cancel, &mut |progress| {
                 let _ = pipes.progress_tx.send(progress.clone());
             });
             let _ = pipes.done_tx.send(result.map_err(|err| err.to_string()));
@@ -717,7 +717,7 @@ impl App {
 
     pub(in crate::ui::app) fn sync_hints(&self) {
         let entry = self.state.cursor_entry(self.state.active);
-        let archive = entry.is_some_and(|entry| !entry.is_dir() && comarchy::archive::is_archive(Path::new(entry.name.as_ref())));
+        let archive = entry.is_some_and(|entry| !entry.is_dir() && rust_commander::archive::is_archive(Path::new(entry.name.as_ref())));
         let sfv = entry.is_some_and(|entry| entry.name.to_ascii_lowercase().ends_with(".sfv"));
         if archive {
             let side = if self.state.active == PaneId::Left { "right" } else { "left" };

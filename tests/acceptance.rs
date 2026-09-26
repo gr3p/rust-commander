@@ -4,21 +4,21 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use comarchy::config::{self, Bookmark, Config};
-use comarchy::entry::{Entry, DIR, HIDDEN};
-use comarchy::external;
-use comarchy::imageview;
-use comarchy::lister::{self, Charset, PreviewBody, ViewMode};
-use comarchy::listing::{self, SortKey};
-use comarchy::ops::{self, Choice, Kind};
-use comarchy::search::{self, Event, Options};
-use comarchy::state::{AppState, PaneId};
-use comarchy::theme;
+use rust_commander::config::{self, Bookmark, Config};
+use rust_commander::entry::{Entry, DIR, HIDDEN};
+use rust_commander::external;
+use rust_commander::imageview;
+use rust_commander::lister::{self, Charset, PreviewBody, ViewMode};
+use rust_commander::listing::{self, SortKey};
+use rust_commander::ops::{self, Choice, Kind};
+use rust_commander::search::{self, Event, Options};
+use rust_commander::state::{AppState, PaneId};
+use rust_commander::theme;
 
 fn main() {
     if let Some(name) = case_arg() {
         let fixture = PathBuf::from(std::env::var("FIXTURE").expect("FIXTURE"));
-        if let Err(err) = comarchy::sandbox::restrict(&fixture) {
+        if let Err(err) = rust_commander::sandbox::restrict(&fixture) {
             eprintln!("landlock failed: {err}");
             std::process::exit(2);
         }
@@ -29,8 +29,8 @@ fn main() {
         return;
     }
 
-    if std::env::var_os("COMARCHY_REQUIRE_SANDBOX").is_some() {
-        if let Ok(real) = std::env::var("COMARCHY_REAL_HOME") {
+    if std::env::var_os("RUST_COMMANDER_REQUIRE_SANDBOX").is_some() {
+        if let Ok(real) = std::env::var("RUST_COMMANDER_REAL_HOME") {
             if !real.is_empty() && Path::new(&real).exists() {
                 eprintln!("refusing to run: {real} is visible");
                 std::process::exit(1);
@@ -68,7 +68,7 @@ fn case_arg() -> Option<String> {
 }
 
 fn spawn(name: &str) -> bool {
-    let dir = std::env::temp_dir().join(format!("comarchy-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("rust-commander-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     if fs::create_dir_all(&dir).is_err() {
         eprintln!("FAIL {name}: fixture");
@@ -413,7 +413,7 @@ fn theme_fallback_without_file() -> Result<(), String> {
 
 fn places_include_home_and_root() -> Result<(), String> {
     let home = pb("/home/example");
-    let places = comarchy::places::places(&home, &[]);
+    let places = rust_commander::places::places(&home, &[]);
     if !places.iter().any(|(_, path)| path == &home) || !places.iter().any(|(_, path)| path == Path::new("/")) {
         return Err("places".into());
     }
@@ -432,7 +432,7 @@ systemd-1 /mnt/wd4tb autofs rw 0 0
 systemd-1 /mnt/seagate12tb autofs rw 0 0
 //smb.lan/seagate12tb /mnt/seagate12tb cifs rw 0 0
 ";
-    let mounts = comarchy::places::parse_mounts(text);
+    let mounts = rust_commander::places::parse_mounts(text);
     let paths: Vec<_> = mounts.iter().map(|m| m.path.clone()).collect();
     eq(paths.first().cloned().unwrap_or_default(), pb("/"), "root first")?;
     if paths.iter().any(|p| p.starts_with("/run") && !p.starts_with("/run/media")) {
@@ -460,15 +460,15 @@ systemd-1 /mnt/seagate12tb autofs rw 0 0
         return Err("binfmt listed".into());
     }
     let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
-    let usb = comarchy::places::current_mount(&refs, Path::new("/media/marcus/USB/dcim")).ok_or("usb slot")?;
+    let usb = rust_commander::places::current_mount(&refs, Path::new("/media/marcus/USB/dcim")).ok_or("usb slot")?;
     if paths[usb] != pb("/media/marcus/USB") {
         return Err("usb prefix".into());
     }
-    let share_i = comarchy::places::current_mount(&refs, Path::new("/mnt/seagate12tb/foto")).ok_or("share slot")?;
+    let share_i = rust_commander::places::current_mount(&refs, Path::new("/mnt/seagate12tb/foto")).ok_or("share slot")?;
     if paths[share_i] != pb("/mnt/seagate12tb") {
         return Err("share prefix".into());
     }
-    let root = comarchy::places::current_mount(&refs, Path::new("/home/marcus")).ok_or("root slot")?;
+    let root = rust_commander::places::current_mount(&refs, Path::new("/home/marcus")).ok_or("root slot")?;
     if paths[root] != pb("/") {
         return Err("root prefix".into());
     }
@@ -627,7 +627,7 @@ fn image_step_stops_at_end() -> Result<(), String> {
 }
 
 fn image_decode_png_and_scales() -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("comarchy-img-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("rust-commander-img-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).map_err(s)?;
     let png = dir.join("dot.png");
@@ -668,7 +668,7 @@ fn bmp24(w: u32, h: u32) -> Vec<u8> {
 }
 
 fn landlock_blocks_outside_write(dir: &Path) -> Result<(), String> {
-    let outside = dir.parent().unwrap().join(format!("comarchy-escape-{}", std::process::id()));
+    let outside = dir.parent().unwrap().join(format!("rust-commander-escape-{}", std::process::id()));
     match File::create(&outside) {
         Ok(_) => {
             let _ = fs::remove_file(&outside);
@@ -882,7 +882,7 @@ fn cancel_removes_partial(dir: &Path) -> Result<(), String> {
         },
         &mut |_, _| Choice::Overwrite,
     );
-    let partial = dest.with_file_name(".comarchy-partial-big-out");
+    let partial = dest.with_file_name(".rust-commander-partial-big-out");
     if dest.exists() || partial.exists() {
         return Err("partial left behind".into());
     }
@@ -925,7 +925,7 @@ fn copy_into_itself_aborts(dir: &Path) -> Result<(), String> {
 
 fn lister_text_hex_binary_window(dir: &Path) -> Result<(), String> {
     let path = dir.join("note.txt");
-    fs::write(&path, "hello\ncomarchy").map_err(s)?;
+    fs::write(&path, "hello\nrust-commander").map_err(s)?;
     let mut reader = lister::Reader::open(&path).map_err(s)?;
     let bytes = reader.read_window().map_err(s)?;
     let text = lister::render(ViewMode::Text, Charset::Utf8, &bytes, 0);
@@ -960,10 +960,10 @@ fn lister_large_file_reads_window_only(dir: &Path) -> Result<(), String> {
 }
 
 fn hotlist_accel_submenu() -> Result<(), String> {
-    let (label, accel) = comarchy::hotlist::split_accel("Dropbox &d");
+    let (label, accel) = rust_commander::hotlist::split_accel("Dropbox &d");
     eq(label, "Dropbox d".into(), "label")?;
     eq(accel, Some('d'), "accel")?;
-    let (label, accel) = comarchy::hotlist::split_accel("A && B");
+    let (label, accel) = rust_commander::hotlist::split_accel("A && B");
     eq(label, "A & B".into(), "amp")?;
     eq(accel, None, "no accel")?;
     let marks = vec![
@@ -973,15 +973,15 @@ fn hotlist_accel_submenu() -> Result<(), String> {
         Bookmark { name: "--".into(), path: PathBuf::new(), target: PathBuf::new(), kind: "end".into() },
         Bookmark { name: "-".into(), path: PathBuf::new(), target: PathBuf::new(), kind: "sep".into() },
     ];
-    let root = comarchy::hotlist::rows(&marks, None);
+    let root = rust_commander::hotlist::rows(&marks, None);
     if root.len() != 3 {
         return Err(format!("root {}", root.len()));
     }
-    let kids = comarchy::hotlist::rows(&marks, Some(1));
+    let kids = rust_commander::hotlist::rows(&marks, Some(1));
     if kids.len() != 1 {
         return Err(format!("submenu {}", kids.len()));
     }
-    if comarchy::hotlist::dir_index(&marks, Path::new("/drop")) != Some(0) {
+    if rust_commander::hotlist::dir_index(&marks, Path::new("/drop")) != Some(0) {
         return Err("index".into());
     }
     Ok(())

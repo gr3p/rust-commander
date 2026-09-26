@@ -151,23 +151,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
 
 [[package]]
-name = "comarchy"
-version = "0.1.0"
-dependencies = [
- "crc32fast",
- "gtk4",
- "image",
- "landlock",
- "libc",
- "relm4",
- "serde",
- "toml",
- "unrar-ng",
- "unrar-ng-sys",
- "zip",
-]
-
-[[package]]
 name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1105,6 +1088,23 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "rust-commander"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "gtk4",
+ "image",
+ "landlock",
+ "libc",
+ "relm4",
+ "serde",
+ "toml",
+ "unrar-ng",
+ "unrar-ng-sys",
+ "zip",
 ]
 
 [[package]]

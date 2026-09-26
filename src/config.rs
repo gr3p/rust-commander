@@ -99,7 +99,7 @@ impl Config {
 
 pub fn config_dir() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    home.join(".config/comarchy")
+    home.join(".config/rust-commander")
 }
 
 pub fn config_path() -> PathBuf {

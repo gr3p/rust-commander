@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use relm4::gtk::gdk::{Key, ModifierType};
 
-use comarchy::ops::{self, Choice};
+use rust_commander::ops::{self, Choice};
 
 pub static SYNCING: AtomicBool = AtomicBool::new(false);
 
@@ -14,7 +14,7 @@ pub fn syncing() -> bool {
 pub enum Msg {
     Key(Key, ModifierType),
     FKey(u8, bool),
-    Listed(usize, usize, u64, Result<Vec<comarchy::entry::Entry>, String>),
+    Listed(usize, usize, u64, Result<Vec<rust_commander::entry::Entry>, String>),
     Cursor(usize, u32),
     Activate(usize),
     FilterChanged(usize, String),
@@ -23,8 +23,8 @@ pub enum Msg {
     SearchStart,
     SearchCancel,
     SearchGo(usize),
-    SearchEvent(u64, comarchy::search::Event),
-    Sort(usize, comarchy::listing::SortKey),
+    SearchEvent(u64, rust_commander::search::Event),
+    Sort(usize, rust_commander::listing::SortKey),
     Submit(String),
     CancelAsk,
     Hotlist,
@@ -35,11 +35,11 @@ pub enum Msg {
     HotlistRemove,
     HotlistConfigure,
     HotlistAdded(String, String, bool),
-    HotlistStored(Vec<comarchy::config::Bookmark>),
+    HotlistStored(Vec<rust_commander::config::Bookmark>),
     Conflict(Choice),
     Poll,
-    Preview { generation: u64, body: comarchy::lister::PreviewBody },
-    ImageReady { generation: u64, body: comarchy::lister::PreviewBody },
+    Preview { generation: u64, body: rust_commander::lister::PreviewBody },
+    ImageReady { generation: u64, body: rust_commander::lister::PreviewBody },
     ImageClosed(u64),
     ReloadTheme,
     PickPlace(usize, std::path::PathBuf),
@@ -53,7 +53,7 @@ pub enum Msg {
     ToggleFlashFeedback,
     ToggleImageScale,
     ImageStep(i32),
-    SetCharset(comarchy::lister::Charset),
+    SetCharset(rust_commander::lister::Charset),
     ToggleQuickEdit,
     SaveQuick,
     PickBackground,
@@ -62,9 +62,9 @@ pub enum Msg {
     BackgroundColor(String),
     BackgroundAlpha(u8),
     CloseSettings,
-    ArchiveListed(Result<comarchy::archive::Listed, String>),
+    ArchiveListed(Result<rust_commander::archive::Listed, String>),
     UnpackPick(String, Vec<String>),
-    PackPick(String, comarchy::pack::Options),
+    PackPick(String, rust_commander::pack::Options),
     UnpackList,
     UnpackHere,
     VerifySfv,

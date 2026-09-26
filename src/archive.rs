@@ -816,7 +816,7 @@ mod tests {
     fn tmp(name: &str) -> PathBuf {
         static N: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "comarchy-arc-{}-{}-{name}",
+            "rust-commander-arc-{}-{}-{name}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));
@@ -850,7 +850,7 @@ mod tests {
         let dir = tmp("zip");
         let archive = zip_with(
             &dir,
-            &[("ok.txt", "hello"), ("sub/note.txt", "nested"), ("../evil.txt", "nope"), ("/tmp/comarchy-abs.txt", "nope")],
+            &[("ok.txt", "hello"), ("sub/note.txt", "nested"), ("../evil.txt", "nope"), ("/tmp/rust-commander-abs.txt", "nope")],
             Some(("link", "ok.txt")),
         );
         let dest = dir.join("out");
@@ -861,7 +861,7 @@ mod tests {
         assert_eq!(fs::read_to_string(dest.join("ok.txt")).unwrap(), "hello");
         assert_eq!(fs::read_to_string(dest.join("sub/note.txt")).unwrap(), "nested");
         assert!(!dir.join("evil.txt").exists());
-        assert!(!Path::new("/tmp/comarchy-abs.txt").exists());
+        assert!(!Path::new("/tmp/rust-commander-abs.txt").exists());
         assert!(!dest.join("link").exists());
         let _ = fs::remove_dir_all(&dir);
     }

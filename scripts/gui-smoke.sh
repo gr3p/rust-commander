@@ -27,7 +27,7 @@ else
     fi
 fi
 
-cargo build --offline --bin comarchy
+cargo build --offline --bin rust-commander
 
 real_home=$HOME
 set -- \
@@ -48,7 +48,7 @@ set -- "$@" --ro-bind "$socket" /sandbox/wayland-0 \
     --setenv XDG_RUNTIME_DIR /sandbox \
     --setenv WAYLAND_DISPLAY wayland-0
 
-out=$(bwrap "$@" -- /target/debug/comarchy --smoke 2>&1) || {
+out=$(bwrap "$@" -- /target/debug/rust-commander --smoke 2>&1) || {
     printf '%s\n' "$out" >&2
     echo "GUI smoke failed inside the sandbox" >&2
     exit 1

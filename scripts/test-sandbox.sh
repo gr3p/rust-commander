@@ -17,11 +17,11 @@ else
     fi
 fi
 
-cargo test --offline --no-run --test acceptance --message-format=json > /tmp/comarchy-acceptance.json
+cargo test --offline --no-run --test acceptance --message-format=json > /tmp/rust-commander-acceptance.json
 bin=$(python3 -c '
 import json
 path=""
-for line in open("/tmp/comarchy-acceptance.json"):
+for line in open("/tmp/rust-commander-acceptance.json"):
     try:
         obj=json.loads(line)
     except json.JSONDecodeError:
@@ -56,6 +56,6 @@ exec bwrap \
     --setenv XDG_CONFIG_HOME /sandbox/.config \
     --setenv XDG_DATA_HOME /sandbox/.local/share \
     --setenv PATH /usr/bin:/bin \
-    --setenv COMARCHY_REQUIRE_SANDBOX 1 \
-    --setenv COMARCHY_REAL_HOME "$real_home" \
+    --setenv RUST_COMMANDER_REQUIRE_SANDBOX 1 \
+    --setenv RUST_COMMANDER_REAL_HOME "$real_home" \
     "/target/${rel#target/}"

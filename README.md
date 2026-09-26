@@ -1,4 +1,4 @@
-# Comarchy
+# Rust Commander
 
 Fristående dual-pane-filhanterare för Linux. Tokyo Night används tills ett Omarchy-tema finns på en verifierad sökväg.
 
@@ -11,9 +11,9 @@ cargo run --release
 
 `bubblewrap` behövs bara för `scripts/test-sandbox.sh`, inte för att starta programmet. Omarchy behöver inte vara installerat.
 
-Loggen skrivs till `~/.local/state/comarchy/comarchy.log`.
+Loggen skrivs till `~/.local/state/rust-commander/rust-commander.log`.
 
-Prova kopiera, flytta och radera i en skräpkatalog, till exempel `~/comarchy-prov` med två undermappar.
+Prova kopiera, flytta och radera i en skräpkatalog, till exempel `~/rust-commander-prov` med två undermappar.
 
 1. Öppna vänster panel i den ena mappen och höger i den andra.
 2. F5 kopierar en fil och en mapp med innehåll till höger.
@@ -53,6 +53,6 @@ Utelämnat: Windows-byggen, nätverksgrannskap, parallellport, USB-kabel, UAC, W
 
 ## Omarchy
 
-`omarchy/theme-set` tar temanamnet som första argument, skriver `~/.config/comarchy/active-theme` och skickar SIGUSR1 till Comarchy. Teman läses från `/usr/share/omarchy/themes/<namn>/colors.toml` eller `~/.config/omarchy/themes/<namn>/colors.toml`. Saknas filen används Tokyo Night.
+`omarchy/theme-set` tar temanamnet som första argument, skriver `~/.config/rust-commander/active-theme` och skickar SIGUSR1 till Rust Commander. Teman läses från `/usr/share/omarchy/themes/<namn>/colors.toml` eller `~/.config/omarchy/themes/<namn>/colors.toml`. Saknas filen används Tokyo Night.
 
-`.desktop`-filen ligger i `data/comarchy.desktop`.
+`.desktop`-filen ligger i `data/rust-commander.desktop`.

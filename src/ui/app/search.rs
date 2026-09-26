@@ -7,14 +7,14 @@ use relm4::gtk::prelude::*;
 use relm4::prelude::ComponentSender;
 use relm4::RelmWidgetExt;
 
-use comarchy::search::{self, Event, Options};
+use rust_commander::search::{self, Event, Options};
 
 use super::App;
 use crate::ui::msg::Msg;
 
 pub(super) struct SearchUi {
     window: gtk::Window,
-    source: comarchy::state::PaneId,
+    source: rust_commander::state::PaneId,
     query: gtk::Entry,
     root: gtk::Entry,
     recursive: gtk::CheckButton,

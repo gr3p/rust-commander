@@ -6,8 +6,8 @@ use relm4::gtk;
 use relm4::gtk::prelude::*;
 use relm4::RelmWidgetExt;
 
-use comarchy::config::Bookmark;
-use comarchy::hotlist::{self, Row};
+use rust_commander::config::Bookmark;
+use rust_commander::hotlist::{self, Row};
 
 use super::msg::Msg;
 

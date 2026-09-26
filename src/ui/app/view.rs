@@ -7,9 +7,9 @@ use relm4::gtk::prelude::*;
 use relm4::prelude::*;
 use relm4::RelmWidgetExt;
 
-use comarchy::imageview;
-use comarchy::lister::{self, Charset, PreviewBody, ViewMode};
-use comarchy::state::PaneId;
+use rust_commander::imageview;
+use rust_commander::lister::{self, Charset, PreviewBody, ViewMode};
+use rust_commander::state::PaneId;
 
 use crate::ui::msg::Msg;
 
@@ -253,7 +253,7 @@ impl App {
             pane.preview.set_editable(false);
         }
         paint_edit(&self.shell.edit_button, false);
-        self.shell.window.set_title(Some("Comarchy"));
+        self.shell.window.set_title(Some("Rust Commander"));
         if reload {
             self.note_preview_target();
             self.kick_preview(sender);
@@ -406,7 +406,7 @@ impl App {
         if entry.is_dir() {
             return None;
         }
-        Some(comarchy::listing::entry_path(&self.state.tab(self.state.active).path, entry))
+        Some(rust_commander::listing::entry_path(&self.state.tab(self.state.active).path, entry))
     }
 
     pub(in crate::ui::app) fn toggle_image_scale(&mut self, sender: &ComponentSender<Self>) {

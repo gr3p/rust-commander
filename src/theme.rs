@@ -160,7 +160,7 @@ fn plain_background(p: &Palette, chosen: Option<&str>, strength: u8, selected: &
     let fill = chosen.unwrap_or(p.background.as_str());
     let opacity = f64::from(strength) / 100.0;
     format!(
-        "window.comarchy {{\n  background-color: alpha({fill}, {opacity:.2});\n}}\nwindow.comarchy headerbar,\nwindow.comarchy .titlebar,\nwindow.comarchy frame,\nwindow.comarchy frame > border,\nwindow.comarchy scrolledwindow,\nwindow.comarchy columnview,\nwindow.comarchy columnview > listview,\nwindow.comarchy columnview > listview > row,\nwindow.comarchy columnview > listview > row > cell,\nwindow.comarchy textview,\nwindow.comarchy textview text {{\n  background-color: transparent;\n  background-image: none;\n}}\n{selected}"
+        "window.rust-commander {{\n  background-color: alpha({fill}, {opacity:.2});\n}}\nwindow.rust-commander headerbar,\nwindow.rust-commander .titlebar,\nwindow.rust-commander frame,\nwindow.rust-commander frame > border,\nwindow.rust-commander scrolledwindow,\nwindow.rust-commander columnview,\nwindow.rust-commander columnview > listview,\nwindow.rust-commander columnview > listview > row,\nwindow.rust-commander columnview > listview > row > cell,\nwindow.rust-commander textview,\nwindow.rust-commander textview text {{\n  background-color: transparent;\n  background-image: none;\n}}\n{selected}"
     )
 }
 

@@ -14,7 +14,7 @@ pub fn error(msg: &str) {
 }
 
 pub fn path() -> PathBuf {
-    state_dir().join("comarchy.log")
+    state_dir().join("rust-commander.log")
 }
 
 fn write(level: &str, msg: &str, echo: bool) {
@@ -37,15 +37,15 @@ fn write(level: &str, msg: &str, echo: bool) {
 fn open() -> Option<std::fs::File> {
     let dir = state_dir();
     fs::create_dir_all(&dir).ok()?;
-    OpenOptions::new().create(true).append(true).open(dir.join("comarchy.log")).ok()
+    OpenOptions::new().create(true).append(true).open(dir.join("rust-commander.log")).ok()
 }
 
 fn state_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_STATE_HOME") {
-        return PathBuf::from(dir).join("comarchy");
+        return PathBuf::from(dir).join("rust-commander");
     }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    home.join(".local/state/comarchy")
+    home.join(".local/state/rust-commander")
 }
 
 fn stamp() -> String {

@@ -446,7 +446,7 @@ mod tests {
     fn tmp(name: &str) -> PathBuf {
         static N: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "comarchy-pack-{}-{}-{name}",
+            "rust-commander-pack-{}-{}-{name}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));

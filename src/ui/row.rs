@@ -2,8 +2,8 @@ use relm4::gtk::glib;
 use relm4::gtk::glib::subclass::prelude::*;
 use relm4::gtk::prelude::*;
 
-use comarchy::entry::Entry;
-use comarchy::listing;
+use rust_commander::entry::Entry;
+use rust_commander::listing;
 
 mod imp {
     use super::*;
@@ -35,7 +35,7 @@ mod imp {
 
     #[glib::object_subclass]
     impl ObjectSubclass for EntryObject {
-        const NAME: &'static str = "ComarchyEntry";
+        const NAME: &'static str = "RustCommanderEntry";
         type Type = super::EntryObject;
     }
 
@@ -59,7 +59,7 @@ impl EntryObject {
         } else {
             entry.name.to_string()
         };
-        let glyph = if skip || entry.is_dir() { "" } else { comarchy::archive::unpack_mark(&entry.name) };
+        let glyph = if skip || entry.is_dir() { "" } else { rust_commander::archive::unpack_mark(&entry.name) };
         let icon = if icons { listing::file_icon(&entry.name, entry.is_dir(), entry.is_symlink()) } else { "" };
         glib::Object::builder()
             .property("name", name)
