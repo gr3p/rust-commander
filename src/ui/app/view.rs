@@ -253,7 +253,7 @@ impl App {
             pane.preview.set_editable(false);
         }
         paint_edit(&self.shell.edit_button, false);
-        self.shell.window.set_title(Some("Commander"));
+        self.shell.window.set_title(Some("Comarchy"));
         if reload {
             self.note_preview_target();
             self.kick_preview(sender);

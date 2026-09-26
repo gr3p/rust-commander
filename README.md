@@ -1,4 +1,4 @@
-# Commander
+# Comarchy
 
 Fristående dual-pane-filhanterare för Linux. Tokyo Night används tills ett Omarchy-tema finns på en verifierad sökväg.
 
@@ -53,6 +53,6 @@ Utelämnat: Windows-byggen, nätverksgrannskap, parallellport, USB-kabel, UAC, W
 
 ## Omarchy
 
-`omarchy/theme-set` tar temanamnet som första argument, skriver `~/.config/comarchy/active-theme` och skickar SIGUSR1 till Commander. Teman läses från `/usr/share/omarchy/themes/<namn>/colors.toml` eller `~/.config/omarchy/themes/<namn>/colors.toml`. Saknas filen används Tokyo Night.
+`omarchy/theme-set` tar temanamnet som första argument, skriver `~/.config/comarchy/active-theme` och skickar SIGUSR1 till Comarchy. Teman läses från `/usr/share/omarchy/themes/<namn>/colors.toml` eller `~/.config/omarchy/themes/<namn>/colors.toml`. Saknas filen används Tokyo Night.
 
 `.desktop`-filen ligger i `data/comarchy.desktop`.

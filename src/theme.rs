@@ -160,7 +160,7 @@ fn plain_background(p: &Palette, chosen: Option<&str>, strength: u8, selected: &
     let fill = chosen.unwrap_or(p.background.as_str());
     let opacity = f64::from(strength) / 100.0;
     format!(
-        "window.commander {{\n  background-color: alpha({fill}, {opacity:.2});\n}}\nwindow.commander headerbar,\nwindow.commander .titlebar,\nwindow.commander frame,\nwindow.commander frame > border,\nwindow.commander scrolledwindow,\nwindow.commander columnview,\nwindow.commander columnview > listview,\nwindow.commander columnview > listview > row,\nwindow.commander columnview > listview > row > cell,\nwindow.commander textview,\nwindow.commander textview text {{\n  background-color: transparent;\n  background-image: none;\n}}\n{selected}"
+        "window.comarchy {{\n  background-color: alpha({fill}, {opacity:.2});\n}}\nwindow.comarchy headerbar,\nwindow.comarchy .titlebar,\nwindow.comarchy frame,\nwindow.comarchy frame > border,\nwindow.comarchy scrolledwindow,\nwindow.comarchy columnview,\nwindow.comarchy columnview > listview,\nwindow.comarchy columnview > listview > row,\nwindow.comarchy columnview > listview > row > cell,\nwindow.comarchy textview,\nwindow.comarchy textview text {{\n  background-color: transparent;\n  background-image: none;\n}}\n{selected}"
     )
 }
 

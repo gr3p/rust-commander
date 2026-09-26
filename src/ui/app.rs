@@ -180,7 +180,7 @@ impl SimpleComponent for App {
 
     view! {
         gtk::Window {
-            set_title: Some("Commander"),
+            set_title: Some("Comarchy"),
             set_default_width: 1200,
             set_default_height: 760,
         }

@@ -48,7 +48,7 @@ pub struct Shell {
 }
 
 pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> Shell {
-    window.add_css_class("commander");
+    window.add_css_class("comarchy");
     let css = gtk::CssProvider::new();
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
