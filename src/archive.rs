@@ -200,6 +200,9 @@ fn extract_zip(
         }
         let mut file = zip_at(&mut archive, index, password)?;
         let encrypted = file.encrypted();
+        // Only the exec bits come from the archive. The umask applies as for any new file.
+        let mode = if file.unix_mode().is_some_and(|mode| mode & 0o111 != 0) { 0o755 } else { 0o644 };
+        let time = zip_time(&file);
         file_index += 1;
         let note = format!("{}\n{}", volume_label(path), file_line(file_index, file_total, &name));
         let mut step = |update: &Progress| {
@@ -207,8 +210,13 @@ fn extract_zip(
             update.note = note.clone();
             progress(&update);
         };
-        match write_reader(&mut file, &target, size, &mut written, total, &rel, cancel, &mut step) {
-            Ok(()) => files += 1,
+        match write_reader(&mut file, &target, mode, size, &mut written, total, &rel, cancel, &mut step) {
+            Ok(out) => {
+                if let Some(time) = time {
+                    let _ = out.set_modified(time);
+                }
+                files += 1;
+            }
             Err(Fail::Cancelled) => {
                 let _ = fs::remove_file(&target);
                 return Ok(Report { cancelled: true, files });
@@ -244,6 +252,31 @@ fn zip_at<'a, R: Read + io::Seek>(
 fn zip_name(file: &zip::read::ZipFile<'_, impl Read>) -> Option<String> {
     let path = file.enclosed_name()?;
     slash(path.to_str()?)
+}
+
+// The UTC extended timestamp when there is one. Else the DOS field, which is local time.
+fn zip_time(file: &zip::read::ZipFile<'_, impl Read>) -> Option<std::time::SystemTime> {
+    let utc = file.extra_data_fields().find_map(|field| match field {
+        zip::ExtraField::ExtendedTimestamp(stamp) => stamp.mod_time(),
+        _ => None,
+    });
+    let secs = match utc {
+        Some(secs) => i64::from(secs),
+        None => {
+            let dos = file.last_modified()?;
+            let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+            tm.tm_year = i32::from(dos.year()) - 1900;
+            tm.tm_mon = i32::from(dos.month()) - 1;
+            tm.tm_mday = i32::from(dos.day());
+            tm.tm_hour = i32::from(dos.hour());
+            tm.tm_min = i32::from(dos.minute());
+            tm.tm_sec = i32::from(dos.second());
+            tm.tm_isdst = -1;
+            i64::from(unsafe { libc::mktime(&mut tm) })
+        }
+    };
+    let secs = u64::try_from(secs).ok()?;
+    std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs))
 }
 
 fn list_rar(path: &Path, password: Option<&str>) -> Result<Listed, Fail> {
@@ -565,12 +598,15 @@ fn extract_rar(
             let _ = fs::remove_file(&target);
             return Err(Fail::Message(format!("refusing symlink {}", rel.display())));
         }
-        let len = fs::metadata(&target)?.len();
+        let meta = fs::metadata(&target)?;
+        let len = meta.len();
         if len > size {
             let _ = fs::remove_file(&target);
             return Err(oversized(&rel));
         }
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o644))?;
+        // unrar restores the archived mode. Keep only its exec bits, as for zip.
+        let mode = if meta.permissions().mode() & 0o111 != 0 { 0o755 } else { 0o644 };
+        fs::set_permissions(&target, fs::Permissions::from_mode(mode))?;
         written += len;
         files += 1;
         job.report(written, rel);
@@ -690,8 +726,11 @@ fn keep(
     policy: &mut Policy,
     conflict: &mut dyn FnMut(&Path, &Path) -> Choice,
 ) -> Result<Keep, Fail> {
-    if fs::symlink_metadata(dest).is_err() {
+    let Ok(meta) = fs::symlink_metadata(dest) else {
         return Ok(Keep::Write);
+    };
+    if meta.is_dir() {
+        return Err(Fail::Message(format!("cannot replace folder {} with a file", dest.display())));
     }
     let choice = match *policy {
         Policy::Ask => conflict(src, dest),
@@ -718,12 +757,7 @@ fn keep(
 }
 
 fn clear_dest(dest: &Path) -> Result<(), Fail> {
-    let meta = fs::symlink_metadata(dest)?;
-    if meta.file_type().is_symlink() || meta.is_file() {
-        fs::remove_file(dest)?;
-    } else {
-        fs::remove_dir_all(dest)?;
-    }
+    fs::remove_file(dest)?;
     Ok(())
 }
 
@@ -760,19 +794,20 @@ fn ensure_room(dest: &Path, need: u64) -> Result<(), Fail> {
 fn write_reader(
     input: &mut impl Read,
     dest: &Path,
+    mode: u32,
     declared: u64,
     written: &mut u64,
     total: u64,
     current: &Path,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(&Progress),
-) -> Result<(), Fail> {
+) -> Result<File, Fail> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut output = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .mode(0o644)
+        .mode(mode)
         .custom_flags(libc::O_NOFOLLOW)
         .open(dest)?;
     // Sized to the member so small files don't each zero a 1 MiB buffer.
@@ -805,7 +840,7 @@ fn write_reader(
         *written += n as u64;
         progress(&Progress { done: *written, total, current: current.to_path_buf(), note: String::new() });
     }
-    Ok(())
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -876,6 +911,9 @@ mod tests {
         let mut notes = Vec::new();
         extract(&archive, &dest, None, None, &cancel, &mut |p| notes.push(p.note.clone()), &mut no_conflict).unwrap();
         assert_eq!(fs::read(dest.join("VERSION")).unwrap(), b"unrar-0.4.0");
+        // Stored as 2015-08-07.
+        let time = fs::metadata(dest.join("VERSION")).unwrap().modified().unwrap();
+        assert!(time < std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_500_000_000), "{time:?}");
         assert!(notes.iter().any(|note| note == "version.rar\nVERSION"));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -976,7 +1014,7 @@ mod tests {
         let target = dir.join("out.bin");
         let cancel = AtomicBool::new(false);
         let mut written = 0;
-        let err = write_reader(&mut &b"too long"[..], &target, 3, &mut written, 3, Path::new("out.bin"), &cancel, &mut |_| {});
+        let err = write_reader(&mut &b"too long"[..], &target, 0o644, 3, &mut written, 3, Path::new("out.bin"), &cancel, &mut |_| {});
         assert!(matches!(err, Err(Fail::Message(msg)) if msg.contains("larger than the archive declares")));
         let _ = fs::remove_dir_all(&dir);
     }

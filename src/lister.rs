@@ -98,7 +98,13 @@ fn json_too_large() -> String {
     format!("JSON file is larger than {JSON_MAX} bytes")
 }
 
-pub fn read_for_edit(path: &Path, charset: Charset) -> Result<String, String> {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TextForm {
+    pub bom: bool,
+    pub crlf: bool,
+}
+
+pub fn read_for_edit(path: &Path, charset: Charset) -> Result<(String, TextForm), String> {
     let meta = fs::metadata(path).map_err(|err| err.to_string())?;
     if !meta.is_file() {
         return Err("not a file".into());
@@ -108,14 +114,33 @@ pub fn read_for_edit(path: &Path, charset: Charset) -> Result<String, String> {
     }
     let bytes = fs::read(path).map_err(|err| err.to_string())?;
     let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
-    if choose_charset(name, &bytes, charset) != Charset::Utf8 || std::str::from_utf8(&bytes).is_err() {
-        return Err("Edit is UTF-8".into());
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(text) if choose_charset(name, &bytes, charset) == Charset::Utf8 => text,
+        _ => return Err("Edit is UTF-8".into()),
+    };
+    if text.contains('\0') {
+        return Err("Edit is for text".into());
     }
-    Ok(format_text(&bytes))
+    let bom = text.starts_with('\u{feff}');
+    let body = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let pairs = body.matches("\r\n").count();
+    // Only an all-CRLF file is shown with \n. Mixed endings stay as they are in the buffer.
+    let crlf = pairs > 0 && body.matches('\r').count() == pairs && body.matches('\n').count() == pairs;
+    let body = if crlf { body.replace("\r\n", "\n") } else { body.to_string() };
+    Ok((body, TextForm { bom, crlf }))
 }
 
-pub fn write_text(path: &Path, text: &str) -> io::Result<()> {
-    fs::write(path, text.as_bytes())
+pub fn write_text(path: &Path, text: &str, form: TextForm) -> io::Result<()> {
+    let mut out = String::with_capacity(text.len() + 3);
+    if form.bom {
+        out.push('\u{feff}');
+    }
+    if form.crlf {
+        out.push_str(&text.replace("\r\n", "\n").replace('\n', "\r\n"));
+    } else {
+        out.push_str(text);
+    }
+    crate::ops::write_atomic(path, out.as_bytes())
 }
 
 pub fn format_text(bytes: &[u8]) -> String {
@@ -502,10 +527,27 @@ mod tests {
     fn edit_roundtrip_utf8() {
         let dir = scratch("ok");
         let path = dir.join("note.txt");
-        write_text(&path, "hello\n").unwrap();
-        assert_eq!(read_for_edit(&path, Charset::Utf8).unwrap(), "hello\n");
-        write_text(&path, "changed\n").unwrap();
+        write_text(&path, "hello\n", TextForm::default()).unwrap();
+        assert_eq!(read_for_edit(&path, Charset::Utf8).unwrap().0, "hello\n");
+        write_text(&path, "changed\n", TextForm::default()).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"changed\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edit_keeps_bom_and_crlf() {
+        let dir = scratch("crlf");
+        let path = dir.join("win.txt");
+        fs::write(&path, "\u{feff}a\r\nb\r\n").unwrap();
+        let (text, form) = read_for_edit(&path, Charset::Utf8).unwrap();
+        assert_eq!(text, "a\nb\n");
+        assert_eq!(form, TextForm { bom: true, crlf: true });
+        write_text(&path, "a\nc\n", form).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), "\u{feff}a\r\nc\r\n".as_bytes());
+        fs::write(&path, "a\r\nb\n").unwrap();
+        assert_eq!(read_for_edit(&path, Charset::Utf8).unwrap(), ("a\r\nb\n".to_string(), TextForm::default()));
+        fs::write(&path, "a\0b").unwrap();
+        assert_eq!(read_for_edit(&path, Charset::Utf8).unwrap_err(), "Edit is for text");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -513,7 +555,7 @@ mod tests {
     fn edit_refuses_charset_and_size() {
         let dir = scratch("no");
         let path = dir.join("note.txt");
-        write_text(&path, "hello\n").unwrap();
+        write_text(&path, "hello\n", TextForm::default()).unwrap();
         assert_eq!(read_for_edit(&path, Charset::Ansi).unwrap_err(), "Edit is UTF-8");
         fs::write(&path, [0xff]).unwrap();
         assert_eq!(read_for_edit(&path, Charset::Utf8).unwrap_err(), "Edit is UTF-8");

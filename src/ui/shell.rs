@@ -478,7 +478,8 @@ fn edit_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
     use gtk::gdk::Key;
     let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
     let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
-    key == Key::Escape || (!ctrl && !alt && matches!(key, Key::e | Key::E)) || (ctrl && !alt && matches!(key, Key::s | Key::S))
+    // Plain E is text here. The Edit button or Escape leaves the editor.
+    key == Key::Escape || (ctrl && !alt && matches!(key, Key::s | Key::S))
 }
 
 fn entry_input(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {

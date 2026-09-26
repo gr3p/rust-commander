@@ -1,4 +1,6 @@
+use std::ffi::OsString;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -49,27 +51,26 @@ const TERMINALS: &[&str] = &[
     "xterm",
 ];
 
-pub fn viewer_argv(configured: &str, path: &Path) -> Vec<String> {
+pub fn viewer_argv(configured: &str, path: &Path) -> Vec<OsString> {
     argv(configured, None, "xdg-open", path)
 }
 
 // Desktop Exec field codes. Flatpak VLC drops a file handed to a running player, so that flag is skipped.
-pub fn desktop_argv(exec: &str, path: &Path) -> Vec<String> {
+pub fn desktop_argv(exec: &str, path: &Path) -> Vec<OsString> {
     let uri = file_uri(path);
-    let path_text = path.display().to_string();
     let mut out = Vec::new();
     for arg in split_exec(exec) {
         if arg == "--started-from-file" {
             continue;
         }
         match arg.as_str() {
-            "%f" | "%F" => out.push(path_text.clone()),
-            "%u" | "%U" => out.push(uri.clone()),
+            "%f" | "%F" => out.push(path.into()),
+            "%u" | "%U" => out.push(uri.clone().into()),
             "%i" | "%c" | "%k" => {}
             other => {
                 let other = other.replace("%%", "%");
                 if !other.is_empty() {
-                    out.push(other);
+                    out.push(other.into());
                 }
             }
         }
@@ -108,7 +109,7 @@ fn split_exec(line: &str) -> Vec<String> {
 // Percent-encode each byte. '/' stays, so the result is file:///tmp/a.
 fn file_uri(path: &Path) -> String {
     let mut out = String::from("file://");
-    for b in path.to_string_lossy().bytes() {
+    for &b in path.as_os_str().as_bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
             _ => out.push_str(&format!("%{b:02X}")),
@@ -117,7 +118,7 @@ fn file_uri(path: &Path) -> String {
     out
 }
 
-pub fn editor_argv(configured: &str, editor_env: Option<&str>, path: &Path) -> Vec<String> {
+pub fn editor_argv(configured: &str, editor_env: Option<&str>, path: &Path) -> Vec<OsString> {
     editor_argv_with(configured, editor_env, program_on_path, path)
 }
 
@@ -126,7 +127,7 @@ pub fn editor_argv_with(
     editor_env: Option<&str>,
     exists: impl Fn(&str) -> bool,
     path: &Path,
-) -> Vec<String> {
+) -> Vec<OsString> {
     let configured = configured.trim();
     if !configured.is_empty() && configured != EDITOR_BROWSE {
         if let Some(preset) = PRESETS.iter().find(|preset| preset.id == configured) {
@@ -188,11 +189,11 @@ fn auto_preset(exists: &impl Fn(&str) -> bool) -> Option<&'static Preset> {
     PRESETS.iter().find(|preset| preset.bins.iter().any(|name| exists(name)))
 }
 
-fn preset_cmd(preset: &Preset, exists: &impl Fn(&str) -> bool, path: &Path) -> Option<Vec<String>> {
+fn preset_cmd(preset: &Preset, exists: &impl Fn(&str) -> bool, path: &Path) -> Option<Vec<OsString>> {
     let bin = preset.bins.iter().copied().find(|name| exists(name))?;
-    let mut parts = vec![bin.to_string()];
-    parts.extend(preset.args.iter().copied().map(str::to_string));
-    parts.push(path.display().to_string());
+    let mut parts = vec![OsString::from(bin)];
+    parts.extend(preset.args.iter().copied().map(OsString::from));
+    parts.push(path.into());
     if preset.terminal {
         Some(in_terminal(parts, exists))
     } else {
@@ -200,11 +201,11 @@ fn preset_cmd(preset: &Preset, exists: &impl Fn(&str) -> bool, path: &Path) -> O
     }
 }
 
-fn in_terminal(cmd: Vec<String>, exists: &impl Fn(&str) -> bool) -> Vec<String> {
+fn in_terminal(cmd: Vec<OsString>, exists: &impl Fn(&str) -> bool) -> Vec<OsString> {
     let Some(term) = TERMINALS.iter().copied().find(|name| exists(name)) else {
         return cmd;
     };
-    let mut parts = vec![term.to_string()];
+    let mut parts = vec![OsString::from(term)];
     match term {
         "gnome-terminal" => parts.push("--".into()),
         "kitty" | "foot" => {}
@@ -214,19 +215,19 @@ fn in_terminal(cmd: Vec<String>, exists: &impl Fn(&str) -> bool) -> Vec<String> 
     parts
 }
 
-fn words(line: &str) -> Vec<String> {
-    line.split_whitespace().map(str::to_string).collect()
+fn words(line: &str) -> Vec<OsString> {
+    line.split_whitespace().map(OsString::from).collect()
 }
 
-fn with_file(mut parts: Vec<String>, path: &Path) -> Vec<String> {
+fn with_file(mut parts: Vec<OsString>, path: &Path) -> Vec<OsString> {
     if parts.is_empty() {
         return Vec::new();
     }
-    parts.push(path.display().to_string());
+    parts.push(path.into());
     parts
 }
 
-fn argv(configured: &str, env: Option<&str>, fallback: &str, path: &Path) -> Vec<String> {
+fn argv(configured: &str, env: Option<&str>, fallback: &str, path: &Path) -> Vec<OsString> {
     let chosen = if !configured.trim().is_empty() {
         configured
     } else if let Some(env) = env.filter(|s| !s.trim().is_empty()) {
@@ -234,11 +235,11 @@ fn argv(configured: &str, env: Option<&str>, fallback: &str, path: &Path) -> Vec
     } else {
         fallback
     };
-    let mut parts: Vec<String> = chosen.split_whitespace().map(str::to_string).collect();
+    let mut parts = words(chosen);
     if parts.is_empty() {
-        parts.push(fallback.to_string());
+        parts.push(fallback.into());
     }
-    parts.push(path.display().to_string());
+    parts.push(path.into());
     parts
 }
 

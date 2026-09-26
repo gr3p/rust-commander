@@ -49,12 +49,19 @@ pub fn read_dir_while(path: &Path, stop: impl Fn() -> bool) -> io::Result<Vec<En
     }
     for item in fs::read_dir(path)? {
         if stop() {
-            return Ok(out);
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
         }
         let item = item?;
-        let name = item.file_name();
-        let name = name.to_string_lossy();
-        let meta = item.metadata()?; // statx on the directory fd, not a path walk from /
+        let (name, raw) = match item.file_name().into_string() {
+            Ok(name) => (name, None),
+            Err(raw) => (raw.to_string_lossy().into_owned(), Some(raw.into_boxed_os_str())),
+        };
+        // statx on the directory fd, not a path walk from /. A file deleted meanwhile is left out.
+        let meta = match item.metadata() {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
         let is_link = meta.file_type().is_symlink();
         let is_dir = if is_link {
             fs::metadata(item.path()).map(|m| m.is_dir()).unwrap_or(false)
@@ -79,6 +86,7 @@ pub fn read_dir_while(path: &Path, stop: impl Fn() -> bool) -> io::Result<Vec<En
             .unwrap_or(0);
         out.push(Entry {
             name: name.into(),
+            raw,
             size: if is_dir { 0 } else { meta.len() },
             mtime,
             mode: meta.permissions().mode(),
@@ -235,6 +243,18 @@ pub fn format_mtime(secs: i64) -> String {
     if secs <= 0 {
         return String::new();
     }
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let time = secs as libc::time_t;
+    if !unsafe { libc::localtime_r(&time, &mut tm) }.is_null() {
+        return format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min
+        );
+    }
     let days = secs.div_euclid(86_400);
     let tod = secs.rem_euclid(86_400);
     let (y, m, d) = civil_from_unix_days(days);
@@ -299,6 +319,8 @@ pub fn column_pixels(chars: [usize; 5], unit: i32) -> [i32; 5] {
 pub fn entry_path(dir: &Path, entry: &Entry) -> std::path::PathBuf {
     if entry.name.as_ref() == ".." {
         dir.parent().unwrap_or(dir).to_path_buf()
+    } else if let Some(raw) = &entry.raw {
+        dir.join(&**raw)
     } else {
         dir.join(entry.name.as_ref())
     }

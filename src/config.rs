@@ -1,6 +1,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 
@@ -111,18 +112,80 @@ pub fn active_theme_path() -> PathBuf {
 }
 
 pub fn load() -> Config {
-    load_from(&config_path())
+    let cfg = load_from(&config_path());
+    *base() = Some(cfg.clone());
+    cfg
+}
+
+// What this process last read or wrote. Several windows can run, each with its own copy.
+static BASE: Mutex<Option<Config>> = Mutex::new(None);
+
+fn base() -> MutexGuard<'static, Option<Config>> {
+    BASE.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+// Strict, so a file that is half edited by hand is not merged in.
+fn read_strict(path: &Path) -> Option<Config> {
+    toml::from_str(&fs::read_to_string(path).ok()?).ok()
+}
+
+// Keys this window changed win. The rest keep what another window saved meanwhile.
+fn merge(base: &Config, ours: &Config, disk: &Config) -> Config {
+    let tables = (toml::Table::try_from(base), toml::Table::try_from(ours), toml::Table::try_from(disk));
+    let (Ok(base), Ok(changed), Ok(mut out)) = tables else {
+        return ours.clone();
+    };
+    for (key, value) in changed {
+        if base.get(&key) != Some(&value) {
+            out.insert(key, value);
+        }
+    }
+    out.try_into().unwrap_or_else(|_| ours.clone())
+}
+
+/// Takes the bookmarks from disk, so an edit here does not drop one another window added.
+pub fn reload_bookmarks(cfg: &mut Config) {
+    let Some(disk) = read_strict(&config_path()) else { return };
+    let mut base = base();
+    // Unsaved edits here stay.
+    if let Some(old) = base.as_mut().filter(|old| old.bookmarks == cfg.bookmarks) {
+        old.bookmarks = disk.bookmarks.clone();
+        cfg.bookmarks = disk.bookmarks;
+    }
 }
 
 pub fn load_from(path: &Path) -> Config {
     let Ok(text) = fs::read_to_string(path) else {
         return Config::default();
     };
-    toml::from_str(&text).unwrap_or_default()
+    let err = match toml::from_str(&text) {
+        Ok(cfg) => return cfg,
+        Err(err) => err,
+    };
+    // One bad value must not wipe the bookmarks on the next save. Keep a copy and drop only the bad keys.
+    let _ = fs::copy(path, path.with_extension("toml.bad"));
+    crate::log::error(&format!("config {}: {err}", path.display()));
+    let Ok(mut table) = toml::from_str::<toml::Table>(&text) else {
+        return Config::default();
+    };
+    table.retain(|key, value| {
+        let mut one = toml::Table::new();
+        one.insert(key.to_string(), value.clone());
+        one.try_into::<Config>().is_ok()
+    });
+    table.try_into().unwrap_or_default()
 }
 
 pub fn save(cfg: &Config) -> io::Result<()> {
-    save_to(&config_path(), cfg)
+    let path = config_path();
+    let mut base = base();
+    let merged = match (base.as_ref(), read_strict(&path)) {
+        (Some(old), Some(disk)) => merge(old, cfg, &disk),
+        _ => cfg.clone(),
+    };
+    save_to(&path, &merged)?;
+    *base = Some(cfg.clone());
+    Ok(())
 }
 
 pub fn save_to(path: &Path, cfg: &Config) -> io::Result<()> {
@@ -130,7 +193,7 @@ pub fn save_to(path: &Path, cfg: &Config) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     let text = toml::to_string_pretty(cfg).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    fs::write(path, text)
+    crate::ops::write_atomic(path, text.as_bytes())
 }
 
 #[cfg(test)]
@@ -144,5 +207,19 @@ mod tests {
         assert!(old_config.flash_feedback);
         let disabled: Config = toml::from_str("flash_feedback = false").unwrap();
         assert!(!disabled.flash_feedback);
+    }
+
+    #[test]
+    fn save_keeps_what_another_window_changed() {
+        let base = Config::default();
+        let mark = Bookmark { name: "w".into(), path: "/w".into(), target: PathBuf::new(), kind: String::new() };
+        let ours = Config { sort: "time".into(), ..base.clone() };
+        let disk = Config { bookmarks: vec![mark.clone()], theme: "other".into(), ..base.clone() };
+        let merged = merge(&base, &ours, &disk);
+        assert_eq!(merged.sort, "time");
+        assert_eq!(merged.theme, "other");
+        assert_eq!(merged.bookmarks, vec![mark]);
+        let ours = Config { theme: "mine".into(), ..base.clone() };
+        assert_eq!(merge(&base, &ours, &disk).theme, "mine");
     }
 }

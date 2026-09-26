@@ -1,5 +1,7 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -185,8 +187,13 @@ fn create_zip(
             continue;
         }
         let large = len.is_some_and(|len| len >= u64::from(u32::MAX));
-        zip.start_file(name, file_opts.clone().large_file(large))?;
         let mut input = File::open(&path)?;
+        let meta = input.metadata()?;
+        let mut opts = file_opts.clone().large_file(large).unix_permissions(meta.mode());
+        if let Some(time) = dos_time(meta.mtime()) {
+            opts = opts.last_modified_time(time);
+        }
+        zip.start_file(name, opts)?;
         let mut buf = vec![0u8; 1024 * 1024];
         loop {
             if cancel.load(Ordering::Relaxed) {
@@ -204,6 +211,24 @@ fn create_zip(
     }
     zip.finish()?;
     Ok(files)
+}
+
+// Zip keeps local time in DOS form, which starts in 1980.
+fn dos_time(secs: i64) -> Option<zip::DateTime> {
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let time = secs as libc::time_t;
+    if unsafe { libc::localtime_r(&time, &mut tm) }.is_null() {
+        return None;
+    }
+    zip::DateTime::from_date_and_time(
+        u16::try_from(tm.tm_year + 1900).ok()?,
+        u8::try_from(tm.tm_mon + 1).ok()?,
+        u8::try_from(tm.tm_mday).ok()?,
+        u8::try_from(tm.tm_hour).ok()?,
+        u8::try_from(tm.tm_min).ok()?,
+        u8::try_from(tm.tm_sec).ok()?,
+    )
+    .ok()
 }
 
 fn walk(path: &Path, cwd: &Path, out: &mut Vec<(PathBuf, PathBuf, Option<u64>)>) -> Result<(), Fail> {
@@ -224,7 +249,10 @@ fn walk(path: &Path, cwd: &Path, out: &mut Vec<(PathBuf, PathBuf, Option<u64>)>)
         }
         Ok(())
     } else {
-        out.push((path.to_path_buf(), rel, Some(meta.len())));
+        // Pipes and sockets have no data to pack, and opening a pipe blocks.
+        if meta.is_file() {
+            out.push((path.to_path_buf(), rel, Some(meta.len())));
+        }
         Ok(())
     }
 }
@@ -254,15 +282,16 @@ fn run_tool(
     progress: &mut dyn FnMut(&Progress),
 ) -> Result<u64, Fail> {
     let list = PathBuf::from(format!("{}.list", part.display()));
-    let mut body = String::new();
+    // Raw bytes, so a name that is not UTF-8 still names the file.
+    let mut body = Vec::new();
     for source in sources {
         let rel = source.strip_prefix(cwd).map_err(|_| Fail::Message("file is outside the folder".into()))?;
-        let text = rel_slash(rel);
-        if text.is_empty() || text.contains('\n') {
+        let bytes = rel.as_os_str().as_bytes();
+        if bytes.is_empty() || bytes.contains(&b'\n') {
             return Err(Fail::Message(format!("cannot list {}", source.display())));
         }
-        body.push_str(&text);
-        body.push('\n');
+        body.extend_from_slice(bytes);
+        body.push(b'\n');
     }
     fs::write(&list, body)?;
     let run = (|| {
@@ -277,7 +306,7 @@ fn run_tool(
                 }
             }
             Format::Rar => {
-                cmd.args(["a", "-r", "-y", "-idcd"]).arg(format!("-m{}", rar_method(level)));
+                cmd.args(["a", "-y", "-idcd"]).arg(format!("-m{}", rar_method(level)));
                 if password.is_some() {
                     cmd.arg("-hp");
                 }
@@ -457,19 +486,30 @@ mod tests {
 
     #[test]
     fn zip_roundtrip() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tmp("zip");
         fs::write(dir.join("a.txt"), b"alpha").unwrap();
         fs::create_dir(dir.join("sub")).unwrap();
         fs::write(dir.join("sub/b.txt"), b"beta").unwrap();
+        let script = dir.join("run.sh");
+        fs::write(&script, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        // Even seconds, since zip keeps two-second steps.
+        let when = std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+        File::options().write(true).open(&script).unwrap().set_modified(when).unwrap();
         let dest = dir.join("out.zip");
         let cancel = AtomicBool::new(false);
         let opts = Options { level: 5, password: None };
-        pack(Format::Zip, None, &[dir.join("a.txt"), dir.join("sub")], &dir, &dest, &opts, &cancel, &mut |_| {}).unwrap();
+        pack(Format::Zip, None, &[dir.join("a.txt"), dir.join("sub"), script], &dir, &dest, &opts, &cancel, &mut |_| {}).unwrap();
         let out = dir.join("unpacked");
         fs::create_dir(&out).unwrap();
         archive::extract(&dest, &out, None, None, &cancel, &mut |_| {}, &mut |_, _| crate::ops::Choice::Cancel).unwrap();
         assert_eq!(fs::read(out.join("a.txt")).unwrap(), b"alpha");
         assert_eq!(fs::read(out.join("sub/b.txt")).unwrap(), b"beta");
+        assert_eq!(fs::metadata(out.join("a.txt")).unwrap().permissions().mode() & 0o111, 0);
+        let run = fs::metadata(out.join("run.sh")).unwrap();
+        assert_ne!(run.permissions().mode() & 0o100, 0);
+        assert_eq!(run.modified().unwrap(), when);
         let _ = fs::remove_dir_all(&dir);
     }
 

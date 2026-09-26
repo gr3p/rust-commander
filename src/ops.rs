@@ -65,14 +65,21 @@ pub fn transfer(
                 "target is inside the source",
             ));
         }
-        match one(src, dest, kind, &mut policy, cancel, &mut done, total, progress, conflict)? {
-            Stop::Cancel => {
+        match one(src, dest, kind, &mut policy, cancel, &mut done, total, progress, conflict) {
+            Ok(Stop::Continue) => {}
+            Ok(Stop::Cancel) => {
                 return Ok(Report {
                     cancelled: true,
                     files: done,
                 });
             }
-            Stop::Continue => {}
+            Err(err) if err.kind() == io::ErrorKind::Interrupted && cancel.load(Ordering::Relaxed) => {
+                return Ok(Report {
+                    cancelled: true,
+                    files: done,
+                });
+            }
+            Err(err) => return Err(err),
         }
     }
     Ok(Report {
@@ -104,7 +111,24 @@ fn one(
     let is_link = meta.file_type().is_symlink();
     let is_dir = meta.is_dir();
 
-    if dest.exists() && !(is_dir && !is_link && dest.is_dir()) {
+    let existing = fs::symlink_metadata(dest).ok();
+    if let Some(old) = &existing {
+        use std::os::unix::fs::MetadataExt;
+        if old.dev() == meta.dev() && old.ino() == meta.ino() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} and {} are the same file", src.display(), dest.display()),
+            ));
+        }
+    }
+    let merge = is_dir && !is_link && dest.is_dir();
+    if existing.is_some() && !merge {
+        if existing.as_ref().is_some_and(|old| old.is_dir()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("cannot replace folder {} with a file", dest.display()),
+            ));
+        }
         let choice = match *policy {
             Policy::Ask => conflict(src, dest),
             Policy::Overwrite => Choice::Overwrite,
@@ -120,9 +144,8 @@ fn one(
             Choice::OverwriteAll => *policy = Policy::Overwrite,
             Choice::Overwrite => {}
         }
-        if dest.is_dir() {
-            fs::remove_dir_all(dest)?;
-        } else {
+        // A file is replaced by the final rename, so a failed copy keeps the old one.
+        if is_link || is_dir {
             fs::remove_file(dest)?;
         }
     }
@@ -169,13 +192,20 @@ fn one(
                 return Ok(Stop::Cancel);
             }
         }
+        if !merge {
+            // Set last, so a read-only folder can still take its children and they do not bump its time.
+            let _ = fs::set_permissions(dest, meta.permissions());
+            if let Ok(time) = meta.modified() {
+                let _ = File::open(dest).and_then(|dir| dir.set_modified(time));
+            }
+        }
         if kind == Kind::Move {
             let _ = fs::remove_dir(src);
         }
         return bump(done, total, src, progress);
     }
 
-    if kind == Kind::Move && !dest.exists() {
+    if kind == Kind::Move {
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -184,6 +214,10 @@ fn one(
             Err(err) if err.raw_os_error() == Some(libc::EXDEV) => {}
             Err(err) => return Err(err),
         }
+    }
+    // Pipes, sockets and devices cannot be copied as data. Opening a pipe would block.
+    if !meta.is_file() {
+        return bump(done, total, src, progress);
     }
     copy_file(src, dest, cancel, |n| {
         progress(&Progress {
@@ -232,24 +266,31 @@ fn copy_file(src: &Path, dest: &Path, cancel: &AtomicBool, mut on_chunk: impl Fn
     }
     let partial = partial_path(dest);
     let result = (|| {
+        use std::os::unix::fs::PermissionsExt;
         let mut input = File::open(src)?;
+        let meta = input.metadata()?;
+        // Private until done. A reader that opens it early must not keep a handle to the data.
+        let _ = fs::remove_file(&partial);
         let mut output = fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o644)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(&partial)?;
         if try_reflink(&input, &output) {
-            on_chunk(input.metadata().map(|m| m.len()).unwrap_or(0));
+            on_chunk(meta.len());
         } else {
             copy_loop(&mut input, &mut output, cancel, &mut on_chunk)?;
+        }
+        // Mode and time follow the file. Setuid and setgid do not, since the copy gets a new owner.
+        // Some file systems (vfat) refuse both, which must not fail the copy.
+        let _ = output.set_permissions(fs::Permissions::from_mode(meta.permissions().mode() & 0o777));
+        if let Ok(time) = meta.modified() {
+            let _ = output.set_modified(time);
         }
         output.sync_all()?;
         drop(output);
         fs::rename(&partial, dest)?;
-        if let Ok(meta) = fs::symlink_metadata(src) {
-            let _ = fs::set_permissions(dest, meta.permissions());
-        }
         Ok(())
     })();
     if result.is_err() {
@@ -326,8 +367,71 @@ fn try_reflink(src: &File, dst: &File) -> bool {
 }
 
 fn partial_path(dest: &Path) -> PathBuf {
-    let name = dest.file_name().and_then(|s| s.to_str()).unwrap_or("file");
-    dest.with_file_name(format!(".rust-commander-partial-{name}"))
+    let mut name = std::ffi::OsString::from(".rust-commander-partial-");
+    name.push(dest.file_name().unwrap_or(std::ffi::OsStr::new("file")));
+    dest.with_file_name(name)
+}
+
+/// Writes through a temp file and a rename, so a crash or a full disk keeps the old file.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let old = fs::metadata(&path).ok();
+    // A rename would split a hard link or take the file from its owner.
+    if old.as_ref().is_some_and(|meta| meta.nlink() > 1 || meta.uid() != unsafe { libc::geteuid() }) {
+        return fs::write(&path, bytes);
+    }
+    let temp = partial_path(&path);
+    let _ = fs::remove_file(&temp);
+    let opened = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o666)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&temp);
+    let mut file = match opened {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied && old.is_some() => return fs::write(&path, bytes),
+        Err(err) => return Err(err),
+    };
+    let result = (|| {
+        if let Some(old) = &old {
+            file.set_permissions(old.permissions())?;
+        }
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp, &path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+fn check_name(name: &str) -> io::Result<()> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad file name"));
+    }
+    Ok(())
+}
+
+fn rename_noreplace(src: &Path, dest: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_src = std::ffi::CString::new(src.as_os_str().as_bytes())?;
+    let c_dest = std::ffi::CString::new(dest.as_os_str().as_bytes())?;
+    let rc = unsafe { libc::renameat2(libc::AT_FDCWD, c_src.as_ptr(), libc::AT_FDCWD, c_dest.as_ptr(), libc::RENAME_NOREPLACE) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let err = io::Error::last_os_error();
+    if !matches!(err.raw_os_error(), Some(libc::EINVAL | libc::ENOSYS)) {
+        return Err(err);
+    }
+    // Some file systems have no RENAME_NOREPLACE.
+    if fs::symlink_metadata(dest).is_ok() {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} already exists", dest.display())));
+    }
+    fs::rename(src, dest)
 }
 
 fn count_entries(path: &Path) -> u64 {
@@ -373,9 +477,7 @@ pub fn make_dir(parent: &Path, name: &str) -> io::Result<PathBuf> {
 }
 
 pub fn make_file(parent: &Path, name: &str) -> io::Result<PathBuf> {
-    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad file name"));
-    }
+    check_name(name)?;
     let path = parent.join(name);
     fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
     Ok(path)
@@ -386,7 +488,21 @@ pub fn rename_in_place(path: &Path, new_name: &str) -> io::Result<PathBuf> {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(new_name);
-    fs::rename(path, &dest)?;
+    check_name(new_name)?;
+    if dest == path {
+        return Ok(dest);
+    }
+    if let Ok(old) = fs::symlink_metadata(&dest) {
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::symlink_metadata(path)?;
+        if old.dev() != meta.dev() || old.ino() != meta.ino() {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{new_name} already exists")));
+        }
+        // Same file, only the case differs on a case-insensitive disk.
+        fs::rename(path, &dest)?;
+        return Ok(dest);
+    }
+    rename_noreplace(path, &dest)?;
     Ok(dest)
 }
 

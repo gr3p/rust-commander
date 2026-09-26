@@ -13,7 +13,7 @@ use rust_commander::state::PaneId;
 
 use crate::ui::msg::Msg;
 
-use super::{App, ImageUi, ListerUi};
+use super::{App, ImageUi, ListerUi, QuickEdit};
 
 impl App {
     pub(in crate::ui::app) fn open_viewer(&mut self, sender: &ComponentSender<Self>) {
@@ -212,7 +212,7 @@ impl App {
 
     pub(in crate::ui::app) fn toggle_quick_edit(&mut self, sender: &ComponentSender<Self>) {
         if self.shell.editing.get() {
-            self.stop_quick_edit(true, sender);
+            self.leave_quick_edit(sender);
             return;
         }
         if !self.state.quick_view || self.cursor_is_image() {
@@ -223,8 +223,8 @@ impl App {
             self.status = "Edit is for text".into();
             return;
         };
-        let text = match lister::read_for_edit(&path, self.charset) {
-            Ok(text) => text,
+        let (text, form) = match lister::read_for_edit(&path, self.charset) {
+            Ok(read) => read,
             Err(err) => {
                 self.status = err;
                 return;
@@ -233,10 +233,12 @@ impl App {
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("file").to_string();
         *self.edit_name.borrow_mut() = name.clone();
         self.shell.window.set_title(Some(&name));
-        let preview = &self.shell.panes[self.state.active.other().index()].preview;
+        let pane = self.state.active.other().index();
+        let preview = &self.shell.panes[pane].preview;
         self.edit_quiet.set(true);
         preview.buffer().set_text(&text);
         self.edit_quiet.set(false);
+        self.quick_edit = Some(QuickEdit { path, pane, form, saved: self.edit_changes.get(), armed: None });
         self.shell.editing.set(true);
         preview.set_editable(true);
         preview.set_cursor_visible(true);
@@ -244,11 +246,26 @@ impl App {
         paint_edit(&self.shell.edit_button, true);
     }
 
+    // Returns false when unsaved text stopped the leave. The next try discards it.
+    pub(in crate::ui::app) fn leave_quick_edit(&mut self, sender: &ComponentSender<Self>) -> bool {
+        let changes = self.edit_changes.get();
+        if let Some(edit) = self.quick_edit.as_mut() {
+            if edit.saved != changes && edit.armed != Some(changes) {
+                edit.armed = Some(changes);
+                self.status = "Unsaved changes: Ctrl+S saves, press again to discard".into();
+                return false;
+            }
+        }
+        self.stop_quick_edit(true, sender);
+        true
+    }
+
     pub(in crate::ui::app) fn stop_quick_edit(&mut self, reload: bool, sender: &ComponentSender<Self>) {
         if !self.shell.editing.get() {
             return;
         }
         self.shell.editing.set(false);
+        self.quick_edit = None;
         for pane in &self.shell.panes {
             pane.preview.set_editable(false);
         }
@@ -265,14 +282,18 @@ impl App {
         if !self.shell.editing.get() {
             return;
         }
+        let Some(edit) = self.quick_edit.as_ref() else { return };
         let text = {
-            let preview = &self.shell.panes[self.state.active.other().index()].preview;
-            let buffer = preview.buffer();
+            let buffer = self.shell.panes[edit.pane].preview.buffer();
             buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).to_string()
         };
-        let Some(path) = self.file_under_cursor() else { return };
-        match lister::write_text(&path, &text) {
+        match lister::write_text(&edit.path, &text, edit.form) {
             Ok(()) => {
+                let changes = self.edit_changes.get();
+                if let Some(edit) = self.quick_edit.as_mut() {
+                    edit.saved = changes;
+                    edit.armed = None;
+                }
                 self.shell.window.set_title(Some(&self.edit_name.borrow()));
                 self.status = "Saved".into();
             }

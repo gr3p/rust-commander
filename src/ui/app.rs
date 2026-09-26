@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
@@ -29,22 +29,32 @@ mod search;
 mod settings;
 mod view;
 
+// Targets are taken when the dialog opens, so a cursor move or a click behind it changes nothing.
 enum Ask {
-    Copy,
-    Move,
-    CopyAs,
-    Rename,
+    Copy(Vec<PathBuf>),
+    Move(Vec<PathBuf>),
+    CopyAs(PathBuf),
+    Rename(PathBuf),
     Mkdir,
     CreateFile,
-    Trash,
-    Permanent,
+    Trash(Vec<PathBuf>),
+    Permanent(Vec<PathBuf>),
     Password,
     Overwrite,
+}
+
+struct QuickEdit {
+    path: PathBuf,
+    pane: usize,
+    form: lister::TextForm,
+    saved: u64,
+    armed: Option<u64>,
 }
 
 #[derive(Clone, Copy)]
 enum Work {
     Transfer,
+    Delete,
     Unpack,
     Pack,
     Sfv,
@@ -154,8 +164,10 @@ pub struct App {
     quick_fit: bool,
     edit_quiet: Rc<Cell<bool>>,
     edit_name: Rc<RefCell<String>>,
+    edit_changes: Rc<Cell<u64>>,
+    quick_edit: Option<QuickEdit>,
     preview_live: Arc<AtomicU64>,
-    list_live: [Arc<AtomicU64>; 2],
+    loads: Vec<(u64, Arc<AtomicBool>)>,
     search: Option<search::SearchUi>,
     search_gen: u64,
     search_target: Option<(PaneId, usize, u64, String)>,
@@ -210,6 +222,7 @@ impl SimpleComponent for App {
             .collect();
         let edit_quiet = Rc::new(Cell::new(false));
         let edit_name = Rc::new(RefCell::new(String::new()));
+        let edit_changes = Rc::new(Cell::new(0u64));
         let editing = Rc::clone(&shell.editing);
         let window = shell.window.clone();
         for pane in &shell.panes {
@@ -217,13 +230,24 @@ impl SimpleComponent for App {
             let editing = Rc::clone(&editing);
             let window = window.clone();
             let name = Rc::clone(&edit_name);
+            let changes = Rc::clone(&edit_changes);
             pane.preview.buffer().connect_changed(move |_| {
                 if quiet.get() || !editing.get() {
                     return;
                 }
+                changes.set(changes.get() + 1);
                 window.set_title(Some(&format!("{}*", name.borrow())));
             });
         }
+        // Closing the window with a quick edit open gets the same unsaved-changes guard as Esc.
+        let tx = sender.input_sender().clone();
+        root.connect_close_request(move |_| {
+            if editing.get() {
+                tx.emit(Msg::CloseWindow);
+                return gtk::glib::Propagation::Stop;
+            }
+            gtk::glib::Propagation::Proceed
+        });
         let mut model = App {
             state,
             shell,
@@ -251,8 +275,10 @@ impl SimpleComponent for App {
             quick_fit: true,
             edit_quiet,
             edit_name,
+            edit_changes,
+            quick_edit: None,
             preview_live: Arc::new(AtomicU64::new(0)),
-            list_live: [Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0))],
+            loads: Vec::new(),
             search: None,
             search_gen: 0,
             search_target: None,
@@ -348,13 +374,14 @@ impl App {
                 self.close_dialog();
             }
             Msg::Conflict(choice) => {
-                if let Some(job) = &self.job {
-                    let _ = job.answer_tx.send(choice);
+                // A late answer from a closed dialog must not answer the next question.
+                let open = self.job.as_mut().is_some_and(|job| std::mem::replace(&mut job.conflict_open, false));
+                if open {
+                    if let Some(job) = &self.job {
+                        let _ = job.answer_tx.send(choice);
+                    }
+                    self.close_dialog();
                 }
-                if let Some(job) = &mut self.job {
-                    job.conflict_open = false;
-                }
-                self.close_dialog();
             }
             Msg::Poll => self.poll_job(sender),
             Msg::Preview { generation, body } => {
@@ -390,6 +417,11 @@ impl App {
             Msg::SetCharset(charset) => self.set_charset(charset, sender),
             Msg::ToggleQuickEdit => self.toggle_quick_edit(sender),
             Msg::SaveQuick => self.save_quick(),
+            Msg::CloseWindow => {
+                if self.leave_quick_edit(sender) {
+                    self.shell.window.close();
+                }
+            }
             Msg::ImageStep(delta) => self.step_shown_image(delta, sender),
             Msg::PickBackground => self.pick_background(sender),
             Msg::ClearBackground => self.clear_background(),
@@ -421,11 +453,15 @@ impl App {
             Msg::HotlistAdded(title, path, with_target) => self.hot_added(title, path, with_target, sender),
             Msg::HotlistStored(marks) => self.hot_stored(marks),
             Msg::FocusPane(pane) => {
-                self.shell.active.set(pane);
-                self.state.active = PaneId::from_index(pane);
+                // A click in the quick editor must not make its pane active and hide the editor.
+                if self.quick_edit.as_ref().is_some_and(|edit| edit.pane == pane) {
+                    self.shell.active.set(self.state.active.index());
+                } else {
+                    self.shell.active.set(pane);
+                    self.state.active = PaneId::from_index(pane);
+                }
             }
             Msg::Mount(pane, path) => self.goto_mount(pane, path, sender),
-            Msg::JobDone(result) => self.finish_job(result, sender),
             Msg::Smoke => self.run_smoke(sender),
         }
     }
@@ -513,8 +549,8 @@ impl App {
                 }
                 Key::d | Key::D => self.toggle_hotlist(sender),
                 Key::q | Key::Q => {
-                    if self.shell.editing.get() {
-                        self.stop_quick_edit(false, sender);
+                    if self.shell.editing.get() && !self.leave_quick_edit(sender) {
+                        return;
                     }
                     self.state.quick_view = !self.state.quick_view;
                     if self.state.quick_view {
@@ -555,6 +591,7 @@ impl App {
             Key::F7 => self.on_fkey(7, shift, sender),
             Key::F8 | Key::Delete => self.on_fkey(8, shift, sender),
             Key::F9 if shift => self.start_sfv(sender),
+            Key::ISO_Left_Tab | Key::Tab if self.shell.editing.get() => {}
             Key::ISO_Left_Tab | Key::Tab => {
                 self.state.active = self.state.active.other();
                 self.note_preview_target();
@@ -592,8 +629,10 @@ impl App {
             Key::j | Key::J if self.state.quick_view => self.set_charset(Charset::Json, sender),
             Key::s | Key::S if self.state.quick_view && self.cursor_is_image() => self.toggle_quick_scale(),
             Key::s | Key::S | Key::d | Key::D if self.state.quick_view => self.set_charset(Charset::Ascii, sender),
+            Key::Escape if self.shell.editing.get() => {
+                self.leave_quick_edit(sender);
+            }
             Key::Escape => {
-                self.stop_quick_edit(false, sender);
                 self.state.quick_view = false;
                 self.state.pane_mut(self.state.active).filter.clear();
                 self.shell.panes[self.state.active.index()].filter.set_text("");
@@ -616,22 +655,40 @@ impl App {
             }
             4 => self.open_external(false),
             5 if shift => {
-                self.ask = Some(Ask::CopyAs);
+                let Some(src) = self.cursor_path() else {
+                    self.status = "Nothing selected".into();
+                    return;
+                };
+                self.ask = Some(Ask::CopyAs(src));
                 let name = self.current_name().unwrap_or_default();
                 self.ask_text("Copy as", &name, tx);
             }
             5 => {
-                self.ask = Some(Ask::Copy);
+                let sources = self.state.selected_paths(self.state.active);
+                if sources.is_empty() {
+                    self.status = "Nothing selected".into();
+                    return;
+                }
+                self.ask = Some(Ask::Copy(sources));
                 let dest = self.state.tab(self.state.active.other()).path.display().to_string();
                 self.ask_text("Copy to", &dest, tx);
             }
             6 if shift => {
-                self.ask = Some(Ask::Rename);
+                let Some(src) = self.cursor_path() else {
+                    self.status = "Nothing selected".into();
+                    return;
+                };
+                self.ask = Some(Ask::Rename(src));
                 let name = self.current_name().unwrap_or_default();
                 self.ask_text("Rename", &name, tx);
             }
             6 => {
-                self.ask = Some(Ask::Move);
+                let sources = self.state.selected_paths(self.state.active);
+                if sources.is_empty() {
+                    self.status = "Nothing selected".into();
+                    return;
+                }
+                self.ask = Some(Ask::Move(sources));
                 let dest = self.state.tab(self.state.active.other()).path.display().to_string();
                 self.ask_text("Move to", &dest, tx);
             }
@@ -640,9 +697,18 @@ impl App {
                 self.ask_text("New folder", "", tx);
             }
             8 => {
-                self.ask = Some(if shift { Ask::Permanent } else { Ask::Trash });
-                let title = if shift { "Delete permanently?" } else { "Move to trash?" };
-                self.ask_confirm(title, tx);
+                let paths = self.state.selected_paths(self.state.active);
+                let what = match paths.as_slice() {
+                    [] => {
+                        self.status = "Nothing selected".into();
+                        return;
+                    }
+                    [one] => one.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
+                    many => format!("{} items", many.len()),
+                };
+                let title = if shift { format!("Delete {what} permanently?") } else { format!("Move {what} to trash?") };
+                self.ask = Some(if shift { Ask::Permanent(paths) } else { Ask::Trash(paths) });
+                self.ask_confirm(&title, tx);
             }
             _ => {}
         }
@@ -653,24 +719,22 @@ impl App {
         let ask = self.ask.take();
         self.close_dialog();
         match ask {
-            Some(Ask::Copy) => {
-                let items = jobs::items_into(&self.state, Path::new(&text));
+            Some(Ask::Copy(sources)) => {
+                let items = jobs::items_into(sources, &self.target_dir(&text));
                 self.spawn_transfer(items, Kind::Copy, sender);
             }
-            Some(Ask::Move) => {
-                let items = jobs::items_into(&self.state, Path::new(&text));
+            Some(Ask::Move(sources)) => {
+                let items = jobs::items_into(sources, &self.target_dir(&text));
                 self.spawn_transfer(items, Kind::Move, sender);
             }
-            Some(Ask::CopyAs) => {
-                let items = self.state.transfer_items(Some(text.trim()));
-                self.spawn_transfer(items, Kind::Copy, sender);
+            Some(Ask::CopyAs(src)) => {
+                let dest = src.parent().unwrap_or(Path::new(".")).join(text.trim());
+                self.spawn_transfer(vec![(src, dest)], Kind::Copy, sender);
             }
-            Some(Ask::Rename) => {
-                if let Some(path) = self.state.selected_paths(self.state.active).into_iter().next() {
-                    match ops::rename_in_place(&path, text.trim()) {
-                        Ok(_) => self.refresh_active(sender),
-                        Err(err) => self.status = err.to_string(),
-                    }
+            Some(Ask::Rename(path)) => {
+                match ops::rename_in_place(&path, text.trim()) {
+                    Ok(_) => self.refresh_active(sender),
+                    Err(err) => self.status = err.to_string(),
                 }
             }
             Some(Ask::Mkdir) => {
@@ -701,8 +765,8 @@ impl App {
                     }
                 }
             }
-            Some(Ask::Trash) => self.spawn_delete(false, sender),
-            Some(Ask::Permanent) => self.spawn_delete(true, sender),
+            Some(Ask::Trash(paths)) => self.spawn_delete(paths, false, sender),
+            Some(Ask::Permanent(paths)) => self.spawn_delete(paths, true, sender),
             Some(Ask::Password) => self.retry_password(text, sender),
             Some(Ask::Overwrite) => self.confirm_overwrite(sender),
             None => {}
@@ -710,6 +774,7 @@ impl App {
     }
 
     fn on_listed(&mut self, pane: usize, tab: usize, token: u64, result: Result<Vec<Entry>, String>) {
+        self.loads.retain(|(live, _)| *live != token);
         let ui = &self.shell.panes[pane];
         ui.spinner.stop();
         ui.spinner.set_visible(false);
@@ -738,20 +803,44 @@ impl App {
         }
     }
 
-    fn spawn_load(&self, sender: &ComponentSender<Self>, id: PaneId, tab: usize, path: PathBuf, token: u64) {
+    fn spawn_load(&mut self, sender: &ComponentSender<Self>, id: PaneId, tab: usize, path: PathBuf, token: u64) {
         let ui = &self.shell.panes[id.index()];
         ui.spinner.set_visible(true);
         ui.spinner.start();
         rust_commander::log::info(&format!("read {}", path.display()));
         let tx = sender.input_sender().clone();
         let pane = id.index();
-        let live = Arc::clone(&self.list_live[pane]);
-        let epoch = live.fetch_add(1, Ordering::Relaxed) + 1;
-        std::thread::spawn(move || {
-            let result = rust_commander::listing::read_dir_while(&path, || live.load(Ordering::Relaxed) != epoch)
-                .map_err(|e| e.to_string());
-            tx.emit(Msg::Listed(pane, tab, token, result));
+        // Stop only loads that no tab waits for. A load for another tab keeps going.
+        let state = &self.state;
+        self.loads.retain(|(live, stop)| {
+            let wanted = [PaneId::Left, PaneId::Right]
+                .iter()
+                .any(|&id| state.pane(id).tabs.iter().any(|tab| tab.token == *live));
+            if !wanted {
+                stop.store(true, Ordering::Relaxed);
+            }
+            wanted
         });
+        let stop = Arc::new(AtomicBool::new(false));
+        self.loads.push((token, Arc::clone(&stop)));
+        std::thread::spawn(move || {
+            let result = rust_commander::listing::read_dir_while(&path, || stop.load(Ordering::Relaxed));
+            if result.as_ref().is_err_and(|err| err.kind() == std::io::ErrorKind::Interrupted) && stop.load(Ordering::Relaxed) {
+                return;
+            }
+            tx.emit(Msg::Listed(pane, tab, token, result.map_err(|e| e.to_string())));
+        });
+    }
+
+    fn cursor_path(&self) -> Option<PathBuf> {
+        let id = self.state.active;
+        let entry = self.state.cursor_entry(id).filter(|entry| entry.name.as_ref() != "..")?;
+        Some(rust_commander::listing::entry_path(&self.state.tab(id).path, entry))
+    }
+
+    // A relative target is taken from the active folder, not from the process working directory.
+    fn target_dir(&self, text: &str) -> PathBuf {
+        self.state.tab(self.state.active).path.join(text.trim())
     }
 
     fn refresh_active(&mut self, sender: &ComponentSender<Self>) {
@@ -912,6 +1001,7 @@ impl App {
             return;
         }
         self.hot_stack = vec![None];
+        config::reload_bookmarks(&mut self.cfg);
         self.present_hot(sender);
     }
 
@@ -1300,15 +1390,7 @@ impl App {
         }
         self.on_fkey(8, false, sender);
         self.on_submit("", sender);
-        let mut trashed = false;
-        for _ in 0..300 {
-            if !trash_me.exists() {
-                trashed = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        if !trashed {
+        if !self.wait_job(sender) || trash_me.exists() {
             errors.push("trash failed".into());
         }
 
@@ -1402,6 +1484,14 @@ impl App {
         }).count() != 1 || self.state.visible(PaneId::Left).len() != 2 {
             errors.push("quick filter matches".into());
         }
+
+        // Last, since the guard queues a message that would run after this.
+        self.shell.editing.set(true);
+        self.shell.window.close();
+        if !gtk::prelude::WidgetExt::is_visible(&self.shell.window) {
+            errors.push("window closed during quick edit".into());
+        }
+        self.shell.editing.set(false);
 
         if errors.is_empty() {
             println!("SMOKE_OK");
@@ -1546,7 +1636,7 @@ fn launch_default(path: &Path) -> Result<(), String> {
     app.launch(&[file], ctx).map_err(|err| err.to_string())
 }
 
-fn spawn_argv(argv: &[String]) -> Result<(), String> {
+fn spawn_argv(argv: &[std::ffi::OsString]) -> Result<(), String> {
     if argv.is_empty() {
         return Err("No application".into());
     }
@@ -1555,7 +1645,12 @@ fn spawn_argv(argv: &[String]) -> Result<(), String> {
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::null());
-    cmd.spawn().map(|_| ()).map_err(|err| format!("Cannot start {}: {err}", argv[0]))
+    let mut child = cmd.spawn().map_err(|err| format!("Cannot start {}: {err}", argv[0].to_string_lossy()))?;
+    // Reap the child so it does not stay as a zombie until we exit.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 // Rows live in the inner list, which owns list.scroll-to-item.

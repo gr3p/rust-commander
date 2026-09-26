@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use relm4::gtk::gdk::{Key, ModifierType};
 
-use rust_commander::ops::{self, Choice};
+use rust_commander::ops::Choice;
 
 pub static SYNCING: AtomicBool = AtomicBool::new(false);
 
@@ -56,6 +56,7 @@ pub enum Msg {
     SetCharset(rust_commander::lister::Charset),
     ToggleQuickEdit,
     SaveQuick,
+    CloseWindow,
     PickBackground,
     ClearBackground,
     BackgroundImage(std::path::PathBuf),
@@ -74,5 +75,4 @@ pub enum Msg {
     EditorPickCancelled,
     PickEditor,
     Smoke,
-    JobDone(Result<ops::Report, String>),
 }

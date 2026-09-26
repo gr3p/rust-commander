@@ -1,5 +1,13 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// Unique across all tabs, so a late listing can never land in a tab that moved after a close.
+static TOKENS: AtomicU64 = AtomicU64::new(1);
+
+fn fresh_token() -> u64 {
+    TOKENS.fetch_add(1, Ordering::Relaxed)
+}
 
 use crate::entry::Entry;
 use crate::listing::{self, SortKey};
@@ -47,7 +55,7 @@ impl Tab {
             marked: HashSet::new(),
             back: Vec::new(),
             forward: Vec::new(),
-            token: 1,
+            token: fresh_token(),
         }
     }
 }
@@ -178,11 +186,11 @@ impl AppState {
         let Some(&idx) = vis.get(cursor) else {
             return;
         };
-        let entry_name = self.tab(id).entries[idx].name.clone();
-        if entry_name.as_ref() == ".." {
+        let entry = &self.tab(id).entries[idx];
+        if entry.name.as_ref() == ".." {
             return;
         }
-        let path = self.tab(id).path.join(entry_name.as_ref());
+        let path = listing::entry_path(&self.tab(id).path, entry);
         let tab = self.tab_mut(id);
         if !tab.marked.insert(path.clone()) {
             tab.marked.remove(&path);
@@ -213,7 +221,7 @@ impl AppState {
         tab.entries.clear();
         tab.cursor = 0;
         tab.marked.clear();
-        tab.token += 1;
+        tab.token = fresh_token();
         tab.token
     }
 
@@ -239,7 +247,7 @@ impl AppState {
 
     pub fn refresh(&mut self, id: PaneId) -> (PathBuf, u64) {
         let tab = self.tab_mut(id);
-        tab.token += 1;
+        tab.token = fresh_token();
         (tab.path.clone(), tab.token)
     }
 
@@ -251,7 +259,7 @@ impl AppState {
         tab.entries.clear();
         tab.cursor = 0;
         tab.marked.clear();
-        tab.token += 1;
+        tab.token = fresh_token();
         Some((prev, tab.token))
     }
 
@@ -263,7 +271,7 @@ impl AppState {
         tab.entries.clear();
         tab.cursor = 0;
         tab.marked.clear();
-        tab.token += 1;
+        tab.token = fresh_token();
         Some((next, tab.token))
     }
 
@@ -273,12 +281,10 @@ impl AppState {
         let sort = pane.sort;
         let ascending = pane.ascending;
         let filter = pane.filter.clone();
-        let Some(tab) = pane.tabs.get_mut(tab_index) else {
+        let Some(tab) = pane.tabs.iter_mut().find(|tab| tab.token == token) else {
             return false;
         };
-        if tab.token != token {
-            return false;
-        }
+        let _ = tab_index;
         tab.entries = entries;
         let vis_len = listing::visible_indices(&tab.entries, sort, ascending, show_hidden, &filter).len();
         if vis_len == 0 {

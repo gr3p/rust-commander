@@ -10,7 +10,7 @@ use relm4::RelmWidgetExt;
 
 use rust_commander::config::{self};
 use rust_commander::ops::{self, Choice, Kind, Report};
-use rust_commander::state::{AppState, PaneId};
+use rust_commander::state::PaneId;
 
 use crate::ui::msg::Msg;
 
@@ -22,17 +22,14 @@ impl App {
             self.status = "Nothing selected".into();
             return;
         }
-        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (progress_tx, progress_rx) = mpsc::channel();
-        let (conflict_tx, conflict_rx) = mpsc::channel();
-        let (answer_tx, answer_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
-        let cancel_flag = Arc::clone(&cancel);
+        // One job at a time. A second job would take over the progress and conflict channels.
+        let Some(pipes) = self.open_job(Work::Transfer) else { return };
+        let JobOut { cancel, progress_tx, conflict_tx, answer_rx, done_tx } = pipes;
         std::thread::spawn(move || {
             let result = ops::transfer(
                 &items,
                 kind,
-                &cancel_flag,
+                &cancel,
                 &mut |p| {
                     let _ = progress_tx.send(p.clone());
                 },
@@ -45,36 +42,33 @@ impl App {
             );
             let _ = done_tx.send(result.map_err(|e| e.to_string()));
         });
-        self.meter = None;
-        self.job = Some(Job {
-            work: Work::Transfer,
-            cancel,
-            progress_rx,
-            conflict_rx,
-            answer_tx,
-            done_rx,
-            started: Instant::now(),
-            conflict_open: false,
-        });
         let _ = sender;
     }
 
-    pub(in crate::ui::app) fn spawn_delete(&mut self, permanent: bool, sender: &ComponentSender<Self>) {
-        let paths = self.state.selected_paths(self.state.active);
+    pub(in crate::ui::app) fn spawn_delete(&mut self, paths: Vec<PathBuf>, permanent: bool, sender: &ComponentSender<Self>) {
         if paths.is_empty() {
             self.status = "Nothing selected".into();
             return;
         }
-        let tx = sender.input_sender().clone();
+        let Some(pipes) = self.open_job(Work::Delete) else { return };
+        let JobOut { cancel, progress_tx, done_tx, .. } = pipes;
         std::thread::spawn(move || {
-            let result = ops::delete_paths(&paths, permanent, &mut |path| {
-                if permanent {
-                    return Ok(());
+            let total = paths.len() as u64;
+            for (done, path) in paths.iter().enumerate() {
+                if cancel.load(Ordering::Relaxed) {
+                    let _ = done_tx.send(Ok(Report { cancelled: true, files: done as u64 }));
+                    return;
                 }
-                gio_trash(path)
-            });
-            tx.emit(Msg::JobDone(result.map(|_| Report { cancelled: false, files: 0 }).map_err(|e| e.to_string())));
+                let _ = progress_tx.send(ops::Progress { done: done as u64, total, current: path.clone(), note: String::new() });
+                let result = ops::delete_paths(std::slice::from_ref(path), permanent, &mut |path| gio_trash(path));
+                if let Err(err) = result {
+                    let _ = done_tx.send(Err(format!("{}: {err}", path.display())));
+                    return;
+                }
+            }
+            let _ = done_tx.send(Ok(Report { cancelled: false, files: total }));
         });
+        let _ = sender;
     }
 
     pub(in crate::ui::app) fn poll_job(&mut self, sender: &ComponentSender<Self>) {
@@ -150,7 +144,7 @@ impl App {
             win.close();
         }
         if let Err(err) = &result {
-            if err == "Cancelled" {
+            if err.eq_ignore_ascii_case("cancelled") {
                 self.pending = None;
                 self.status = "Cancelled".into();
                 self.refresh_both(sender);
@@ -160,13 +154,13 @@ impl App {
                 return;
             }
             self.pending = None;
-            if !matches!(work, Work::Transfer) {
+            if !matches!(work, Work::Transfer | Work::Delete) {
                 let title = match work {
                     Work::Unpack if err.starts_with("Archive is damaged") => "Damaged archive",
                     Work::Unpack => "Unpack failed",
                     Work::Pack => "Pack failed",
                     Work::Sfv | Work::Verify => "SFV failed",
-                    Work::Transfer => "Failed",
+                    Work::Transfer | Work::Delete => "Failed",
                 };
                 self.show_error(title, err);
             }
@@ -298,8 +292,9 @@ impl App {
             self.status = "Nothing selected".into();
             return;
         }
+        let dest = self.target_dir(&dest);
         if let Some(pending) = &mut self.pending {
-            pending.dest = PathBuf::from(dest);
+            pending.dest = dest;
             pending.names = Some(names);
             pending.phase = Phase::Extract;
         }
@@ -799,6 +794,7 @@ impl App {
         label.set_wrap(true);
         column.append(&label);
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let answered = std::rc::Rc::new(std::cell::Cell::new(false));
         for (caption, choice) in [
             ("Overwrite", Choice::Overwrite),
             ("All", Choice::OverwriteAll),
@@ -808,9 +804,21 @@ impl App {
         ] {
             let button = gtk::Button::with_label(caption);
             let tx = tx.clone();
-            crate::ui::shell::on_click(&button, move || tx.emit(Msg::Conflict(choice)));
+            let answered = answered.clone();
+            crate::ui::shell::on_click(&button, move || {
+                answered.set(true);
+                tx.emit(Msg::Conflict(choice));
+            });
             row.append(&button);
         }
+        // Closing the window must answer too, or the worker waits forever and every new job is Busy.
+        win.connect_close_request(move |_| {
+            if !answered.get() {
+                answered.set(true);
+                tx.emit(Msg::Conflict(Choice::Cancel));
+            }
+            gtk::glib::Propagation::Proceed
+        });
         column.append(&row);
         win.set_child(Some(&column));
         win.present();
@@ -839,10 +847,17 @@ impl App {
         bar.set_show_text(false);
         let cancel = gtk::Button::with_label("Cancel");
         let flag = self.job.as_ref().map(|job| Arc::clone(&job.cancel));
+        let close_flag = flag.clone();
         crate::ui::shell::on_click(&cancel, move || {
             if let Some(flag) = &flag {
                 flag.store(true, Ordering::Relaxed);
             }
+        });
+        win.connect_close_request(move |_| {
+            if let Some(flag) = &close_flag {
+                flag.store(true, Ordering::Relaxed);
+            }
+            gtk::glib::Propagation::Proceed
         });
         column.append(&label);
         column.append(&bar);
@@ -863,14 +878,15 @@ pub(in crate::ui::app) fn first_line(text: &str) -> String {
     text.lines().next().unwrap_or(text).to_string()
 }
 
-pub(in crate::ui::app) fn items_into(state: &AppState, dest_dir: &Path) -> Vec<(PathBuf, PathBuf)> {
-    state.selected_paths(state.active).into_iter().map(|src| {
+pub(in crate::ui::app) fn items_into(sources: Vec<PathBuf>, dest_dir: &Path) -> Vec<(PathBuf, PathBuf)> {
+    sources.into_iter().map(|src| {
         let name = src.file_name().unwrap_or_default().to_os_string();
         (src, dest_dir.join(name))
     }).collect()
 }
 
 pub(in crate::ui::app) fn gio_trash(path: &Path) -> std::io::Result<()> {
+    use std::io::Write;
     let file = gtk::gio::File::for_path(path);
     if file.trash(gtk::gio::Cancellable::NONE).is_ok() {
         return Ok(());
@@ -879,17 +895,58 @@ pub(in crate::ui::app) fn gio_trash(path: &Path) -> std::io::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| home_dir().join(".local/share"));
     let files = root.join("Trash/files");
+    let info = root.join("Trash/info");
     std::fs::create_dir_all(&files)?;
-    let name = path.file_name().unwrap_or_default();
-    let dest = files.join(name);
-    if std::fs::rename(path, &dest).is_err() {
-        std::fs::copy(path, &dest)?;
-        let meta = std::fs::symlink_metadata(path)?;
-        if meta.is_dir() && !meta.file_type().is_symlink() {
-            std::fs::remove_dir_all(path)?;
-        } else {
-            std::fs::remove_file(path)?;
+    std::fs::create_dir_all(&info)?;
+    let name = path.file_name().unwrap_or_default().to_os_string();
+    let uri = gtk::gio::File::for_path(std::path::absolute(path)?).uri();
+    let when = gtk::glib::DateTime::now_local()
+        .ok()
+        .and_then(|now| now.format("%Y-%m-%dT%H:%M:%S").ok())
+        .map(|text| text.to_string())
+        .unwrap_or_default();
+    // Claim the .trashinfo first, so an earlier trashed file with the same name is never overwritten.
+    for n in 1..10_000u32 {
+        let mut pick = name.clone();
+        if n > 1 {
+            pick.push(format!(".{n}"));
         }
+        let dest = files.join(&pick);
+        let mut info_name = pick.clone();
+        info_name.push(".trashinfo");
+        let info_path = info.join(info_name);
+        if std::fs::symlink_metadata(&dest).is_ok() {
+            continue;
+        }
+        let mut note = match std::fs::OpenOptions::new().write(true).create_new(true).open(&info_path) {
+            Ok(note) => note,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        };
+        let moved = (|| {
+            write!(note, "[Trash Info]\nPath={}\nDeletionDate={when}\n", uri.trim_start_matches("file://"))?;
+            match std::fs::rename(path, &dest) {
+                Err(err) if err.raw_os_error() == Some(libc::EXDEV) => {
+                    let meta = std::fs::symlink_metadata(path)?;
+                    if meta.file_type().is_symlink() {
+                        std::os::unix::fs::symlink(std::fs::read_link(path)?, &dest)?;
+                    } else if meta.is_file() {
+                        if let Err(err) = std::fs::copy(path, &dest) {
+                            let _ = std::fs::remove_file(&dest);
+                            return Err(err);
+                        }
+                    } else {
+                        return Err(err);
+                    }
+                    std::fs::remove_file(path)
+                }
+                other => other,
+            }
+        })();
+        if moved.is_err() {
+            let _ = std::fs::remove_file(&info_path);
+        }
+        return moved;
     }
-    Ok(())
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free name in the trash"))
 }
