@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::ops::{Choice, Progress, Report};
 
-pub const MAX_BYTES: u64 = 8 << 30;
 
 #[derive(Clone, Debug)]
 pub struct Member {
@@ -173,6 +172,7 @@ fn extract_zip(
         plan.push((index, name, file.is_dir(), file.size()));
     }
     let total = plan.iter().filter(|item| !item.2).map(|item| item.3).sum();
+    ensure_room(dest, total)?;
     let file_total = plan.iter().filter(|item| !item.2).count() as u64;
     let mut file_index = 0u64;
     let mut written = 0u64;
@@ -187,9 +187,6 @@ fn extract_zip(
         if dir {
             ensure_dir(&target)?;
             continue;
-        }
-        if size > MAX_BYTES || written.saturating_add(size) > MAX_BYTES {
-            return Err(Fail::Message("archive expands past 8 GiB".into()));
         }
         match keep(&target, &rel, &mut policy, conflict)? {
             Keep::Skip => continue,
@@ -275,6 +272,7 @@ struct RarJob<'a> {
     progress: RefCell<&'a mut dyn FnMut(&Progress)>,
     total: u64,
     base: Cell<u64>,
+    limit: Cell<u64>,
     seen: Cell<u64>,
     sent: Cell<u64>,
     too_big: Cell<bool>,
@@ -282,8 +280,9 @@ struct RarJob<'a> {
 }
 
 impl RarJob<'_> {
-    fn start(&self, base: u64, note: String) {
+    fn start(&self, base: u64, limit: u64, note: String) {
         self.base.set(base);
+        self.limit.set(limit);
         self.seen.set(0);
         self.sent.set(0);
         *self.note.borrow_mut() = note;
@@ -300,11 +299,11 @@ impl RarJob<'_> {
         }
         let seen = self.seen.get().saturating_add(count);
         self.seen.set(seen);
-        let done = self.base.get().saturating_add(seen);
-        if done > MAX_BYTES {
+        if seen > self.limit.get() {
             self.too_big.set(true);
             return -1;
         }
+        let done = self.base.get().saturating_add(seen);
         if self.sent.get() == 0 || seen - self.sent.get() >= 256 * 1024 {
             self.sent.set(seen);
             self.report(done, PathBuf::new());
@@ -390,6 +389,7 @@ fn extract_rar(
     }
     let chosen = |member: &&Member| !member.dir && names.is_none_or(|set| set.contains(&member.name));
     let total = listed.members.iter().filter(chosen).map(|m| m.size).sum();
+    ensure_room(dest, total)?;
     let file_total = listed.members.iter().filter(chosen).count() as u64;
     let mut file_index = 0u64;
     let job = RarJob {
@@ -397,6 +397,7 @@ fn extract_rar(
         progress: RefCell::new(progress),
         total,
         base: Cell::new(0),
+        limit: Cell::new(0),
         seen: Cell::new(0),
         sent: Cell::new(0),
         too_big: Cell::new(false),
@@ -440,9 +441,6 @@ fn extract_rar(
             skip(&handle)?;
             continue;
         }
-        if size > MAX_BYTES || written.saturating_add(size) > MAX_BYTES {
-            return Err(Fail::Message("archive expands past 8 GiB".into()));
-        }
         match keep(&target, &rel, &mut policy, conflict)? {
             Keep::Skip => {
                 skip(&handle)?;
@@ -456,7 +454,7 @@ fn extract_rar(
         }
         file_index += 1;
         let note = unpack_note(path, file_index, file_total, &name);
-        job.start(written, note);
+        job.start(written, size, note);
         job.report(written, rel.clone());
         let dest_name = c_path(&target)?;
         let code = unsafe { unrar_ng_sys::RARProcessFile(handle.0, unrar_ng_sys::RAR_EXTRACT, ptr::null(), dest_name.as_ptr()) };
@@ -466,7 +464,7 @@ fn extract_rar(
                 return Ok(Report { cancelled: true, files });
             }
             if job.too_big.get() {
-                return Err(Fail::Message("archive expands past 8 GiB".into()));
+                return Err(oversized(&rel));
             }
             // RAR4 reports a wrong password as a CRC error.
             if code == unrar_ng_sys::ERAR_BAD_DATA && password.is_some() && flags & unrar_ng_sys::RHDF_ENCRYPTED != 0 {
@@ -479,9 +477,9 @@ fn extract_rar(
             return Err(Fail::Message(format!("refusing symlink {}", rel.display())));
         }
         let len = fs::metadata(&target)?.len();
-        if written.saturating_add(len) > MAX_BYTES {
+        if len > size {
             let _ = fs::remove_file(&target);
-            return Err(Fail::Message("archive expands past 8 GiB".into()));
+            return Err(oversized(&rel));
         }
         fs::set_permissions(&target, fs::Permissions::from_mode(0o644))?;
         written += len;
@@ -640,6 +638,36 @@ fn clear_dest(dest: &Path) -> Result<(), Fail> {
     Ok(())
 }
 
+fn oversized(rel: &Path) -> Fail {
+    Fail::Message(format!("{} unpacks larger than the archive declares", rel.display()))
+}
+
+// Free bytes for unprivileged users on the filesystem holding `path` (or its nearest existing parent).
+fn free_bytes(path: &Path) -> Option<u64> {
+    path.ancestors().find_map(|dir| {
+        let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+        let c = CString::new(dir.as_os_str().as_bytes()).ok()?;
+        let mut st = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        if unsafe { libc::statvfs(c.as_ptr(), st.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        let st = unsafe { st.assume_init() };
+        Some((st.f_bavail as u64).saturating_mul(st.f_frsize as u64))
+    })
+}
+
+fn ensure_room(dest: &Path, need: u64) -> Result<(), Fail> {
+    match free_bytes(dest) {
+        Some(free) if free < need => Err(Fail::Message(format!(
+            "Not enough space in {}: needs {}, {} free",
+            dest.display(),
+            crate::listing::format_size(need),
+            crate::listing::format_size(free)
+        ))),
+        _ => Ok(()),
+    }
+}
+
 fn write_reader(
     input: &mut impl Read,
     dest: &Path,
@@ -660,8 +688,6 @@ fn write_reader(
         .open(dest)?;
     let mut buf = vec![0u8; 1024 * 1024];
     let mut got = 0u64;
-    let room = MAX_BYTES.saturating_sub(*written);
-    let limit = declared.min(room);
     loop {
         if cancel.load(Ordering::Relaxed) {
             return Err(Fail::Cancelled);
@@ -671,8 +697,8 @@ fn write_reader(
             break;
         }
         got += n as u64;
-        if got > limit {
-            return Err(Fail::Message("archive expands past 8 GiB".into()));
+        if got > declared {
+            return Err(oversized(current));
         }
         output.write_all(&buf[..n])?;
         *written += n as u64;
@@ -786,6 +812,26 @@ mod tests {
         let report = extract(&archive, &dest, None, None, &cancel, &mut |_| cancel.store(true, Ordering::Relaxed), &mut no_conflict).unwrap();
         assert!(report.cancelled);
         assert!(!dest.join("VERSION").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn room_check_uses_free_space_not_fixed_cap() {
+        let dir = tmp("room");
+        let free = free_bytes(&dir.join("missing/child")).unwrap();
+        assert!(ensure_room(&dir, free / 2).is_ok());
+        assert!(matches!(ensure_room(&dir, u64::MAX), Err(Fail::Message(msg)) if msg.starts_with("Not enough space")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_reader_rejects_data_past_declared_size() {
+        let dir = tmp("declared");
+        let target = dir.join("out.bin");
+        let cancel = AtomicBool::new(false);
+        let mut written = 0;
+        let err = write_reader(&mut &b"too long"[..], &target, 3, &mut written, 3, Path::new("out.bin"), &cancel, &mut |_| {});
+        assert!(matches!(err, Err(Fail::Message(msg)) if msg.contains("larger than the archive declares")));
         let _ = fs::remove_dir_all(&dir);
     }
 }
