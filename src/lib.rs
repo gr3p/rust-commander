@@ -11,6 +11,7 @@ pub mod ops;
 pub mod pack;
 pub mod places;
 pub mod sandbox;
+pub mod search;
 pub mod sfv;
 pub mod state;
 pub mod theme;

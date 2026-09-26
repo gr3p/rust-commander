@@ -581,9 +581,16 @@ impl App {
     }
 
     pub(in crate::ui::app) fn sync_hints(&self) {
-        let name = self.state.cursor_entry(self.state.active).map(|entry| entry.name.to_ascii_lowercase());
-        let archive = name.as_deref().is_some_and(|name| name.ends_with(".zip") || name.ends_with(".rar"));
-        let sfv = name.as_deref().is_some_and(|name| name.ends_with(".sfv"));
+        let entry = self.state.cursor_entry(self.state.active);
+        let archive = entry.is_some_and(|entry| !entry.is_dir() && comarchy::archive::is_archive(Path::new(entry.name.as_ref())));
+        let sfv = entry.is_some_and(|entry| entry.name.to_ascii_lowercase().ends_with(".sfv"));
+        if archive {
+            let side = if self.state.active == PaneId::Left { "right" } else { "left" };
+            let label = format!("Alt+F9 Unpack to {side} panel");
+            if self.shell.unpack_list.label().as_deref() != Some(label.as_str()) {
+                self.shell.unpack_list.set_label(&label);
+            }
+        }
         self.shell.unpack_list.set_visible(archive);
         self.shell.unpack_here.set_visible(archive);
         self.shell.verify_sfv.set_visible(sfv);

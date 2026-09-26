@@ -42,6 +42,9 @@ pub struct Shell {
     pub verify_sfv: gtk::Button,
     pub active: Rc<Cell<usize>>,
     pub drives: Vec<(PathBuf, gtk::Button)>,
+    pub edit_button: gtk::Button,
+    pub save_button: gtk::Button,
+    pub editing: Rc<Cell<bool>>,
 }
 
 pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> Shell {
@@ -103,12 +106,22 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
         button.connect_clicked(move |_| tx.emit(super::msg::Msg::FKey(n, false)));
         fbar.append(&button);
     }
-    let unpack_list = hint_button("Alt+F9 List", || super::msg::Msg::UnpackList, sender);
-    let unpack_here = hint_button("Ctrl+Alt+F10 Here", || super::msg::Msg::UnpackHere, sender);
+    let unpack_list = hint_button("Alt+F9 Unpack to right panel", || super::msg::Msg::UnpackList, sender);
+    let unpack_here = hint_button("Ctrl+Alt+F10 Extract here", || super::msg::Msg::UnpackHere, sender);
     let verify_sfv = hint_button("Enter Verify", || super::msg::Msg::VerifySfv, sender);
     fbar.append(&unpack_list);
     fbar.append(&unpack_here);
     fbar.append(&verify_sfv);
+    let filter_button = bar_button("Ctrl+S Filter", || super::msg::Msg::Key(gtk::gdk::Key::s, gtk::gdk::ModifierType::CONTROL_MASK), sender);
+    let search_button = bar_button(
+        "Ctrl+Shift+S Search",
+        || super::msg::Msg::Key(gtk::gdk::Key::S, gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::SHIFT_MASK),
+        sender,
+    );
+    filter_button.set_visible(true);
+    search_button.set_visible(true);
+    fbar.append(&filter_button);
+    fbar.append(&search_button);
     let image_bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     image_bar.add_css_class("fbar");
     image_bar.set_margin_all(4);
@@ -122,6 +135,11 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
     image_bar.append(&image_prev);
     image_bar.append(&image_next);
     let text_modes = charset_bar(sender);
+    let edit_button = bar_button("E Edit", || super::msg::Msg::ToggleQuickEdit, sender);
+    let save_button = bar_button("Ctrl+S Save", || super::msg::Msg::SaveQuick, sender);
+    text_modes.bar.append(&edit_button);
+    text_modes.bar.append(&save_button);
+    let editing = Rc::new(Cell::new(false));
     let mode_bar = gtk::Stack::new();
     mode_bar.add_named(&fbar, Some("files"));
     mode_bar.add_named(&image_bar, Some("image"));
@@ -133,11 +151,33 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     let tx = sender.clone();
     let win = window.clone();
-    keys.connect_key_pressed(move |_, key, _, mods| {
+    let editing_keys = Rc::clone(&editing);
+    keys.connect_key_pressed(move |controller, key, _, mods| {
         let focused = relm4::gtk::prelude::GtkWindowExt::focus(&win);
-        let typing = focused.is_some_and(|w| w.downcast_ref::<gtk::Entry>().is_some());
-        if typing && !is_command(key, mods) {
-            return gtk::glib::Propagation::Proceed;
+        let typing = focused.as_ref().is_some_and(|widget| {
+            let mut current = Some(widget.clone());
+            while let Some(child) = current {
+                if child.is::<gtk::Entry>() {
+                    return true;
+                }
+                current = child.parent();
+            }
+            false
+        });
+        if typing && entry_input(key, mods) {
+            if let Some(widget) = focused.as_ref() {
+                controller.forward(widget);
+            }
+            return gtk::glib::Propagation::Stop;
+        }
+        if editing_keys.get() {
+            if let Some(widget) = focused.as_ref() {
+                if widget.downcast_ref::<gtk::TextView>().is_some() && !edit_command(key, mods) {
+                    // Capture on the window runs before the text view, so Proceed never inserts.
+                    controller.forward(widget);
+                    return gtk::glib::Propagation::Stop;
+                }
+            }
         }
         tx.emit(super::msg::Msg::Key(key, mods));
         gtk::glib::Propagation::Stop
@@ -158,6 +198,9 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
         verify_sfv,
         active,
         drives,
+        edit_button,
+        save_button,
+        editing,
     }
 }
 
@@ -184,6 +227,16 @@ pub fn charset_bar(sender: &relm4::Sender<super::msg::Msg>) -> CharsetBar {
     CharsetBar { bar, ansi, ascii, json }
 }
 
+fn bar_button(
+    label: &str,
+    make: impl Fn() -> super::msg::Msg + 'static,
+    sender: &relm4::Sender<super::msg::Msg>,
+) -> gtk::Button {
+    let button = hint_button(label, make, sender);
+    button.set_focus_on_click(false);
+    button
+}
+
 fn hint_button(
     label: &str,
     make: impl Fn() -> super::msg::Msg + 'static,
@@ -208,8 +261,6 @@ fn drive_bar(
     }
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
     bar.add_css_class("drives");
-    bar.set_margin_start(4);
-    bar.set_margin_end(4);
     bar.set_margin_top(2);
     let mut drives = Vec::new();
     for (index, mount) in mounts.into_iter().enumerate() {
@@ -349,6 +400,22 @@ fn collect_titles(widget: &gtk::Widget, out: &mut Vec<gtk::Widget>) {
         collect_titles(&next, out);
         child = next.next_sibling();
     }
+}
+
+fn edit_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
+    use gtk::gdk::Key;
+    let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+    let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
+    key == Key::Escape || (!ctrl && !alt && matches!(key, Key::e | Key::E)) || (ctrl && !alt && matches!(key, Key::s | Key::S))
+}
+
+fn entry_input(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
+    use gtk::gdk::Key;
+    let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+    let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
+    !is_command(key, mods)
+        || (!alt && matches!(key, Key::Left | Key::Right | Key::KP_Left | Key::KP_Right | Key::Home | Key::End | Key::KP_Home | Key::KP_End | Key::Delete))
+        || (ctrl && !alt && matches!(key, Key::a | Key::A | Key::c | Key::C | Key::v | Key::V | Key::x | Key::X | Key::z | Key::Z))
 }
 
 fn is_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
@@ -510,5 +577,23 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
         picture_scroll,
         preview_kind,
         spinner,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::entry_input;
+    use relm4::gtk::gdk::{Key, ModifierType};
+
+    #[test]
+    fn filter_entry_receives_text_but_not_search_shortcuts() {
+        for key in [Key::e, Key::d, Key::i, Key::t, Key::period, Key::x] {
+            assert!(entry_input(key, ModifierType::empty()));
+        }
+        assert!(entry_input(Key::Left, ModifierType::empty()));
+        assert!(entry_input(Key::v, ModifierType::CONTROL_MASK));
+        assert!(!entry_input(Key::s, ModifierType::CONTROL_MASK));
+        assert!(!entry_input(Key::S, ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK));
+        assert!(!entry_input(Key::Escape, ModifierType::empty()));
     }
 }

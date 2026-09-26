@@ -96,12 +96,16 @@ pub fn visible_indices(
     filter: &str,
 ) -> Vec<usize> {
     let filter = filter.to_lowercase();
+    let pattern = (filter.contains('*') || filter.contains('?')).then(|| filter.chars().collect::<Vec<_>>());
     let mut idxs: Vec<usize> = entries
         .iter()
         .enumerate()
         .filter(|(_, e)| e.name.as_ref() != "..")
         .filter(|(_, e)| show_hidden || !e.is_hidden())
-        .filter(|(_, e)| filter.is_empty() || e.name.to_lowercase().contains(&filter))
+        .filter(|(_, e)| {
+            let name = e.name.to_lowercase();
+            pattern.as_ref().map_or_else(|| name.contains(&filter), |pattern| wildcard_match(pattern, &name))
+        })
         .map(|(i, _)| i)
         .collect();
     idxs.sort_by(|&a, &b| cmp_entries(&entries[a], &entries[b], sort, ascending));
@@ -109,6 +113,32 @@ pub fn visible_indices(
         idxs.insert(0, 0);
     }
     idxs
+}
+
+fn wildcard_match(pattern: &[char], name: &str) -> bool {
+    let name: Vec<char> = name.chars().collect();
+    let (mut pattern_pos, mut name_pos) = (0, 0);
+    let (mut star, mut retry_pos) = (None, 0);
+    while name_pos < name.len() {
+        if pattern_pos < pattern.len() && (pattern[pattern_pos] == '?' || pattern[pattern_pos] == name[name_pos]) {
+            pattern_pos += 1;
+            name_pos += 1;
+        } else if pattern.get(pattern_pos) == Some(&'*') {
+            star = Some(pattern_pos);
+            pattern_pos += 1;
+            retry_pos = name_pos;
+        } else if let Some(star_pos) = star {
+            retry_pos += 1;
+            name_pos = retry_pos;
+            pattern_pos = star_pos + 1;
+        } else {
+            return false;
+        }
+    }
+    while pattern.get(pattern_pos) == Some(&'*') {
+        pattern_pos += 1;
+    }
+    pattern_pos == pattern.len()
 }
 
 fn cmp_entries(a: &Entry, b: &Entry, sort: SortKey, ascending: bool) -> std::cmp::Ordering {

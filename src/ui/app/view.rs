@@ -1,6 +1,4 @@
-use std::cell::Cell;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -196,73 +194,35 @@ impl App {
         let modes = crate::ui::shell::charset_bar(sender.input_sender());
         modes.bar.set_visible(self.cfg.mode_buttons);
         paint_charset(&modes, self.charset);
-        let edit_button = lister_button("E Edit", || Msg::ToggleListerEdit, sender.input_sender());
-        let save_button = lister_button("Ctrl+S Save", || Msg::SaveLister, sender.input_sender());
-        modes.bar.append(&edit_button);
-        modes.bar.append(&save_button);
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
         column.append(&scroll);
         column.append(&modes.bar);
         window.set_child(Some(&column));
-        let editing = Rc::new(Cell::new(false));
-        let quiet = Rc::new(Cell::new(false));
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let tx = sender.input_sender().clone();
-        let editing_keys = Rc::clone(&editing);
         keys.connect_key_pressed(move |_, key, _, mods| {
-            if editing_keys.get() && !lister_edit_command(key, mods) {
-                return gtk::glib::Propagation::Proceed;
-            }
             tx.emit(Msg::Key(key, mods));
             gtk::glib::Propagation::Stop
         });
         window.add_controller(keys);
-        let title = path.display().to_string();
-        let changed_window = window.clone();
-        let changed_title = title.clone();
-        let changed_editing = Rc::clone(&editing);
-        let changed_quiet = Rc::clone(&quiet);
-        view.buffer().connect_changed(move |_| {
-            if changed_quiet.get() || !changed_editing.get() {
-                return;
-            }
-            changed_window.set_title(Some(&format!("{changed_title}*")));
-        });
         window.present();
-        self.lister = Some(ListerUi {
-            window,
-            view,
-            reader,
-            mode: ViewMode::Text,
-            modes,
-            editing,
-            quiet,
-            edit_button,
-            title,
-        });
+        self.lister = Some(ListerUi { window, view, reader, mode: ViewMode::Text, modes });
     }
 
-    pub(in crate::ui::app) fn toggle_lister_edit(&mut self) {
-        if self.lister.as_ref().is_some_and(|ui| ui.editing.get()) {
-            if let Some(lister) = self.lister.as_mut() {
-                lister.editing.set(false);
-                lister.view.set_editable(false);
-                paint_edit(&lister.edit_button, false);
-                lister.reader.offset = 0;
-                lister.window.set_title(Some(&lister.title));
-            }
-            self.lister_redraw();
+    pub(in crate::ui::app) fn toggle_quick_edit(&mut self, sender: &ComponentSender<Self>) {
+        if self.shell.editing.get() {
+            self.stop_quick_edit(true, sender);
             return;
         }
-        let (path, mode) = {
-            let Some(lister) = self.lister.as_ref() else { return };
-            (lister.reader.path().to_path_buf(), lister.mode)
-        };
-        if mode != ViewMode::Text {
+        if !self.state.quick_view || self.cursor_is_image() {
             self.status = "Edit is for text".into();
             return;
         }
+        let Some(path) = self.file_under_cursor() else {
+            self.status = "Edit is for text".into();
+            return;
+        };
         let text = match lister::read_for_edit(&path, self.charset) {
             Ok(text) => text,
             Err(err) => {
@@ -270,37 +230,50 @@ impl App {
                 return;
             }
         };
-        let Some(lister) = self.lister.as_mut() else { return };
-        lister.quiet.set(true);
-        lister.view.buffer().set_text(&text);
-        lister.quiet.set(false);
-        lister.editing.set(true);
-        lister.view.set_editable(true);
-        lister.view.grab_focus();
-        lister.window.set_title(Some(&lister.title));
-        paint_edit(&lister.edit_button, true);
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("file").to_string();
+        *self.edit_name.borrow_mut() = name.clone();
+        self.shell.window.set_title(Some(&name));
+        let preview = &self.shell.panes[self.state.active.other().index()].preview;
+        self.edit_quiet.set(true);
+        preview.buffer().set_text(&text);
+        self.edit_quiet.set(false);
+        self.shell.editing.set(true);
+        preview.set_editable(true);
+        preview.set_cursor_visible(true);
+        preview.grab_focus();
+        paint_edit(&self.shell.edit_button, true);
     }
 
-    pub(in crate::ui::app) fn save_lister(&mut self) {
-        let Some((text, path, title, window)) = self.lister.as_ref().and_then(|lister| {
-            if !lister.editing.get() {
-                return None;
-            }
-            let buffer = lister.view.buffer();
-            let start = buffer.start_iter();
-            let end = buffer.end_iter();
-            Some((
-                buffer.text(&start, &end, false).to_string(),
-                lister.reader.path().to_path_buf(),
-                lister.title.clone(),
-                lister.window.clone(),
-            ))
-        }) else {
+    pub(in crate::ui::app) fn stop_quick_edit(&mut self, reload: bool, sender: &ComponentSender<Self>) {
+        if !self.shell.editing.get() {
             return;
+        }
+        self.shell.editing.set(false);
+        for pane in &self.shell.panes {
+            pane.preview.set_editable(false);
+        }
+        paint_edit(&self.shell.edit_button, false);
+        self.shell.window.set_title(Some("Commander"));
+        if reload {
+            self.note_preview_target();
+            self.kick_preview(sender);
+        }
+        self.focus_list();
+    }
+
+    pub(in crate::ui::app) fn save_quick(&mut self) {
+        if !self.shell.editing.get() {
+            return;
+        }
+        let text = {
+            let preview = &self.shell.panes[self.state.active.other().index()].preview;
+            let buffer = preview.buffer();
+            buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).to_string()
         };
+        let Some(path) = self.file_under_cursor() else { return };
         match lister::write_text(&path, &text) {
             Ok(()) => {
-                window.set_title(Some(&title));
+                self.shell.window.set_title(Some(&self.edit_name.borrow()));
                 self.status = "Saved".into();
             }
             Err(err) => self.status = err.to_string(),
@@ -331,9 +304,6 @@ impl App {
     }
 
     pub(in crate::ui::app) fn lister_redraw(&mut self) {
-        if self.lister.as_ref().is_some_and(|ui| ui.editing.get()) {
-            return;
-        }
         let charset = self.charset;
         let Some(lister) = self.lister.as_mut() else { return };
         let mode = lister.mode;
@@ -343,7 +313,7 @@ impl App {
     }
 
     pub(in crate::ui::app) fn set_charset(&mut self, charset: Charset, sender: &ComponentSender<Self>) {
-        if self.lister.as_ref().is_some_and(|ui| ui.editing.get()) {
+        if self.shell.editing.get() {
             self.status = "Leave edit first".into();
             return;
         }
@@ -421,6 +391,9 @@ impl App {
     }
 
     pub(in crate::ui::app) fn paint_preview(&mut self) {
+        if self.shell.editing.get() {
+            return;
+        }
         let pane = self.state.active.other().index();
         let ui = &self.shell.panes[pane];
         if let Some(rev) = show_slot(ui, &self.preview, self.preview_shown[pane], self.quick_fit) {
@@ -486,6 +459,13 @@ impl App {
             self.shell.image_scale.set_label(label);
         }
         paint_charset(&self.shell.text_modes, self.charset);
+        let quick_text = self.cfg.mode_buttons
+            && self.lister.is_none()
+            && self.state.quick_view
+            && self.cursor_is_file()
+            && !self.cursor_is_image();
+        self.shell.edit_button.set_visible(quick_text);
+        self.shell.save_button.set_visible(quick_text);
     }
 
     pub(in crate::ui::app) fn cursor_is_file(&self) -> bool {
@@ -498,23 +478,6 @@ pub(in crate::ui::app) fn preview_body(path: &Path, max_edge: u32) -> PreviewBod
         Ok(img) => PreviewBody::Image { width: img.width, height: img.height, pixels: img.pixels },
         Err(err) => PreviewBody::Text(err),
     }
-}
-
-fn lister_edit_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
-    let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
-    let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
-    key == gtk::gdk::Key::Escape
-        || (!ctrl && !alt && matches!(key, gtk::gdk::Key::e | gtk::gdk::Key::E))
-        || (ctrl && !alt && matches!(key, gtk::gdk::Key::s | gtk::gdk::Key::S))
-}
-
-fn lister_button(label: &str, make: impl Fn() -> Msg + 'static, sender: &relm4::Sender<Msg>) -> gtk::Button {
-    let button = gtk::Button::with_label(label);
-    button.add_css_class("fkey");
-    button.set_hexpand(true);
-    let tx = sender.clone();
-    button.connect_clicked(move |_| tx.emit(make()));
-    button
 }
 
 fn paint_edit(button: &gtk::Button, on: bool) {

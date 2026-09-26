@@ -25,6 +25,7 @@ use super::row::EntryObject;
 use super::shell::{self, Shell};
 
 mod jobs;
+mod search;
 mod settings;
 mod view;
 
@@ -96,10 +97,6 @@ struct ListerUi {
     reader: lister::Reader,
     mode: ViewMode,
     modes: super::shell::CharsetBar,
-    editing: Rc<Cell<bool>>,
-    quiet: Rc<Cell<bool>>,
-    edit_button: gtk::Button,
-    title: String,
 }
 
 struct ImageUi {
@@ -155,8 +152,13 @@ pub struct App {
     preview_sent: u64,
     preview_shown: [u64; 2],
     quick_fit: bool,
+    edit_quiet: Rc<Cell<bool>>,
+    edit_name: Rc<RefCell<String>>,
     preview_live: Arc<AtomicU64>,
     list_live: [Arc<AtomicU64>; 2],
+    search: Option<search::SearchUi>,
+    search_gen: u64,
+    search_target: Option<(PaneId, usize, u64, String)>,
     settings: Option<SettingsUi>,
     chooser: Option<gtk::FileChooserNative>,
     smoke: bool,
@@ -205,6 +207,22 @@ impl SimpleComponent for App {
             .iter()
             .map(|b| (b.name.clone(), b.path.clone()))
             .collect();
+        let edit_quiet = Rc::new(Cell::new(false));
+        let edit_name = Rc::new(RefCell::new(String::new()));
+        let editing = Rc::clone(&shell.editing);
+        let window = shell.window.clone();
+        for pane in &shell.panes {
+            let quiet = Rc::clone(&edit_quiet);
+            let editing = Rc::clone(&editing);
+            let window = window.clone();
+            let name = Rc::clone(&edit_name);
+            pane.preview.buffer().connect_changed(move |_| {
+                if quiet.get() || !editing.get() {
+                    return;
+                }
+                window.set_title(Some(&format!("{}*", name.borrow())));
+            });
+        }
         let mut model = App {
             state,
             shell,
@@ -230,8 +248,13 @@ impl SimpleComponent for App {
             preview_sent: 0,
             preview_shown: [0, 0],
             quick_fit: true,
+            edit_quiet,
+            edit_name,
             preview_live: Arc::new(AtomicU64::new(0)),
             list_live: [Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0))],
+            search: None,
+            search_gen: 0,
+            search_target: None,
             settings: None,
             chooser: None,
             smoke,
@@ -310,6 +333,12 @@ impl App {
                 self.state.tab_mut(PaneId::from_index(pane)).cursor = 0;
                 self.touch(PaneId::from_index(pane));
             }
+            Msg::CloseSearch => self.close_search(),
+            Msg::SearchEscape => self.escape_search(),
+            Msg::SearchStart => self.start_search(sender),
+            Msg::SearchCancel => self.cancel_search(),
+            Msg::SearchGo(index) => self.go_to_search_result(index, sender),
+            Msg::SearchEvent(generation, event) => self.on_search_event(generation, event),
             Msg::Submit(text) => self.on_submit(&text, sender),
             Msg::CancelAsk => {
                 self.ask = None;
@@ -357,8 +386,8 @@ impl App {
             Msg::ToggleFileIcons => self.toggle_file_icons(),
             Msg::ToggleImageScale => self.toggle_shown_scale(sender),
             Msg::SetCharset(charset) => self.set_charset(charset, sender),
-            Msg::ToggleListerEdit => self.toggle_lister_edit(),
-            Msg::SaveLister => self.save_lister(),
+            Msg::ToggleQuickEdit => self.toggle_quick_edit(sender),
+            Msg::SaveQuick => self.save_quick(),
             Msg::ImageStep(delta) => self.step_shown_image(delta, sender),
             Msg::PickBackground => self.pick_background(sender),
             Msg::ClearBackground => self.clear_background(),
@@ -413,14 +442,13 @@ impl App {
             }
             return;
         }
-        if self.lister.as_ref().is_some_and(|ui| ui.editing.get()) && ctrl && !alt && matches!(key, Key::s | Key::S) {
-            self.save_lister();
+        if self.shell.editing.get() && ctrl && !shift && !alt && matches!(key, Key::s | Key::S) {
+            self.save_quick();
             return;
         }
         if self.lister.is_some() && !ctrl && !alt {
             match key {
                 Key::Escape => self.close_lister(),
-                Key::e | Key::E => self.toggle_lister_edit(),
                 Key::_1 => self.lister_set_mode(ViewMode::Text),
                 Key::_2 => self.lister_set_mode(ViewMode::Binary),
                 Key::_3 => self.lister_set_mode(ViewMode::Hex),
@@ -436,6 +464,10 @@ impl App {
                 Key::Page_Up => self.lister_scroll(-4096),
                 _ => {}
             }
+            return;
+        }
+        if self.state.quick_view && !ctrl && !alt && matches!(key, Key::e | Key::E) {
+            self.toggle_quick_edit(sender);
             return;
         }
         if ctrl && alt {
@@ -456,9 +488,13 @@ impl App {
                 Key::F6 => self.set_sort(comarchy::listing::SortKey::Size),
                 Key::F7 => self.set_sort(comarchy::listing::SortKey::Attr),
                 Key::s | Key::S => {
-                    let ui = &self.shell.panes[self.state.active.index()];
-                    ui.filter.set_visible(true);
-                    ui.filter.grab_focus();
+                    if shift {
+                        self.open_search(sender);
+                    } else {
+                        let ui = &self.shell.panes[self.state.active.index()];
+                        ui.filter.set_visible(true);
+                        ui.filter.grab_focus();
+                    }
                 }
                 Key::h | Key::H => self.toggle_hidden(),
                 Key::t | Key::T => self.open_new_tab(sender),
@@ -469,6 +505,9 @@ impl App {
                 }
                 Key::d | Key::D => self.toggle_hotlist(sender),
                 Key::q | Key::Q => {
+                    if self.shell.editing.get() {
+                        self.stop_quick_edit(false, sender);
+                    }
                     self.state.quick_view = !self.state.quick_view;
                     if self.state.quick_view {
                         self.note_preview_target();
@@ -546,6 +585,7 @@ impl App {
             Key::s | Key::S if self.state.quick_view && self.cursor_is_image() => self.toggle_quick_scale(),
             Key::s | Key::S | Key::d | Key::D if self.state.quick_view => self.set_charset(Charset::Ascii, sender),
             Key::Escape => {
+                self.stop_quick_edit(false, sender);
                 self.state.quick_view = false;
                 self.state.pane_mut(self.state.active).filter.clear();
                 self.shell.panes[self.state.active.index()].filter.set_text("");
@@ -671,6 +711,14 @@ impl App {
                 let id = PaneId::from_index(pane);
                 if self.state.apply_listing(id, tab, token, entries) {
                     self.touch(id);
+                    if let Some((target_id, target_tab, target_token, name)) = self.search_target.take() {
+                        if (id, tab, token) == (target_id, target_tab, target_token) {
+                            self.point_at(id, &name);
+                            self.focus_list();
+                        } else if id != target_id || tab != target_tab {
+                            self.search_target = Some((target_id, target_tab, target_token, name));
+                        }
+                    }
                     if self.state.quick_view && id == self.state.active {
                         self.state.preview_gen = self.state.preview_gen.wrapping_add(1);
                     }
@@ -1028,7 +1076,7 @@ impl App {
             if ui.path.text().as_str() != path {
                 ui.path.set_text(&path);
             }
-            let show_filter = filter_on || ui.filter.has_focus();
+            let show_filter = filter_on || ui.filter.has_focus() || gtk::prelude::WidgetExt::is_visible(&ui.filter);
             if gtk::prelude::WidgetExt::is_visible(&ui.filter) != show_filter {
                 ui.filter.set_visible(show_filter);
             }
@@ -1036,7 +1084,7 @@ impl App {
             if ui.stack.visible_child_name().as_deref() != Some(page) {
                 ui.stack.set_visible_child_name(page);
             }
-            if show_preview {
+            if show_preview && !self.shell.editing.get() {
                 if let Some(rev) = view::show_slot(ui, &self.preview, self.preview_shown[pane], self.quick_fit) {
                     self.preview_shown[pane] = rev;
                 }
@@ -1296,6 +1344,28 @@ impl App {
             errors.push("auto columns stayed off".into());
         }
         self.close_settings();
+
+        self.on_key(Key::S, ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK, sender);
+        if self.search.is_none() {
+            errors.push("search shortcut".into());
+        }
+        self.close_search();
+
+        self.state.active = PaneId::Left;
+        self.on_key(Key::s, ModifierType::CONTROL_MASK, sender);
+        self.sync();
+        let filter = &self.shell.panes[0].filter;
+        if !gtk::prelude::WidgetExt::is_visible(filter) {
+            errors.push("quick filter hidden".into());
+        }
+        filter.set_text("note");
+        self.on_msg(Msg::FilterChanged(0, "note".into()), sender);
+        self.sync();
+        if self.state.visible(PaneId::Left).iter().filter(|&&index| {
+            self.state.tab(PaneId::Left).entries[index].name.as_ref() == "note.txt"
+        }).count() != 1 || self.state.visible(PaneId::Left).len() != 2 {
+            errors.push("quick filter matches".into());
+        }
 
         if errors.is_empty() {
             println!("SMOKE_OK");

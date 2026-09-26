@@ -25,7 +25,7 @@ Prova kopiera, flytta och radera i en skräpkatalog, till exempel `~/comarchy-pr
 
 ## Tangenter
 
-Tab byter panel. Upp och ned flyttar markören. Space markerar raden under markören. Insert markerar och går till nästa rad. F2 laddar om. Ctrl+S filtrerar. Ctrl+H visar eller döljer punktfiler.
+Tab byter panel. Upp och ned flyttar markören. Space markerar raden under markören. Insert markerar och går till nästa rad. F2 laddar om. Ctrl+S filtrerar filnamn i aktiv panel: vanlig text matchar delar av namn, medan `*.md` eller `edit?.txt` använder `*` och `?` mot hela namnet. Ctrl+Shift+S söker fil- och katalognamn från aktiv panels katalog, även i undermappar. Sökfönstret kan begränsa sökningen till filer, välja dolda namn och skiftlägeskänslighet, avbryta en sökning och gå till en träff. Ctrl+H visar eller döljer punktfiler.
 
 F3 visar text eller bild. I bildfönstret byter piltangenterna bild i mappen där fönstret öppnades. När Quick View eller bildfönstret visar en bild byts knapparna längst ner till S Fit eller S 1:1. S på en textfil är fortfarande ASCII. F4 editor, Shift+F4 ny fil, F5 kopiera, Shift+F5 kopiera med nytt namn, F6 flytta, Shift+F6 byt namn, F7 ny mapp, F8 papperskorg, Shift+F8 radera permanent.
 
@@ -33,7 +33,7 @@ Speciallägen byter knapparna längst ner i huvudfönstret till kommandon för d
 
 Alt+F5 packar markerade filer. Ändelsen väljer format: `.zip` byggs in, `.7z` använder 7-Zip (`7z` eller `7zz`, till exempel `/usr/bin/7z`) och `.rar` använder RARLAB `rar` (till exempel `/usr/bin/rar`). `unrar` packar inte. Sökvägarna sätts i F12. Tomt fält söker i PATH.
 
-Alt+F9 packar upp ett zip eller rar till den andra panelen och visar fillistan. Ctrl+Alt+F10 packar upp hela arkivet i panelen där arkivet ligger. Enter på en `.sfv` kontrollerar CRC32. Shift+F9 skapar en `.sfv` för det som är markerat.
+Alt+F9 packar upp ett zip eller rar till den andra panelen och visar fillistan. Ctrl+Alt+F10 packar upp hela arkivet i panelen där arkivet ligger. När markören står på ett zip- eller rar-arkiv visar knappraden längst ner `Alt+F9 Unpack to right panel` (eller left, beroende på aktiv panel) och `Ctrl+Alt+F10 Extract here`. Enter på en `.sfv` kontrollerar CRC32. Shift+F9 skapar en `.sfv` för det som är markerat.
 
 Ctrl+1 till Ctrl+9 väljer disk i den aktiva panelen. Siffran står före ikonen. Ctrl+F3 namn, Ctrl+F4 ändelse, Ctrl+F5 tid, Ctrl+F6 storlek. Alt+F1 och Alt+F2 är platser. Alt+F3 är extern visare. Ctrl+Q förhandsvisar. Där byter vänster och höger bild i den mappen. Ctrl+T ny flik, Ctrl+W stäng flik, Alt+vänster och Alt+höger är historik.
 
@@ -47,7 +47,7 @@ Ctrl+1 till Ctrl+9 väljer disk i den aktiva panelen. Siffran står före ikonen
 
 MVP, med grönt acceptanstest: två paneler, kopiera och flytta träd, konflikt, Lister (text, binärt, hex, fönsterläsning), Quick View, bilder i Quick View och F3, filter, sortering, historik, bokmärken och flikar.
 
-Senare, en i taget: flerval-namnbyte (Ctrl+M), sök (Alt+F7), arkiv som mappar, katalogsynk.
+Senare, en i taget: flerval-namnbyte (Ctrl+M), sökning i filinnehåll och avancerade sökvillkor, arkiv som mappar, katalogsynk.
 
 Utelämnat: Windows-byggen, nätverksgrannskap, parallellport, USB-kabel, UAC, Windows-kontextmeny, WLX/WCX/WDX/WFX och IrfanView/XnView.
 

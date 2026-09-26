@@ -1,10 +1,13 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
+use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::raw::{c_int, c_uchar};
+use std::os::raw::c_int;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
+use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::ops::{Choice, Progress, Report};
@@ -266,106 +269,109 @@ fn unpack_note(archive: &Path, index: u64, total_files: u64, name: &str) -> Stri
     format!("{label}   {index}/{total_files}   {left} left   {name}")
 }
 
-struct RarHook {
-    cancel: *const AtomicBool,
+// Shared through the unrar callback's user data, so every field uses interior mutability.
+struct RarJob<'a> {
+    cancel: &'a AtomicBool,
+    progress: RefCell<&'a mut dyn FnMut(&Progress)>,
     total: u64,
-    base: u64,
-    seen: u64,
-    sent: u64,
-    note: String,
-    progress: [usize; 2],
+    base: Cell<u64>,
+    seen: Cell<u64>,
+    sent: Cell<u64>,
+    too_big: Cell<bool>,
+    note: RefCell<String>,
 }
 
-thread_local! {
-    static RAR_HOOK: RefCell<Option<RarHook>> = const { RefCell::new(None) };
+impl RarJob<'_> {
+    fn start(&self, base: u64, note: String) {
+        self.base.set(base);
+        self.seen.set(0);
+        self.sent.set(0);
+        *self.note.borrow_mut() = note;
+    }
+
+    fn report(&self, done: u64, current: PathBuf) {
+        let note = self.note.borrow().clone();
+        (self.progress.borrow_mut())(&Progress { done, total: self.total, current, note });
+    }
+
+    fn data(&self, count: u64) -> c_int {
+        if self.cancel.load(Ordering::Relaxed) {
+            return -1;
+        }
+        let seen = self.seen.get().saturating_add(count);
+        self.seen.set(seen);
+        let done = self.base.get().saturating_add(seen);
+        if done > MAX_BYTES {
+            self.too_big.set(true);
+            return -1;
+        }
+        if self.sent.get() == 0 || seen - self.sent.get() >= 256 * 1024 {
+            self.sent.set(seen);
+            self.report(done, PathBuf::new());
+        }
+        if self.cancel.load(Ordering::Relaxed) { -1 } else { 0 }
+    }
 }
 
-struct ClearRarHook;
+extern "C" fn on_rar_event(
+    msg: unrar_ng_sys::UINT,
+    user: unrar_ng_sys::LPARAM,
+    _p1: unrar_ng_sys::LPARAM,
+    p2: unrar_ng_sys::LPARAM,
+) -> c_int {
+    if user == 0 {
+        return -1;
+    }
+    let job = unsafe { &*(user as *const RarJob<'_>) };
+    match msg {
+        unrar_ng_sys::UCM_PROCESSDATA => job.data(p2.max(0) as u64),
+        unrar_ng_sys::UCM_CHANGEVOLUMEW if p2 == unrar_ng_sys::RAR_VOL_ASK => -1,
+        // The password, if any, is set before reading headers.
+        unrar_ng_sys::UCM_NEEDPASSWORD | unrar_ng_sys::UCM_NEEDPASSWORDW => -1,
+        _ => 0,
+    }
+}
 
-impl Drop for ClearRarHook {
+struct RarHandle(*const unrar_ng_sys::Handle);
+
+impl Drop for RarHandle {
     fn drop(&mut self) {
-        RAR_HOOK.with(|slot| *slot.borrow_mut() = None);
+        unsafe { unrar_ng_sys::RARCloseArchive(self.0) };
     }
 }
 
-fn pack_cb(progress: &mut dyn FnMut(&Progress)) -> [usize; 2] {
-    let raw = progress as *mut dyn FnMut(&Progress);
-    unsafe { std::mem::transmute(raw) }
+fn rar_fail(code: c_int, when: unrar_ng::error::When) -> Fail {
+    unrar_ng::error::UnrarError::from(unrar_ng::error::Code::from(code), when).into()
 }
 
-fn call_cb(parts: [usize; 2], update: &Progress) {
-    let progress: *mut dyn FnMut(&Progress) = unsafe { std::mem::transmute(parts) };
-    unsafe { (*progress)(update) };
+fn c_path(path: &Path) -> Result<CString, Fail> {
+    CString::new(path.as_os_str().as_bytes()).map_err(|_| Fail::Message(format!("bad path {}", path.display())))
 }
 
-fn hook_install(cancel: &AtomicBool, total: u64, progress: &mut dyn FnMut(&Progress)) {
-    let packed = pack_cb(progress);
-    RAR_HOOK.with(|slot| {
-        *slot.borrow_mut() = Some(RarHook {
-            cancel,
-            total,
-            base: 0,
-            seen: 0,
-            sent: 0,
-            note: String::new(),
-            progress: packed,
-        });
-    });
-}
-
-fn hook_file(base: u64, note: String) {
-    RAR_HOOK.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        let Some(hook) = slot.as_mut() else { return };
-        hook.base = base;
-        hook.seen = 0;
-        hook.sent = 0;
-        hook.note = note;
-    });
-}
-
-extern "C" fn on_rar_data(_addr: *mut c_uchar, count: c_int) -> c_int {
-    if count <= 0 {
-        return 1;
+fn open_rar_extract(path: &Path, password: Option<&str>) -> Result<RarHandle, Fail> {
+    let name = c_path(path)?;
+    let mut data = unrar_ng_sys::OpenArchiveDataEx::new(name.as_ptr(), unrar_ng_sys::RAR_OM_EXTRACT);
+    let raw = unsafe { unrar_ng_sys::RAROpenArchiveEx(&raw mut data) };
+    let result = data.open_result as c_int;
+    if raw.is_null() {
+        return Err(rar_fail(result, unrar_ng::error::When::Open));
     }
-    let report = RAR_HOOK.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        let Some(hook) = slot.as_mut() else { return (1, None) };
-        if unsafe { (*hook.cancel).load(Ordering::Relaxed) } {
-            return (0, None);
-        }
-        hook.seen += count as u64;
-        if hook.sent != 0 && hook.seen - hook.sent < 256 * 1024 {
-            return (1, None);
-        }
-        hook.sent = hook.seen;
-        (
-            1,
-            Some((hook.base + hook.seen, hook.total, hook.note.clone(), hook.progress)),
-        )
-    });
-    let (code, event) = report;
-    if let Some((done, total, note, progress)) = event {
-        call_cb(progress, &Progress { done, total, current: PathBuf::new(), note });
-        let stop = RAR_HOOK.with(|slot| {
-            slot.borrow().as_ref().is_some_and(|hook| unsafe { (*hook.cancel).load(Ordering::Relaxed) })
-        });
-        return if stop { 0 } else { code };
+    let handle = RarHandle(raw);
+    if result != unrar_ng_sys::ERAR_SUCCESS {
+        return Err(rar_fail(result, unrar_ng::error::When::Open));
     }
-    code
+    if let Some(password) = password {
+        let password = CString::new(password).map_err(|_| Fail::BadPassword)?;
+        unsafe { unrar_ng_sys::RARSetPassword(handle.0, password.as_ptr()) };
+    }
+    Ok(handle)
 }
 
-fn emit_progress(done: u64, total: u64, current: PathBuf, note: String) {
-    let progress = RAR_HOOK.with(|slot| slot.borrow().as_ref().map(|hook| hook.progress));
-    if let Some(progress) = progress {
-        call_cb(progress, &Progress { done, total, current, note });
-    }
-}
-
-fn arm_rar(archive: &unrar_ng::OpenArchive<unrar_ng::Process, unrar_ng::CursorBeforeHeader>) {
-    // OpenArchive keeps the unrar handle in its first field. RARSetCallback does not clear this.
-    let handle = unsafe { *(archive as *const _ as *const *const unrar_ng_sys::Handle) };
-    unsafe { unrar_ng_sys::RARSetProcessDataProc(handle, Some(on_rar_data)) };
+fn rar_header_name(header: &unrar_ng_sys::HeaderDataEx) -> Option<String> {
+    let wide = header.filename_w;
+    let name: Option<String> = wide.iter().take_while(|&&c| c != 0).map(|&c| char::from_u32(c as u32)).collect();
+    // RAR from Windows stores backslash separators.
+    slash(&name?.replace('\\', "/"))
 }
 
 fn extract_rar(
@@ -382,17 +388,28 @@ fn extract_rar(
     if listed.needs_password && password.is_none() {
         return Err(Fail::NeedPassword);
     }
-    let total = listed.members.iter().filter(|m| !m.dir).map(|m| m.size).sum();
-    let file_total = listed
-        .members
-        .iter()
-        .filter(|member| !member.dir && names.is_none_or(|set| set.contains(&member.name)))
-        .count() as u64;
+    let chosen = |member: &&Member| !member.dir && names.is_none_or(|set| set.contains(&member.name));
+    let total = listed.members.iter().filter(chosen).map(|m| m.size).sum();
+    let file_total = listed.members.iter().filter(chosen).count() as u64;
     let mut file_index = 0u64;
-    let mut opened = open_rar(&owned, password).open_for_processing()?;
-    hook_install(cancel, total, progress);
-    let _clear = ClearRarHook;
-    arm_rar(&opened);
+    let job = RarJob {
+        cancel,
+        progress: RefCell::new(progress),
+        total,
+        base: Cell::new(0),
+        seen: Cell::new(0),
+        sent: Cell::new(0),
+        too_big: Cell::new(false),
+        note: RefCell::new(String::new()),
+    };
+    // Declared after `job` so the archive closes before the callback context goes away.
+    let handle = open_rar_extract(&owned, password)?;
+    unsafe { unrar_ng_sys::RARSetCallback(handle.0, Some(on_rar_event), &raw const job as unrar_ng_sys::LPARAM) };
+    let skip = |handle: &RarHandle| -> Result<(), Fail> {
+        let code = unsafe { unrar_ng_sys::RARProcessFile(handle.0, unrar_ng_sys::RAR_SKIP, ptr::null(), ptr::null()) };
+        if code == unrar_ng_sys::ERAR_SUCCESS { Ok(()) } else { Err(rar_fail(code, unrar_ng::error::When::Process)) }
+    };
+    let mut header = Box::new(unrar_ng_sys::HeaderDataEx::default());
     let mut written = 0u64;
     let mut files = 0u64;
     let mut policy = Policy::Ask;
@@ -400,18 +417,19 @@ fn extract_rar(
         if cancel.load(Ordering::Relaxed) {
             return Ok(Report { cancelled: true, files });
         }
-        let Some(file) = opened.read_header()? else { break };
-        let header = file.entry();
-        let dir = header.is_directory();
-        let size = header.unpacked_size;
-        let symlink = rar_symlink(header.file_attr);
-        let raw = header.filename.to_str().map(|name| name.replace('\\', "/"));
-        let name = raw.as_deref().and_then(slash);
-        let skip = name.is_none()
-            || symlink
-            || name.as_ref().is_some_and(|name| names.is_some_and(|set| !set.contains(name)));
-        if skip {
-            opened = file.skip()?;
+        match unsafe { unrar_ng_sys::RARReadHeaderEx(handle.0, &raw mut *header) } {
+            unrar_ng_sys::ERAR_SUCCESS => {}
+            unrar_ng_sys::ERAR_END_ARCHIVE => break,
+            _ if cancel.load(Ordering::Relaxed) => return Ok(Report { cancelled: true, files }),
+            code => return Err(rar_fail(code, unrar_ng::error::When::Read)),
+        }
+        let flags = header.flags;
+        let dir = flags & unrar_ng_sys::RHDF_DIRECTORY != 0;
+        let size = ((header.unp_size_high as u64) << 32) | header.unp_size as u64;
+        let name = rar_header_name(&header);
+        let wanted = name.as_ref().is_some_and(|name| names.is_none_or(|set| set.contains(name)));
+        if !wanted || rar_symlink(header.file_attr) {
+            skip(&handle)?;
             continue;
         }
         let name = name.unwrap();
@@ -419,7 +437,7 @@ fn extract_rar(
         let target = located(dest, &rel)?;
         if dir {
             ensure_dir(&target)?;
-            opened = file.skip()?;
+            skip(&handle)?;
             continue;
         }
         if size > MAX_BYTES || written.saturating_add(size) > MAX_BYTES {
@@ -427,7 +445,7 @@ fn extract_rar(
         }
         match keep(&target, &rel, &mut policy, conflict)? {
             Keep::Skip => {
-                opened = file.skip()?;
+                skip(&handle)?;
                 continue;
             }
             Keep::Cancel => return Ok(Report { cancelled: true, files }),
@@ -438,19 +456,24 @@ fn extract_rar(
         }
         file_index += 1;
         let note = unpack_note(path, file_index, file_total, &name);
-        hook_file(written, note.clone());
-        emit_progress(written, total, rel.clone(), note.clone());
-        opened = match file.extract_to(&target) {
-            Ok(next) => next,
-            Err(_) if cancel.load(Ordering::Relaxed) => {
-                let _ = fs::remove_file(&target);
+        job.start(written, note);
+        job.report(written, rel.clone());
+        let dest_name = c_path(&target)?;
+        let code = unsafe { unrar_ng_sys::RARProcessFile(handle.0, unrar_ng_sys::RAR_EXTRACT, ptr::null(), dest_name.as_ptr()) };
+        if code != unrar_ng_sys::ERAR_SUCCESS {
+            let _ = fs::remove_file(&target);
+            if cancel.load(Ordering::Relaxed) {
                 return Ok(Report { cancelled: true, files });
             }
-            Err(err) => {
-                let _ = fs::remove_file(&target);
-                return Err(err.into());
+            if job.too_big.get() {
+                return Err(Fail::Message("archive expands past 8 GiB".into()));
             }
-        };
+            // RAR4 reports a wrong password as a CRC error.
+            if code == unrar_ng_sys::ERAR_BAD_DATA && password.is_some() && flags & unrar_ng_sys::RHDF_ENCRYPTED != 0 {
+                return Err(Fail::BadPassword);
+            }
+            return Err(rar_fail(code, unrar_ng::error::When::Process));
+        }
         if fs::symlink_metadata(&target).is_ok_and(|meta| meta.file_type().is_symlink()) {
             let _ = fs::remove_file(&target);
             return Err(Fail::Message(format!("refusing symlink {}", rel.display())));
@@ -463,7 +486,7 @@ fn extract_rar(
         fs::set_permissions(&target, fs::Permissions::from_mode(0o644))?;
         written += len;
         files += 1;
-        emit_progress(written, total, rel, note);
+        job.report(written, rel);
     }
     Ok(Report { cancelled: false, files })
 }
@@ -734,6 +757,23 @@ mod tests {
         assert_eq!(unpack_mark("Movie.rar"), "");
         assert_eq!(unpack_mark("notes.ZIP"), "Z");
         assert_eq!(unpack_mark("notes.txt"), "");
+    }
+
+    #[test]
+    fn rar_header_names_are_safe() {
+        let named = |name: &str| {
+            let mut wide = [0; 1024];
+            for (slot, c) in wide.iter_mut().zip(name.chars()) {
+                *slot = c as libc::wchar_t;
+            }
+            let mut header = Box::new(unrar_ng_sys::HeaderDataEx::default());
+            header.filename_w = wide;
+            rar_header_name(&header)
+        };
+        assert_eq!(named("dir\\möte.md").as_deref(), Some("dir/möte.md"));
+        assert_eq!(named("..\\evil.txt"), None);
+        assert_eq!(named("/etc/passwd"), None);
+        assert_eq!(named(""), None);
     }
 
     #[test]

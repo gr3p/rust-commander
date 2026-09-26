@@ -11,6 +11,7 @@ use comarchy::imageview;
 use comarchy::lister::{self, Charset, PreviewBody, ViewMode};
 use comarchy::listing::{self, SortKey};
 use comarchy::ops::{self, Choice, Kind};
+use comarchy::search::{self, Event, Options};
 use comarchy::state::{AppState, PaneId};
 use comarchy::theme;
 
@@ -126,6 +127,8 @@ const MEMORY: &[(&str, fn() -> Result<(), String>)] = &[
 const FS: &[&str] = &[
     "landlock_blocks_outside_write",
     "list_dir_reads_names",
+    "search_nested_names",
+    "search_cancelled",
     "f5_copies_tree_to_other_pane",
     "shift_f5_copies_with_new_name",
     "f6_moves_file",
@@ -147,6 +150,8 @@ fn dispatch(name: &str, dir: &Path) -> Result<(), String> {
     match name {
         "landlock_blocks_outside_write" => landlock_blocks_outside_write(dir),
         "list_dir_reads_names" => list_dir_reads_names(dir),
+        "search_nested_names" => search_nested_names(dir),
+        "search_cancelled" => search_cancelled(dir),
         "f5_copies_tree_to_other_pane" => f5_copies_tree_to_other_pane(dir),
         "shift_f5_copies_with_new_name" => shift_f5_copies_with_new_name(dir),
         "f6_moves_file" => f6_moves_file(dir),
@@ -260,12 +265,31 @@ fn pane_sort_is_independent() -> Result<(), String> {
 }
 
 fn filter_keeps_substring() -> Result<(), String> {
-    let entries = vec![file("notes.txt", 1), file("other.bin", 2)];
+    let entries = vec![
+        file("notes.txt", 1), file("other.bin", 2), file("edit.txt", 3), file("edit.md", 4),
+        file("draft.MD", 5), file("old.md.bak", 6), file("möte.md", 7),
+    ];
     let vis = listing::visible_indices(&entries, SortKey::Name, true, true, "note");
     if vis.len() != 1 {
         return Err(format!("filter {}", vis.len()));
     }
-    eq(entries[vis[0]].name.as_ref(), "notes.txt", "filter")
+    eq(entries[vis[0]].name.as_ref(), "notes.txt", "filter")?;
+    for query in ["e", "ed", "edi", "edit", "edit.", "edit.t", "edit.tx", "edit.txt"] {
+        let matches = listing::visible_indices(&entries, SortKey::Name, true, true, query);
+        if !matches.iter().any(|&index| entries[index].name.as_ref() == "edit.txt") {
+            return Err(format!("missing edit.txt while filtering {query}"));
+        }
+        if query == "edit.txt" {
+            eq(matches.len(), 1, "full name with extension")?;
+        }
+    }
+    let markdown = listing::visible_indices(&entries, SortKey::Name, true, true, "*.md");
+    let names: Vec<_> = markdown.iter().map(|&index| entries[index].name.as_ref()).collect();
+    eq(names, vec!["draft.MD", "edit.md", "möte.md"], "markdown extension mask")?;
+    let single = listing::visible_indices(&entries, SortKey::Name, true, true, "m?te.md");
+    eq(single.len(), 1, "single Unicode character wildcard")?;
+    eq(entries[single[0]].name.as_ref(), "möte.md", "single wildcard result")?;
+    Ok(())
 }
 
 fn insert_mark_is_used() -> Result<(), String> {
@@ -668,6 +692,61 @@ fn list_dir_reads_names(dir: &Path) -> Result<(), String> {
         return Err("missing a.txt".into());
     }
     Ok(())
+}
+
+fn search_nested_names(dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(dir.join("nested")).map_err(s)?;
+    fs::create_dir_all(dir.join(".private")).map_err(s)?;
+    fs::write(dir.join("nested/report.txt"), "one").map_err(s)?;
+    fs::write(dir.join(".private/Report.txt"), "two").map_err(s)?;
+    std::os::unix::fs::symlink(dir.join("nested"), dir.join("shortcut")).map_err(s)?;
+    let options = |query: &str| Options {
+        root: dir.to_path_buf(), query: query.into(), recursive: true,
+        hidden: false, files_only: false, case_sensitive: false,
+    };
+    let collect = |options| {
+        let mut found = Vec::new();
+        let mut finished = None;
+        search::run(options, || false, |event| match event {
+            Event::Matches(paths) => found.extend(paths),
+            Event::Finished { errors, cancelled } => finished = Some((errors, cancelled)),
+        });
+        (found, finished)
+    };
+    let (found, finished) = collect(options("report"));
+    eq(found, vec![dir.join("nested/report.txt")], "recursive visible names")?;
+    eq(finished, Some((0, false)), "search completed")?;
+    let (found, _) = collect(Options { recursive: false, ..options("report") });
+    eq(found.len(), 0, "nonrecursive search")?;
+    let (found, _) = collect(Options { hidden: true, ..options("report") });
+    eq(found.len(), 2, "hidden result or symlink traversal")?;
+    let (found, _) = collect(Options { case_sensitive: true, ..options("Report") });
+    eq(found.len(), 0, "case-sensitive search")?;
+    let (found, _) = collect(options("nested"));
+    eq(found, vec![dir.join("nested")], "directory match")?;
+    let (found, _) = collect(Options { files_only: true, ..options("nested") });
+    eq(found.len(), 0, "files only")
+}
+
+fn search_cancelled(dir: &Path) -> Result<(), String> {
+    for index in 0..90 {
+        fs::write(dir.join(format!("result-{index}")), "").map_err(s)?;
+    }
+    let stopped = std::cell::Cell::new(false);
+    let mut batches = 0;
+    let mut finished = None;
+    search::run(Options {
+        root: dir.to_path_buf(), query: "result".into(), recursive: true,
+        hidden: false, files_only: true, case_sensitive: false,
+    }, || stopped.get(), |event| match event {
+        Event::Matches(_) => {
+            batches += 1;
+            stopped.set(true);
+        }
+        Event::Finished { errors, cancelled } => finished = Some((errors, cancelled)),
+    });
+    eq(batches, 1, "stopped after the first batch")?;
+    eq(finished, Some((0, true)), "cancelled status")
 }
 
 fn f5_copies_tree_to_other_pane(dir: &Path) -> Result<(), String> {
