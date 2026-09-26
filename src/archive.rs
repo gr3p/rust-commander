@@ -70,21 +70,8 @@ impl From<unrar_ng::error::UnrarError> for Fail {
     }
 }
 
-pub fn is_rar_root(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    let Some(stem) = lower.strip_suffix(".rar") else { return false };
-    // part02.rar and later are volumes. part01.rar and name.rar are the file you unpack.
-    let Some((_, number)) = stem.rsplit_once(".part") else { return true };
-    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
-        return true;
-    }
-    number.trim_start_matches('0') == "1"
-}
-
 pub fn unpack_mark(name: &str) -> &'static str {
-    if is_rar_root(name) {
-        "R"
-    } else if name.len() >= 4 && name.as_bytes()[name.len() - 4..].eq_ignore_ascii_case(b".zip") {
+    if name.len() >= 4 && name.as_bytes()[name.len() - 4..].eq_ignore_ascii_case(b".zip") {
         "Z"
     } else {
         ""
@@ -743,16 +730,8 @@ mod tests {
     }
 
     #[test]
-    fn rar_root_is_the_first_volume() {
-        assert!(is_rar_root("Movie.rar"));
-        assert!(is_rar_root("Movie.part01.rar"));
-        assert!(is_rar_root("Movie.part1.rar"));
-        assert!(is_rar_root("Movie.PART01.RAR"));
-        assert!(!is_rar_root("Movie.part02.rar"));
-        assert!(!is_rar_root("Movie.part10.rar"));
-        assert!(!is_rar_root("Movie.r00"));
-        assert_eq!(unpack_mark("Movie.rar"), "R");
-        assert_eq!(unpack_mark("Movie.part02.rar"), "");
+    fn zip_keeps_unpack_mark() {
+        assert_eq!(unpack_mark("Movie.rar"), "");
         assert_eq!(unpack_mark("notes.ZIP"), "Z");
         assert_eq!(unpack_mark("notes.txt"), "");
     }

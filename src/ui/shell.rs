@@ -1,5 +1,7 @@
 use std::cell::Cell;
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::Duration;
 
 use relm4::gtk;
 use relm4::gtk::gio;
@@ -34,13 +36,16 @@ pub struct Shell {
     pub f_labels: Vec<String>,
     pub mode_bar: gtk::Stack,
     pub image_scale: gtk::Button,
+    pub text_modes: CharsetBar,
     pub unpack_list: gtk::Button,
     pub unpack_here: gtk::Button,
     pub verify_sfv: gtk::Button,
     pub active: Rc<Cell<usize>>,
+    pub drives: Vec<(PathBuf, gtk::Button)>,
 }
 
 pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> Shell {
+    window.add_css_class("commander");
     let css = gtk::CssProvider::new();
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
@@ -51,8 +56,9 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
     }
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let active = Rc::new(Cell::new(0));
-    if let Some(drives) = drive_bar(sender, &active) {
-        root.append(&drives);
+    let (drive_bar, drives) = drive_bar(sender, &active);
+    if let Some(bar) = drive_bar {
+        root.append(&bar);
     }
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
     paned.set_hexpand(true);
@@ -115,9 +121,11 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
     image_bar.append(&image_scale);
     image_bar.append(&image_prev);
     image_bar.append(&image_next);
+    let text_modes = charset_bar(sender);
     let mode_bar = gtk::Stack::new();
     mode_bar.add_named(&fbar, Some("files"));
     mode_bar.add_named(&image_bar, Some("image"));
+    mode_bar.add_named(&text_modes.bar, Some("text"));
     root.append(&mode_bar);
     window.set_child(Some(&root));
 
@@ -144,11 +152,36 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
         f_labels,
         mode_bar,
         image_scale,
+        text_modes,
         unpack_list,
         unpack_here,
         verify_sfv,
         active,
+        drives,
     }
+}
+
+pub struct CharsetBar {
+    pub bar: gtk::Box,
+    pub ansi: gtk::Button,
+    pub ascii: gtk::Button,
+    pub json: gtk::Button,
+}
+
+pub fn charset_bar(sender: &relm4::Sender<super::msg::Msg>) -> CharsetBar {
+    let bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    bar.add_css_class("fbar");
+    bar.set_margin_all(4);
+    let ansi = hint_button("A ANSI", || super::msg::Msg::SetCharset(comarchy::lister::Charset::Ansi), sender);
+    let ascii = hint_button("S ASCII", || super::msg::Msg::SetCharset(comarchy::lister::Charset::Ascii), sender);
+    let json = hint_button("J JSON", || super::msg::Msg::SetCharset(comarchy::lister::Charset::Json), sender);
+    ansi.set_visible(true);
+    ascii.set_visible(true);
+    json.set_visible(true);
+    bar.append(&ansi);
+    bar.append(&ascii);
+    bar.append(&json);
+    CharsetBar { bar, ansi, ascii, json }
 }
 
 fn hint_button(
@@ -165,35 +198,74 @@ fn hint_button(
     button
 }
 
-fn drive_bar(sender: &relm4::Sender<super::msg::Msg>, active: &Rc<Cell<usize>>) -> Option<gtk::Box> {
+fn drive_bar(
+    sender: &relm4::Sender<super::msg::Msg>,
+    active: &Rc<Cell<usize>>,
+) -> (Option<gtk::Box>, Vec<(PathBuf, gtk::Button)>) {
     let mounts = comarchy::places::mounts();
     if mounts.is_empty() {
-        return None;
+        return (None, Vec::new());
     }
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
     bar.add_css_class("drives");
     bar.set_margin_start(4);
     bar.set_margin_end(4);
     bar.set_margin_top(2);
-    for mount in mounts {
+    let mut drives = Vec::new();
+    for (index, mount) in mounts.into_iter().enumerate() {
         let button = gtk::Button::new();
         button.add_css_class("drive");
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+        let number = gtk::Label::new(Some(&(index + 1).to_string()));
+        number.add_css_class("drive-num");
+        row.append(&number);
         row.append(&drive_icon(mount.removable, mount.network));
         let caption = gtk::Label::new(Some(&mount.label));
         caption.set_ellipsize(gtk::pango::EllipsizeMode::End);
         caption.set_max_width_chars(10);
         row.append(&caption);
         button.set_child(Some(&row));
-        button.set_tooltip_text(Some(&format!("{}  {}", mount.device, mount.path.display())));
+        let shortcut = if index < 9 {
+            format!("Ctrl+{}", index + 1)
+        } else {
+            String::new()
+        };
+        let tip = if shortcut.is_empty() {
+            format!("{}  {}", mount.device, mount.path.display())
+        } else {
+            format!("{shortcut}  {}  {}", mount.device, mount.path.display())
+        };
+        button.set_tooltip_text(Some(&tip));
         button.set_focus_on_click(false);
         let tx = sender.clone();
-        let path = mount.path;
+        let path = mount.path.clone();
+        drives.push((mount.path, button.clone()));
         let active = active.clone();
         button.connect_clicked(move |_| tx.emit(super::msg::Msg::Mount(active.get(), path.clone())));
         bar.append(&button);
     }
-    Some(bar)
+    (Some(bar), drives)
+}
+
+pub fn blink_drive(button: &gtk::Button) {
+    let button = button.clone();
+    button.add_css_class("flash");
+    let step = Cell::new(0u8);
+    gtk::glib::timeout_add_local(Duration::from_millis(80), move || {
+        let n = step.get() + 1;
+        step.set(n);
+        if n % 2 == 0 {
+            button.add_css_class("flash");
+        } else {
+            button.remove_css_class("flash");
+        }
+        if n >= 3 {
+            button.remove_css_class("flash");
+            gtk::glib::ControlFlow::Break
+        } else {
+            gtk::glib::ControlFlow::Continue
+        }
+    });
 }
 
 fn drive_icon(removable: bool, network: bool) -> gtk::Widget {

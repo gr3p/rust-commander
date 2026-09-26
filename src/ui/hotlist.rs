@@ -25,7 +25,8 @@ pub fn popup(
     win.set_default_width(320);
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let rows = hotlist::rows(marks, menu);
-    let mut accels: Vec<(char, bool, usize)> = Vec::new();
+    let busy = Rc::new(Cell::new(false));
+    let mut accels: Vec<(char, bool, usize, gtk::Button)> = Vec::new();
     let mut first: Option<gtk::Button> = None;
     for row in &rows {
         match row {
@@ -38,9 +39,14 @@ pub fn popup(
                 }
                 let tx = sender.clone();
                 let index = *index;
-                button.connect_clicked(move |_| tx.emit(Msg::HotlistPick(index)));
+                let pick = button.clone();
+                let busy_click = busy.clone();
+                button.connect_clicked(move |_| {
+                    let tx = tx.clone();
+                    confirm(&pick, &busy_click, move || tx.emit(Msg::HotlistPick(index)));
+                });
                 if let Some(ch) = accel {
-                    accels.push((*ch, false, index));
+                    accels.push((*ch, false, index, button.clone()));
                 }
                 if first.is_none() {
                     first = Some(button.clone());
@@ -52,9 +58,14 @@ pub fn popup(
                 let button = item_button(&markup);
                 let tx = sender.clone();
                 let index = *index;
-                button.connect_clicked(move |_| tx.emit(Msg::HotlistMenu(index)));
+                let pick = button.clone();
+                let busy_click = busy.clone();
+                button.connect_clicked(move |_| {
+                    let tx = tx.clone();
+                    confirm(&pick, &busy_click, move || tx.emit(Msg::HotlistMenu(index)));
+                });
                 if let Some(ch) = accel {
-                    accels.push((*ch, true, index));
+                    accels.push((*ch, true, index, button.clone()));
                 }
                 if first.is_none() {
                     first = Some(button.clone());
@@ -64,29 +75,51 @@ pub fn popup(
         }
     }
     column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-    if hotlist::dir_index(marks, current).is_none() {
+    let current_dir = if hotlist::dir_index(marks, current).is_none() {
         let button = item_button("Add current dir    +");
         let tx = sender.clone();
-        button.connect_clicked(move |_| tx.emit(Msg::HotlistAdd));
+        let pick = button.clone();
+        let busy_click = busy.clone();
+        button.connect_clicked(move |_| {
+            let tx = tx.clone();
+            confirm(&pick, &busy_click, move || tx.emit(Msg::HotlistAdd));
+        });
         column.append(&button);
+        (button, '+')
     } else {
         let button = item_button("Remove current dir    -");
         let tx = sender.clone();
-        button.connect_clicked(move |_| tx.emit(Msg::HotlistRemove));
+        let pick = button.clone();
+        let busy_click = busy.clone();
+        button.connect_clicked(move |_| {
+            let tx = tx.clone();
+            confirm(&pick, &busy_click, move || tx.emit(Msg::HotlistRemove));
+        });
         column.append(&button);
-    }
+        (button, '-')
+    };
     let configure = item_button("Configure    *");
     let tx = sender.clone();
-    configure.connect_clicked(move |_| tx.emit(Msg::HotlistConfigure));
+    let pick = configure.clone();
+    let busy_click = busy.clone();
+    configure.connect_clicked(move |_| {
+        let tx = tx.clone();
+        confirm(&pick, &busy_click, move || tx.emit(Msg::HotlistConfigure));
+    });
     column.append(&configure);
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_propagate_natural_height(true);
     scroll.set_max_content_height(480);
     scroll.set_child(Some(&column));
-    win.set_child(Some(&scroll));
+    let frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    frame.add_css_class("hot-frame");
+    frame.append(&scroll);
+    win.add_css_class("hotlist");
+    win.set_child(Some(&frame));
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     let tx = sender.clone();
+    let busy_keys = busy.clone();
     keys.connect_key_pressed(move |_, key, _, mods| {
         let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
         if ctrl && matches!(key, gtk::gdk::Key::d | gtk::gdk::Key::D) {
@@ -95,19 +128,34 @@ pub fn popup(
         }
         if let Some(ch) = key.to_unicode() {
             let ch = ch.to_ascii_lowercase();
-            if let Some((_, menu, index)) = accels.iter().find(|(accel, _, _)| *accel == ch) {
-                if *menu {
-                    tx.emit(Msg::HotlistMenu(*index));
-                } else {
-                    tx.emit(Msg::HotlistPick(*index));
-                }
+            if let Some((_, menu, index, button)) = accels.iter().find(|(accel, _, _, _)| *accel == ch) {
+                let menu = *menu;
+                let index = *index;
+                let button = button.clone();
+                let tx = tx.clone();
+                let busy = busy_keys.clone();
+                confirm(&button, &busy, move || {
+                    if menu {
+                        tx.emit(Msg::HotlistMenu(index));
+                    } else {
+                        tx.emit(Msg::HotlistPick(index));
+                    }
+                });
                 return gtk::glib::Propagation::Stop;
             }
-            match ch {
-                '+' => tx.emit(Msg::HotlistAdd),
-                '-' => tx.emit(Msg::HotlistRemove),
-                '*' => tx.emit(Msg::HotlistConfigure),
-                _ => {}
+            let extra = match ch {
+                ch if ch == current_dir.1 => Some((current_dir.0.clone(), ch)),
+                '*' => Some((configure.clone(), '*')),
+                _ => None,
+            };
+            if let Some((button, ch)) = extra {
+                let tx = tx.clone();
+                let busy = busy_keys.clone();
+                confirm(&button, &busy, move || match ch {
+                    '+' => tx.emit(Msg::HotlistAdd),
+                    '-' => tx.emit(Msg::HotlistRemove),
+                    _ => tx.emit(Msg::HotlistConfigure),
+                });
             }
         }
         if matches!(key, gtk::gdk::Key::Escape) {
@@ -378,6 +426,14 @@ fn mark(name: &str, kind: &str) -> Bookmark {
         target: std::path::PathBuf::new(),
         kind: kind.into(),
     }
+}
+
+fn confirm(button: &gtk::Button, busy: &Rc<Cell<bool>>, emit: impl Fn() + 'static) {
+    if busy.replace(true) {
+        return;
+    }
+    super::shell::blink_drive(button);
+    gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(240), emit);
 }
 
 fn shortcut_hint() -> gtk::Label {

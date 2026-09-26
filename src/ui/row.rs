@@ -28,6 +28,8 @@ mod imp {
         #[property(get, set)]
         glyph: RefCell<String>,
         #[property(get, set)]
+        icon: RefCell<String>,
+        #[property(get, set)]
         is_dir: Cell<bool>,
     }
 
@@ -46,7 +48,7 @@ glib::wrapper! {
 }
 
 impl EntryObject {
-    pub fn from_entry(entry: &Entry, marked: bool) -> Self {
+    pub fn from_entry(entry: &Entry, marked: bool, icons: bool) -> Self {
         let skip = entry.name.as_ref() == "..";
         let name = if skip {
             "↑ [..]".into()
@@ -58,6 +60,7 @@ impl EntryObject {
             entry.name.to_string()
         };
         let glyph = if skip || entry.is_dir() { "" } else { comarchy::archive::unpack_mark(&entry.name) };
+        let icon = if icons { listing::file_icon(&entry.name, entry.is_dir(), entry.is_symlink()) } else { "" };
         glib::Object::builder()
             .property("name", name)
             .property("ext", if skip { String::new() } else { listing::extension(&entry.name).to_string() })
@@ -66,6 +69,7 @@ impl EntryObject {
             .property("attr", listing::format_attr(entry.mode))
             .property("marked", marked)
             .property("glyph", glyph)
+            .property("icon", icon)
             .property("is-dir", entry.is_dir())
             .build()
     }
@@ -118,7 +122,11 @@ fn column(
         if id == "name" {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
             row.set_hexpand(true);
+            let icon = gtk::Label::new(None);
+            icon.add_css_class("file-icon");
+            icon.set_visible(false);
             row.append(&up_arrow());
+            row.append(&icon);
             row.append(&label);
             item.set_child(Some(&row));
         } else {
@@ -144,6 +152,9 @@ fn column(
                 arrow.set_visible(false);
             }
             label.set_label(&text);
+        }
+        if id == "name" {
+            paint_file_icon(item, &obj);
         }
         if marked {
             apply_marked(&label, obj.marked());
@@ -226,6 +237,19 @@ fn apply_marked(label: &relm4::gtk::Label, on: bool) {
         label.add_css_class("marked");
     } else {
         label.remove_css_class("marked");
+    }
+}
+
+fn paint_file_icon(item: &relm4::gtk::ListItem, obj: &EntryObject) {
+    let Some(row) = item.child().and_then(|child| child.downcast::<relm4::gtk::Box>().ok()) else { return };
+    let Some(icon) = row.first_child().and_then(|arrow| arrow.next_sibling()).and_then(|widget| widget.downcast::<relm4::gtk::Label>().ok()) else { return };
+    let text = obj.icon();
+    icon.set_visible(!text.is_empty());
+    icon.set_label(&text);
+    if obj.is_dir() {
+        icon.add_css_class("dir");
+    } else {
+        icon.remove_css_class("dir");
     }
 }
 

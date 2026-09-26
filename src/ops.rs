@@ -372,6 +372,15 @@ pub fn make_dir(parent: &Path, name: &str) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+pub fn make_file(parent: &Path, name: &str) -> io::Result<PathBuf> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad file name"));
+    }
+    let path = parent.join(name);
+    fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
+    Ok(path)
+}
+
 pub fn rename_in_place(path: &Path, new_name: &str) -> io::Result<PathBuf> {
     let dest = path
         .parent()

@@ -95,6 +95,7 @@ const MEMORY: &[(&str, fn() -> Result<(), String>)] = &[
     ("sort_keys_order_entries", sort_keys_order_entries),
     ("pane_sort_is_independent", pane_sort_is_independent),
     ("columns_ext_date_attr", columns_ext_date_attr),
+    ("file_icons_by_kind", file_icons_by_kind),
     ("column_widths_follow_text", column_widths_follow_text),
     ("filter_keeps_substring", filter_keeps_substring),
     ("insert_mark_is_used", insert_mark_is_used),
@@ -118,6 +119,7 @@ const MEMORY: &[(&str, fn() -> Result<(), String>)] = &[
     ("image_step_stops_at_end", image_step_stops_at_end),
     ("image_decode_png_and_scales", image_decode_png_and_scales),
     ("lister_ansi_and_ascii", lister_ansi_and_ascii),
+    ("lister_pretty_json", lister_pretty_json),
     ("hotlist_accel_submenu", hotlist_accel_submenu),
 ];
 
@@ -129,6 +131,7 @@ const FS: &[&str] = &[
     "f6_moves_file",
     "shift_f6_renames",
     "f7_makes_directory",
+    "shift_f4_creates_file",
     "f8_calls_trash",
     "shift_f8_deletes",
     "conflict_overwrite_rest",
@@ -149,6 +152,7 @@ fn dispatch(name: &str, dir: &Path) -> Result<(), String> {
         "f6_moves_file" => f6_moves_file(dir),
         "shift_f6_renames" => shift_f6_renames(dir),
         "f7_makes_directory" => f7_makes_directory(dir),
+        "shift_f4_creates_file" => shift_f4_creates_file(dir),
         "f8_calls_trash" => f8_calls_trash(dir),
         "shift_f8_deletes" => shift_f8_deletes(dir),
         "conflict_overwrite_rest" => conflict_overwrite_rest(dir),
@@ -208,6 +212,13 @@ fn columns_ext_date_attr() -> Result<(), String> {
     ];
     let vis = listing::visible_indices(&entries, SortKey::Attr, true, true, "");
     eq(entries[vis[0]].name.as_ref(), "a", "attr sort")
+}
+
+fn file_icons_by_kind() -> Result<(), String> {
+    eq(listing::file_icon("docs", true, false), "\u{f07b}", "dir")?;
+    eq(listing::file_icon("note.txt", false, false), "\u{f15c}", "txt")?;
+    eq(listing::file_icon("song.mp3", false, false), "\u{f001}", "mp3")?;
+    eq(listing::file_icon("data.bin", false, false), "\u{f15b}", "other")
 }
 
 fn column_widths_follow_text() -> Result<(), String> {
@@ -292,13 +303,21 @@ bright_foreground = \"#555555\"
 
 fn list_background_color_and_image() -> Result<(), String> {
     let palette = theme::builtin();
-    let plain = theme::list_background(&palette, "", "", 0);
+    let plain = theme::list_background(&palette, "", "", 100);
     if !plain.is_empty() {
         return Err(format!("plain {plain}"));
     }
-    let color = theme::list_background(&palette, "#abcdef", "", 0);
-    if !color.contains("#abcdef") || color.contains("url(") {
+    let color = theme::list_background(&palette, "#abcdef", "", 100);
+    if !color.contains("#abcdef") || color.contains("url(") || color.contains("alpha(") {
         return Err(format!("color {color}"));
+    }
+    let glass = theme::list_background(&palette, "#abcdef", "", 40);
+    if !glass.contains("alpha(#abcdef, 0.40)") || glass.contains("url(") {
+        return Err(format!("glass {glass}"));
+    }
+    let clear = theme::list_background(&palette, "", "", 0);
+    if !clear.contains("alpha(") || clear.contains("url(") {
+        return Err(format!("clear {clear}"));
     }
     eq(theme::css_file_url("/My Pictures/a.png").as_str(), "file:///My%20Pictures/a.png", "url")?;
     let image = theme::list_background(&palette, "#abcdef", "/My Pictures/a.png", 70);
@@ -416,6 +435,19 @@ systemd-1 /mnt/seagate12tb autofs rw 0 0
     if paths.iter().any(|p| p.starts_with("/proc")) {
         return Err("binfmt listed".into());
     }
+    let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+    let usb = comarchy::places::current_mount(&refs, Path::new("/media/marcus/USB/dcim")).ok_or("usb slot")?;
+    if paths[usb] != pb("/media/marcus/USB") {
+        return Err("usb prefix".into());
+    }
+    let share_i = comarchy::places::current_mount(&refs, Path::new("/mnt/seagate12tb/foto")).ok_or("share slot")?;
+    if paths[share_i] != pb("/mnt/seagate12tb") {
+        return Err("share prefix".into());
+    }
+    let root = comarchy::places::current_mount(&refs, Path::new("/home/marcus")).ok_or("root slot")?;
+    if paths[root] != pb("/") {
+        return Err("root prefix".into());
+    }
     Ok(())
 }
 
@@ -481,7 +513,17 @@ fn external_argv() -> Result<(), String> {
     if !choices.iter().any(|choice| choice.id == "code" && choice.label.contains("Visual Studio Code")) {
         return Err("code missing from choices".into());
     }
-    eq(choices.last().map(|choice| choice.id.as_str()), Some(external::EDITOR_BROWSE), "other")
+    eq(choices.last().map(|choice| choice.id.as_str()), Some(external::EDITOR_BROWSE), "other")?;
+    let vlc = "/usr/bin/flatpak run --file-forwarding org.videolan.VLC --started-from-file @@u %U @@";
+    let argv = external::desktop_argv(vlc, Path::new("/tmp/a b.mkv"));
+    if argv.iter().any(|arg| arg == "--started-from-file") {
+        return Err("started-from-file kept".into());
+    }
+    eq(argv.last().map(String::as_str), Some("@@"), "flatpak end")?;
+    if !argv.iter().any(|arg| arg == "file:///tmp/a%20b.mkv") {
+        return Err(format!("uri {argv:?}"));
+    }
+    Ok(())
 }
 
 fn lister_ansi_and_ascii() -> Result<(), String> {
@@ -496,6 +538,43 @@ fn lister_ansi_and_ascii() -> Result<(), String> {
     let hex = lister::render(ViewMode::Hex, Charset::Ascii, &[0xC4], 0);
     if !hex.contains('\u{2500}') {
         return Err("hex dos".into());
+    }
+    let text = lister::format_text(b"a\0b\xff");
+    if text.contains('\0') || text != "a.b\u{FFFD}" {
+        return Err(format!("nul {text}"));
+    }
+    let frame = lister::render(ViewMode::Text, Charset::Ascii, b"\xc9\xcd\xbb\r\n\xdd", 0);
+    if frame != "╔═╗\n▌" {
+        return Err(format!("nfo {frame}"));
+    }
+    if lister::choose_charset("movie.nfo", b"\xef\xbb\xbf<?xml", Charset::Utf8) != Charset::Utf8 {
+        return Err("utf8 nfo".into());
+    }
+    if lister::choose_charset("scene.nfo", b"\xc9\xcd", Charset::Utf8) != Charset::Ascii {
+        return Err("cp437 nfo".into());
+    }
+    if lister::choose_charset("scene.nfo", b"\xc9\xcd", Charset::Ansi) != Charset::Ansi {
+        return Err("ansi stays".into());
+    }
+    Ok(())
+}
+
+fn lister_pretty_json() -> Result<(), String> {
+    let pretty = lister::render(ViewMode::Text, Charset::Json, br#"{"a":1,"b":[true,{"c":"}]","n":-1.5e+10}]}"#, 0);
+    let expect = "{\n  \"a\": 1,\n  \"b\": [\n    true,\n    {\n      \"c\": \"}]\",\n      \"n\": -1.5e+10\n    }\n  ]\n}";
+    if pretty != expect {
+        return Err(format!("json {pretty}"));
+    }
+    let bom = lister::render(ViewMode::Text, Charset::Json, b"\xef\xbb\xbf{}", 0);
+    if bom != "{}" {
+        return Err(format!("bom {bom}"));
+    }
+    let bad = lister::render(ViewMode::Text, Charset::Json, b"{", 0);
+    if !bad.starts_with("Not valid JSON") {
+        return Err(format!("bad {bad}"));
+    }
+    if lister::choose_charset("a.json", b"{}", Charset::Json) != Charset::Json {
+        return Err("json stays".into());
     }
     Ok(())
 }
@@ -633,6 +712,20 @@ fn shift_f6_renames(dir: &Path) -> Result<(), String> {
 fn f7_makes_directory(dir: &Path) -> Result<(), String> {
     ops::make_dir(dir, "folder").map_err(s)?;
     if dir.join("folder").is_dir() { Ok(()) } else { Err("mkdir".into()) }
+}
+
+fn shift_f4_creates_file(dir: &Path) -> Result<(), String> {
+    ops::make_file(dir, "note.txt").map_err(s)?;
+    if fs::read(dir.join("note.txt")).map_err(s)? != b"" {
+        return Err("not empty".into());
+    }
+    if ops::make_file(dir, "note.txt").is_ok() {
+        return Err("overwrite".into());
+    }
+    if ops::make_file(dir, "../escape").is_ok() || ops::make_file(dir, "").is_ok() {
+        return Err("bad name".into());
+    }
+    Ok(())
 }
 
 fn f8_calls_trash(dir: &Path) -> Result<(), String> {
@@ -841,6 +934,9 @@ fn bookmark_roundtrip_config(dir: &Path) -> Result<(), String> {
     let loaded = config::load_from(&path);
     if !loaded.mode_buttons {
         return Err("mode buttons default".into());
+    }
+    if loaded.file_icons {
+        return Err("file icons default".into());
     }
     Ok(())
 }

@@ -101,25 +101,23 @@ fn hex_color(color: &str) -> Option<&str> {
     }
 }
 
-// Image strength 0 is the solid color. 100 is the picture alone.
+// With a picture, 0 is the solid color and 100 is the picture alone.
+// With no picture, the value is opacity: 100 is the color, lower shows the desktop through.
 pub fn list_background(p: &Palette, color: &str, image: &str, strength: u8) -> String {
     let chosen = hex_color(color);
     let strength = strength.min(100);
     let image = image.trim();
-    let show_image = strength > 0 && !image.is_empty();
+    let selected = selected_rows(p);
+    if image.is_empty() {
+        return plain_background(p, chosen, strength, &selected);
+    }
+    let show_image = strength > 0;
     if !show_image && chosen.is_none() {
         return String::new();
     }
     let fill = chosen.unwrap_or(p.background.as_str());
-    let selected = format!(
-        "columnview > listview > row:selected,\ncolumnview > listview > row:selected > cell {{\n  background: {sel};\n  color: {bright};\n}}\n",
-        sel = p.selection,
-        bright = p.bright,
-    );
     if !show_image {
-        return format!(
-            "columnview,\ncolumnview > listview,\ncolumnview > listview > row,\ncolumnview > listview > row > cell {{\n  background: {fill};\n}}\n{selected}"
-        );
+        return solid_lists(fill, &selected);
     }
     let url = css_file_url(image);
     let veil = f64::from(100 - strength) / 100.0;
@@ -135,6 +133,34 @@ pub fn list_background(p: &Palette, color: &str, image: &str, strength: u8) -> S
     };
     format!(
         "columnview {{\n  background: {fill};\n}}\ncolumnview > listview {{\n  background-color: {fill};\n  background-image: {picture};\n  background-size: {size};\n  background-position: {at};\n  background-repeat: {repeat};\n}}\ncolumnview > listview > row,\ncolumnview > listview > row > cell {{\n  background: transparent;\n}}\n{selected}"
+    )
+}
+
+fn selected_rows(p: &Palette) -> String {
+    format!(
+        "columnview > listview > row:selected,\ncolumnview > listview > row:selected > cell {{\n  background: {sel};\n  color: {bright};\n}}\n",
+        sel = p.selection,
+        bright = p.bright,
+    )
+}
+
+fn solid_lists(fill: &str, selected: &str) -> String {
+    format!(
+        "columnview,\ncolumnview > listview,\ncolumnview > listview > row,\ncolumnview > listview > row > cell {{\n  background: {fill};\n}}\n{selected}"
+    )
+}
+
+fn plain_background(p: &Palette, chosen: Option<&str>, strength: u8, selected: &str) -> String {
+    if strength >= 100 {
+        return match chosen {
+            Some(fill) => solid_lists(fill, selected),
+            None => String::new(),
+        };
+    }
+    let fill = chosen.unwrap_or(p.background.as_str());
+    let opacity = f64::from(strength) / 100.0;
+    format!(
+        "window.commander {{\n  background-color: alpha({fill}, {opacity:.2});\n}}\nwindow.commander headerbar,\nwindow.commander .titlebar,\nwindow.commander frame,\nwindow.commander frame > border,\nwindow.commander scrolledwindow,\nwindow.commander columnview,\nwindow.commander columnview > listview,\nwindow.commander columnview > listview > row,\nwindow.commander columnview > listview > row > cell,\nwindow.commander textview,\nwindow.commander textview text {{\n  background-color: transparent;\n  background-image: none;\n}}\n{selected}"
     )
 }
 
@@ -184,6 +210,16 @@ label.glyph.cursor {{
   color: #ffffff;
   font-size: 13px;
 }}
+label.file-icon {{
+  font-size: 13px;
+  min-height: 0;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+}}
+label.file-icon.dir {{
+  color: {accent};
+}}
 columnview > listview > row > cell:first-child {{
   padding: 0;
 }}
@@ -229,6 +265,7 @@ textview, textview text {{
 }}
 button.drive {{
   background: transparent;
+  border: 1px solid transparent;
   padding: 10px 4px;
   min-width: 0;
   min-height: 0;
@@ -236,8 +273,22 @@ button.drive {{
 button.drive label {{
   font-size: 11px;
 }}
+button.drive label.drive-num {{
+  color: {accent};
+  font-family: monospace;
+}}
 button.drive:hover {{
   background: {sel};
+}}
+button.drive.current {{
+  border-color: {accent};
+}}
+button.flash {{
+  background: {accent};
+  color: {bg};
+}}
+button.flash label {{
+  color: {bg};
 }}
 button.fkey {{
   background: {sel};
@@ -291,8 +342,22 @@ button.hot {{
   min-height: 0;
   min-width: 0;
 }}
-button.hot:hover, button.hot:focus {{
+button.hot:hover {{
   background: {sel};
+}}
+button.hot:focus,
+button.hot:focus-visible {{
+  background: {sel};
+  border: 1px solid {accent};
+  outline: none;
+}}
+window.hotlist {{
+  outline: none;
+  background: {bg};
+}}
+.hot-frame {{
+  border: 1px solid {accent};
+  background: {bg};
 }}
 button.hot-on {{
   background: {sel};

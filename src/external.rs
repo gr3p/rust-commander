@@ -53,6 +53,70 @@ pub fn viewer_argv(configured: &str, path: &Path) -> Vec<String> {
     argv(configured, None, "xdg-open", path)
 }
 
+// Desktop Exec field codes. Flatpak VLC drops a file handed to a running player, so that flag is skipped.
+pub fn desktop_argv(exec: &str, path: &Path) -> Vec<String> {
+    let uri = file_uri(path);
+    let path_text = path.display().to_string();
+    let mut out = Vec::new();
+    for arg in split_exec(exec) {
+        if arg == "--started-from-file" {
+            continue;
+        }
+        match arg.as_str() {
+            "%f" | "%F" => out.push(path_text.clone()),
+            "%u" | "%U" => out.push(uri.clone()),
+            "%i" | "%c" | "%k" => {}
+            other => {
+                let other = other.replace("%%", "%");
+                if !other.is_empty() {
+                    out.push(other);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn split_exec(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote = false;
+    let mut escape = false;
+    for ch in line.chars() {
+        if escape {
+            cur.push(ch);
+            escape = false;
+            continue;
+        }
+        match ch {
+            '\\' if quote => escape = true,
+            '"' => quote = !quote,
+            c if c.is_whitespace() && !quote => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+// Percent-encode each byte. '/' stays, so the result is file:///tmp/a.
+fn file_uri(path: &Path) -> String {
+    let mut out = String::from("file://");
+    for b in path.to_string_lossy().bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 pub fn editor_argv(configured: &str, editor_env: Option<&str>, path: &Path) -> Vec<String> {
     editor_argv_with(configured, editor_env, program_on_path, path)
 }

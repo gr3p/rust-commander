@@ -24,6 +24,15 @@ pub fn mounts() -> Vec<Mount> {
     parse_mounts(&text)
 }
 
+pub fn current_mount(mounts: &[&Path], dir: &Path) -> Option<usize> {
+    mounts
+        .iter()
+        .enumerate()
+        .filter(|(_, mount)| dir.starts_with(mount))
+        .max_by_key(|(_, mount)| mount.components().count())
+        .map(|(index, _)| index)
+}
+
 pub fn parse_mounts(text: &str) -> Vec<Mount> {
     let mut out = Vec::new();
     let mut labels = std::collections::HashSet::new();

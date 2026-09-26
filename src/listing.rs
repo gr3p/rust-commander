@@ -137,6 +137,29 @@ pub fn extension(name: &str) -> &str {
     }
 }
 
+// Font Awesome glyphs in JetBrainsMono Nerd Font. One em, same height as the name.
+pub fn file_icon(name: &str, is_dir: bool, is_link: bool) -> &'static str {
+    if name == ".." {
+        return "";
+    }
+    if is_link {
+        return "\u{f0c1}";
+    }
+    if is_dir {
+        return "\u{f07b}";
+    }
+    match extension(name).to_ascii_lowercase().as_str() {
+        "txt" | "md" | "log" => "\u{f15c}",
+        "mp3" | "flac" | "wav" | "ogg" => "\u{f001}",
+        "jpg" | "png" | "gif" | "webp" => "\u{f1c5}",
+        "mp4" | "mkv" | "webm" => "\u{f1c8}",
+        "zip" | "7z" | "rar" | "tar" | "gz" => "\u{f1c6}",
+        "pdf" => "\u{f1c1}",
+        "rs" | "py" | "js" | "ts" | "go" | "c" | "h" => "\u{f1c9}",
+        _ => "\u{f15b}",
+    }
+}
+
 // st_mode: file type, then rwx for user, group and other.
 pub fn format_attr(mode: u32) -> String {
     if mode == 0 {

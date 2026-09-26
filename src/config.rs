@@ -38,7 +38,7 @@ pub struct Config {
     pub background: String,
     #[serde(default)]
     pub background_color: String,
-    #[serde(default)]
+    #[serde(default = "default_opaque")]
     pub background_alpha: u8,
     #[serde(default)]
     pub seven_zip: String,
@@ -46,6 +46,8 @@ pub struct Config {
     pub rar: String,
     #[serde(default = "default_true")]
     pub mode_buttons: bool,
+    #[serde(default)]
+    pub file_icons: bool,
 }
 
 fn default_theme() -> String {
@@ -58,6 +60,10 @@ fn default_true() -> bool {
 
 fn default_sort() -> String {
     "name".into()
+}
+
+fn default_opaque() -> u8 {
+    100
 }
 
 impl Default for Config {
@@ -73,10 +79,11 @@ impl Default for Config {
             column_widths: Vec::new(),
             background: String::new(),
             background_color: String::new(),
-            background_alpha: 0,
+            background_alpha: default_opaque(),
             seven_zip: String::new(),
             rar: String::new(),
             mode_buttons: true,
+            file_icons: false,
         }
     }
 }
