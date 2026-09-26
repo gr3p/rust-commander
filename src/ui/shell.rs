@@ -41,6 +41,7 @@ pub struct Shell {
     pub unpack_here: gtk::Button,
     pub verify_sfv: gtk::Button,
     pub pack: gtk::Button,
+    pub pack_here: gtk::Button,
     pub active: Rc<Cell<usize>>,
     pub drives: Vec<(PathBuf, gtk::Button)>,
     pub edit_button: gtk::Button,
@@ -116,7 +117,13 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
     let unpack_here = hint_button("Ctrl+Alt+F10 Extract here", || super::msg::Msg::UnpackHere, sender);
     let verify_sfv = hint_button("Enter Verify", || super::msg::Msg::VerifySfv, sender);
     let pack = hint_button("Alt+F5 Pack", || super::msg::Msg::Key(gtk::gdk::Key::F5, gtk::gdk::ModifierType::ALT_MASK), sender);
+    let pack_here = hint_button(
+        "Ctrl+Shift+F5 Pack here",
+        || super::msg::Msg::Key(gtk::gdk::Key::F5, gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::SHIFT_MASK),
+        sender,
+    );
     context_row.append(&pack);
+    context_row.append(&pack_here);
     context_row.append(&unpack_list);
     context_row.append(&unpack_here);
     context_row.append(&verify_sfv);
@@ -206,6 +213,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
         unpack_here,
         verify_sfv,
         pack,
+        pack_here,
         active,
         drives,
         edit_button,

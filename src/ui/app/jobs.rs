@@ -435,7 +435,7 @@ impl App {
         self.dialog = Some(win);
     }
 
-    pub(in crate::ui::app) fn start_pack(&mut self, sender: &ComponentSender<Self>) {
+    pub(in crate::ui::app) fn start_pack(&mut self, here: bool, sender: &ComponentSender<Self>) {
         let sources = self.state.selected_paths(self.state.active);
         if sources.is_empty() {
             self.status = "Nothing selected".into();
@@ -445,7 +445,7 @@ impl App {
             self.status = "Busy".into();
             return;
         }
-        let dest = self.pack_suggestion();
+        let dest = self.pack_suggestion(here);
         self.ask_pack(&sources, &dest, sender.input_sender().clone());
     }
 
@@ -564,14 +564,15 @@ impl App {
         self.dialog = Some(win);
     }
 
-    pub(in crate::ui::app) fn pack_suggestion(&self) -> String {
+    pub(in crate::ui::app) fn pack_suggestion(&self, here: bool) -> String {
         let sources = self.state.selected_paths(self.state.active);
         let stem = if sources.len() == 1 {
             sources[0].file_stem().and_then(|name| name.to_str()).unwrap_or("archive")
         } else {
             self.state.tab(self.state.active).path.file_name().and_then(|name| name.to_str()).unwrap_or("archive")
         };
-        self.state.tab(self.state.active.other()).path.join(format!("{stem}.zip")).display().to_string()
+        let pane = if here { self.state.active } else { self.state.active.other() };
+        self.state.tab(pane).path.join(format!("{stem}.zip")).display().to_string()
     }
 
     pub(in crate::ui::app) fn confirm_pack(&mut self, dest: PathBuf, opts: comarchy::pack::Options, sender: &ComponentSender<Self>) {
@@ -733,7 +734,9 @@ impl App {
         self.shell.unpack_list.set_visible(archive);
         self.shell.unpack_here.set_visible(archive);
         self.shell.verify_sfv.set_visible(sfv);
-        self.shell.pack.set_visible(!self.state.tab(self.state.active).marked.is_empty());
+        let marked = !self.state.tab(self.state.active).marked.is_empty();
+        self.shell.pack.set_visible(marked);
+        self.shell.pack_here.set_visible(marked);
     }
 
     pub(in crate::ui::app) fn ask_text(&mut self, title: &str, initial: &str, tx: relm4::Sender<Msg>) {

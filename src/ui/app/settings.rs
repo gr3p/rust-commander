@@ -615,6 +615,7 @@ pub(in crate::ui::app) fn show_commands(parent: &gtk::Window) {
         ]),
         ("Archive", &[
             ("Alt+F5", "Pack"),
+            ("Ctrl+Shift+F5", "Pack here"),
             ("Alt+F9", "Unpack to other panel"),
             ("Ctrl+Alt+F10", "Extract here"),
             ("Shift+F9", "Create SFV"),

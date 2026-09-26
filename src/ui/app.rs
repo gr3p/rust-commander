@@ -474,8 +474,9 @@ impl App {
             return;
         }
         if ctrl && alt {
-            if key == Key::F10 {
-                self.begin_unpack(false, sender);
+            match key {
+                Key::F10 => self.begin_unpack(false, sender),
+                _ => {}
             }
             return;
         }
@@ -487,6 +488,7 @@ impl App {
             match key {
                 Key::F3 => self.set_sort(comarchy::listing::SortKey::Name),
                 Key::F4 => self.set_sort(comarchy::listing::SortKey::Ext),
+                Key::F5 if shift => self.start_pack(true, sender),
                 Key::F5 => self.set_sort(comarchy::listing::SortKey::Time),
                 Key::F6 => self.set_sort(comarchy::listing::SortKey::Size),
                 Key::F7 => self.set_sort(comarchy::listing::SortKey::Attr),
@@ -533,7 +535,7 @@ impl App {
                 Key::F1 => self.show_places(PaneId::Left, sender),
                 Key::F2 => self.show_places(PaneId::Right, sender),
                 Key::F3 => self.open_external(true),
-                Key::F5 => self.start_pack(sender),
+                Key::F5 => self.start_pack(false, sender),
                 Key::F9 => self.begin_unpack(true, sender),
                 Key::Left => self.history(true, sender),
                 Key::Right => self.history(false, sender),
@@ -1214,12 +1216,22 @@ impl App {
         self.state.tab_mut(PaneId::Left).marked.insert(left.join("note.txt"));
         self.state.tab_mut(PaneId::Left).marked.insert(left.join("sub"));
         self.sync();
-        if !self.shell.pack.is_visible() {
+        if !self.shell.pack.is_visible() || !self.shell.pack_here.is_visible() {
             errors.push("pack hint".into());
         }
-        self.start_pack(sender);
+        if Path::new(&self.pack_suggestion(false)).parent() != Some(right.as_path())
+            || Path::new(&self.pack_suggestion(true)).parent() != Some(left.as_path())
+        {
+            errors.push("pack destination suggestion".into());
+        }
+        self.on_key(Key::F5, ModifierType::ALT_MASK, sender);
         if self.dialog.is_none() {
-            errors.push("pack dialog".into());
+            errors.push("Alt+F5 pack dialog".into());
+        }
+        self.close_dialog();
+        self.on_key(Key::F5, ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK, sender);
+        if self.dialog.is_none() {
+            errors.push("Ctrl+Shift+F5 pack dialog".into());
         }
         self.close_dialog();
         let packed = right.join("smoke.zip");
@@ -1237,7 +1249,7 @@ impl App {
         self.reload_pane(PaneId::Right);
         self.state.tab_mut(PaneId::Left).marked.clear();
         self.sync();
-        if self.shell.pack.is_visible() {
+        if self.shell.pack.is_visible() || self.shell.pack_here.is_visible() {
             errors.push("pack hint stays".into());
         }
         if !self.point_at(PaneId::Left, "move-me.txt") {
