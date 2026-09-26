@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
@@ -383,41 +382,38 @@ impl App {
         win.set_title(Some("Unpack"));
         win.set_modal(true);
         win.set_transient_for(Some(&self.shell.window));
-        win.set_default_width(560);
-        win.set_default_height(480);
-        let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        win.set_default_width(480);
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
         column.set_margin_all(12);
+        let heading = |text: &str| {
+            let label = gtk::Label::new(Some(text));
+            label.set_xalign(0.0);
+            label.add_css_class("heading");
+            label
+        };
         let entry = gtk::Entry::new();
         entry.set_text(dest);
         let scroll = gtk::ScrolledWindow::new();
-        scroll.set_vexpand(true);
+        scroll.set_propagate_natural_height(true);
+        scroll.set_max_content_height(200);
         let list = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        let checks = Rc::new(RefCell::new(Vec::new()));
         for member in members {
             let shown = if member.dir { format!("{}/", member.name) } else { member.name.clone() };
-            let check = gtk::CheckButton::with_label(&shown);
-            check.set_active(true);
-            check.set_margin_start(4);
-            check.set_margin_end(4);
-            check.set_margin_top(2);
-            check.set_margin_bottom(2);
-            list.append(&check);
-            checks.borrow_mut().push((check, member.name.clone()));
+            let label = gtk::Label::new(Some(&shown));
+            label.set_xalign(0.0);
+            label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+            label.set_margin_start(4);
+            list.append(&label);
         }
         scroll.set_child(Some(&list));
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let ok = gtk::Button::with_label("OK");
+        row.set_margin_top(6);
+        let ok = gtk::Button::with_label("Unpack");
         let entry_ok = entry.clone();
         let tx_ok = tx.clone();
-        let checks_ok = Rc::clone(&checks);
+        let names: Vec<String> = members.iter().map(|member| member.name.clone()).collect();
         let fire = Rc::new(move || {
-            let names = checks_ok
-                .borrow()
-                .iter()
-                .filter(|(check, _)| check.is_active())
-                .map(|(_, name)| name.clone())
-                .collect();
-            tx_ok.emit(Msg::UnpackPick(entry_ok.text().to_string(), names));
+            tx_ok.emit(Msg::UnpackPick(entry_ok.text().to_string(), names.clone()));
         });
         let fire_ok = Rc::clone(&fire);
         ok.connect_clicked(move |_| fire_ok());
@@ -427,7 +423,9 @@ impl App {
         cancel.connect_clicked(move |_| tx.emit(Msg::CancelAsk));
         row.append(&ok);
         row.append(&cancel);
+        column.append(&heading("Target location"));
         column.append(&entry);
+        column.append(&heading(&format!("Contents ({})", members.len())));
         column.append(&scroll);
         column.append(&row);
         win.set_child(Some(&column));
