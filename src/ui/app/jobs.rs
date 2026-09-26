@@ -436,12 +436,132 @@ impl App {
     }
 
     pub(in crate::ui::app) fn start_pack(&mut self, sender: &ComponentSender<Self>) {
-        if self.state.selected_paths(self.state.active).is_empty() {
+        let sources = self.state.selected_paths(self.state.active);
+        if sources.is_empty() {
             self.status = "Nothing selected".into();
             return;
         }
-        self.ask = Some(Ask::Pack);
-        self.ask_text("Pack to", &self.pack_suggestion(), sender.input_sender().clone());
+        if self.job.is_some() {
+            self.status = "Busy".into();
+            return;
+        }
+        let dest = self.pack_suggestion();
+        self.ask_pack(&sources, &dest, sender.input_sender().clone());
+    }
+
+    pub(in crate::ui::app) fn ask_pack(&mut self, sources: &[PathBuf], dest: &str, tx: relm4::Sender<Msg>) {
+        use comarchy::pack::{self, Format, Options};
+        self.close_dialog();
+        let win = gtk::Window::new();
+        win.set_title(Some("Pack"));
+        win.set_modal(true);
+        win.set_transient_for(Some(&self.shell.window));
+        win.set_default_width(480);
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        column.set_margin_all(12);
+        let heading = |text: &str| {
+            let label = gtk::Label::new(Some(text));
+            label.set_xalign(0.0);
+            label.add_css_class("heading");
+            label
+        };
+        let entry = gtk::Entry::new();
+        entry.set_text(dest);
+        const FORMATS: [Format; 3] = [Format::Zip, Format::SevenZ, Format::Rar];
+        let format = gtk::DropDown::from_strings(&["ZIP", "7z", "RAR"]);
+        let start = pack::format_of(Path::new(dest)).and_then(|have| FORMATS.iter().position(|f| *f == have)).unwrap_or(0);
+        format.set_selected(start as u32);
+        let entry_format = entry.clone();
+        format.connect_selected_notify(move |drop| {
+            let Some(&chosen) = FORMATS.get(drop.selected() as usize) else { return };
+            let path = PathBuf::from(entry_format.text().as_str());
+            entry_format.set_text(&path.with_extension(pack::extension(chosen)).display().to_string());
+        });
+        let level_names: Vec<&str> = pack::LEVELS.iter().map(|(name, _)| *name).collect();
+        let level = gtk::DropDown::from_strings(&level_names);
+        level.set_selected(pack::DEFAULT_LEVEL as u32);
+        let options = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        options.append(&gtk::Label::new(Some("Format")));
+        options.append(&format);
+        options.append(&gtk::Label::new(Some("Compression")));
+        options.append(&level);
+        let password = gtk::PasswordEntry::new();
+        password.set_show_peek_icon(true);
+        password.set_property("placeholder-text", "Password (empty = no encryption)");
+        let repeat = gtk::PasswordEntry::new();
+        repeat.set_show_peek_icon(true);
+        repeat.set_property("placeholder-text", "Repeat password");
+        let note = gtk::Label::new(Some("ZIP uses AES-256. 7z and RAR also hide the file names."));
+        note.set_xalign(0.0);
+        note.add_css_class("dim-label");
+        let scroll = gtk::ScrolledWindow::new();
+        scroll.set_propagate_natural_height(true);
+        scroll.set_max_content_height(200);
+        let list = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        for source in sources {
+            let name = source.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+            let label = gtk::Label::new(Some(&name));
+            label.set_xalign(0.0);
+            label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+            label.set_margin_start(4);
+            list.append(&label);
+        }
+        scroll.set_child(Some(&list));
+        let error = gtk::Label::new(None);
+        error.set_xalign(0.0);
+        error.add_css_class("error");
+        error.set_visible(false);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.set_margin_top(6);
+        let ok = gtk::Button::with_label("Pack");
+        let (entry_ok, level_ok, password_ok, repeat_ok, error_ok, tx_ok) =
+            (entry.clone(), level.clone(), password.clone(), repeat.clone(), error.clone(), tx.clone());
+        let fire = Rc::new(move || {
+            let dest = entry_ok.text().trim().to_string();
+            let secret = password_ok.text().to_string();
+            let problem = if pack::format_of(Path::new(&dest)).is_none() {
+                Some("Use a .zip, .7z or .rar name")
+            } else if secret != repeat_ok.text().as_str() {
+                Some("Passwords do not match")
+            } else {
+                None
+            };
+            if let Some(problem) = problem {
+                error_ok.set_text(problem);
+                error_ok.set_visible(true);
+                return;
+            }
+            let level = pack::LEVELS.get(level_ok.selected() as usize).map(|(_, n)| *n).unwrap_or(5);
+            tx_ok.emit(Msg::PackPick(dest, Options { level, password: (!secret.is_empty()).then_some(secret) }));
+        });
+        let fire_ok = Rc::clone(&fire);
+        ok.connect_clicked(move |_| fire_ok());
+        let fire_entry = Rc::clone(&fire);
+        entry.connect_activate(move |_| fire_entry());
+        let fire_password = Rc::clone(&fire);
+        password.connect_activate(move |_| fire_password());
+        let fire_repeat = Rc::clone(&fire);
+        repeat.connect_activate(move |_| fire_repeat());
+        let cancel = gtk::Button::with_label("Cancel");
+        cancel.connect_clicked(move |_| tx.emit(Msg::CancelAsk));
+        row.append(&ok);
+        row.append(&cancel);
+        column.append(&heading("Target location"));
+        column.append(&entry);
+        column.append(&options);
+        column.append(&heading("Encryption"));
+        column.append(&password);
+        column.append(&repeat);
+        column.append(&note);
+        column.append(&heading(&format!("Contents ({})", sources.len())));
+        column.append(&scroll);
+        column.append(&error);
+        column.append(&row);
+        win.set_child(Some(&column));
+        win.set_default_widget(Some(&ok));
+        win.present();
+        ok.grab_focus();
+        self.dialog = Some(win);
     }
 
     pub(in crate::ui::app) fn pack_suggestion(&self) -> String {
@@ -454,21 +574,21 @@ impl App {
         self.state.tab(self.state.active.other()).path.join(format!("{stem}.zip")).display().to_string()
     }
 
-    pub(in crate::ui::app) fn confirm_pack(&mut self, dest: PathBuf, sender: &ComponentSender<Self>) {
+    pub(in crate::ui::app) fn confirm_pack(&mut self, dest: PathBuf, opts: comarchy::pack::Options, sender: &ComponentSender<Self>) {
         if comarchy::pack::format_of(&dest).is_none() {
             self.status = "Use a .zip, .7z or .rar name".into();
             return;
         }
         if dest.exists() {
-            self.queued = Some(Queued::Pack(dest));
+            self.queued = Some(Queued::Pack(dest, opts));
             self.ask = Some(Ask::Overwrite);
             self.ask_confirm("Overwrite archive?", sender.input_sender().clone());
             return;
         }
-        self.spawn_pack(dest, sender);
+        self.spawn_pack(dest, opts, sender);
     }
 
-    pub(in crate::ui::app) fn spawn_pack(&mut self, dest: PathBuf, sender: &ComponentSender<Self>) {
+    pub(in crate::ui::app) fn spawn_pack(&mut self, dest: PathBuf, opts: comarchy::pack::Options, sender: &ComponentSender<Self>) {
         let Some(format) = comarchy::pack::format_of(&dest) else {
             self.status = "Use a .zip, .7z or .rar name".into();
             return;
@@ -494,9 +614,12 @@ impl App {
         let sources = self.state.selected_paths(self.state.active);
         let cwd = self.state.tab(self.state.active).path.clone();
         let Some(pipes) = self.open_job(Work::Pack) else { return };
+        self.status = "Packing".into();
+        comarchy::log::info(&format!("pack {}", dest.display()));
+        self.ensure_progress();
         let _ = sender;
         std::thread::spawn(move || {
-            let result = comarchy::pack::pack(format, bin.as_deref(), &sources, &cwd, &dest, &pipes.cancel, &mut |progress| {
+            let result = comarchy::pack::pack(format, bin.as_deref(), &sources, &cwd, &dest, &opts, &pipes.cancel, &mut |progress| {
                 let _ = pipes.progress_tx.send(progress.clone());
             });
             let _ = pipes.done_tx.send(result.map_err(|err| err.to_string()));
@@ -558,7 +681,7 @@ impl App {
 
     pub(in crate::ui::app) fn confirm_overwrite(&mut self, sender: &ComponentSender<Self>) {
         match self.queued.take() {
-            Some(Queued::Pack(dest)) => self.spawn_pack(dest, sender),
+            Some(Queued::Pack(dest, opts)) => self.spawn_pack(dest, opts, sender),
             Some(Queued::Sfv(dest)) => self.spawn_sfv_create(dest, sender),
             None => {}
         }
@@ -610,6 +733,7 @@ impl App {
         self.shell.unpack_list.set_visible(archive);
         self.shell.unpack_here.set_visible(archive);
         self.shell.verify_sfv.set_visible(sfv);
+        self.shell.pack.set_visible(!self.state.tab(self.state.active).marked.is_empty());
     }
 
     pub(in crate::ui::app) fn ask_text(&mut self, title: &str, initial: &str, tx: relm4::Sender<Msg>) {

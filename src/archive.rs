@@ -128,23 +128,24 @@ fn extension(path: &Path) -> Option<&str> {
 fn list_zip(path: &Path, password: Option<&str>) -> Result<Listed, Fail> {
     let mut archive = zip::ZipArchive::new(File::open(path)?)?;
     let mut listed = Listed { members: Vec::new(), needs_password: false };
+    let mut verified = false;
     for index in 0..archive.len() {
-        let file = match zip_at(&mut archive, index, password) {
-            Ok(file) => file,
-            Err(Fail::NeedPassword) => {
-                listed.needs_password = true;
-                continue;
-            }
-            Err(err) => return Err(err),
-        };
-        if file.encrypted() && password.is_none() {
+        // Raw access reads metadata only; decrypting AES costs a key derivation per entry.
+        let file = archive.by_index_raw(index)?;
+        let encrypted = file.encrypted();
+        let member = zip_name(&file)
+            .filter(|_| !file.is_symlink())
+            .map(|name| Member { name, size: file.size(), dir: file.is_dir() });
+        drop(file);
+        if encrypted && password.is_none() {
             listed.needs_password = true;
-        }
-        if file.is_symlink() {
             continue;
         }
-        let Some(name) = zip_name(&file) else { continue };
-        listed.members.push(Member { name, size: file.size(), dir: file.is_dir() });
+        if encrypted && !verified {
+            zip_at(&mut archive, index, password)?;
+            verified = true;
+        }
+        listed.members.extend(member);
     }
     Ok(listed)
 }
@@ -161,7 +162,7 @@ fn extract_zip(
     let mut archive = zip::ZipArchive::new(File::open(path)?)?;
     let mut plan = Vec::new();
     for index in 0..archive.len() {
-        let file = zip_at(&mut archive, index, password)?;
+        let file = archive.by_index_raw(index)?;
         if file.encrypted() && password.is_none() {
             return Err(Fail::NeedPassword);
         }
@@ -774,16 +775,25 @@ fn write_reader(
         .mode(0o644)
         .custom_flags(libc::O_NOFOLLOW)
         .open(dest)?;
-    let mut buf = vec![0u8; 1024 * 1024];
+    // Sized to the member so small files don't each zero a 1 MiB buffer.
+    let mut buf = vec![0u8; declared.saturating_add(1).min(1024 * 1024) as usize];
     let mut got = 0u64;
     loop {
         if cancel.load(Ordering::Relaxed) {
             return Err(Fail::Cancelled);
         }
-        let n = input.read(&mut buf).map_err(|err| match err.kind() {
-            io::ErrorKind::InvalidData => Fail::Damaged(err.to_string()),
-            _ => err.into(),
-        })?;
+        // Decoders hand out a few KiB per read; fill the buffer so writes and progress updates stay large.
+        let mut n = 0;
+        while n < buf.len() {
+            let count = input.read(&mut buf[n..]).map_err(|err| match err.kind() {
+                io::ErrorKind::InvalidData => Fail::Damaged(err.to_string()),
+                _ => err.into(),
+            })?;
+            if count == 0 {
+                break;
+            }
+            n += count;
+        }
         if n == 0 {
             break;
         }
@@ -795,7 +805,6 @@ fn write_reader(
         *written += n as u64;
         progress(&Progress { done: *written, total, current: current.to_path_buf(), note: String::new() });
     }
-    output.sync_all()?;
     Ok(())
 }
 

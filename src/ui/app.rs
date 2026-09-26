@@ -38,7 +38,6 @@ enum Ask {
     CreateFile,
     Trash,
     Permanent,
-    Pack,
     Password,
     Overwrite,
 }
@@ -68,7 +67,7 @@ struct PendingUnpack {
 }
 
 enum Queued {
-    Pack(PathBuf),
+    Pack(PathBuf, comarchy::pack::Options),
     Sfv(PathBuf),
 }
 
@@ -397,6 +396,10 @@ impl App {
             Msg::CloseSettings => self.close_settings(),
             Msg::ArchiveListed(result) => self.on_archive_listed(result, sender),
             Msg::UnpackPick(dest, names) => self.on_unpack_pick(dest, names, sender),
+            Msg::PackPick(dest, opts) => {
+                self.close_dialog();
+                self.confirm_pack(PathBuf::from(dest), opts, sender);
+            }
             Msg::UnpackList => self.begin_unpack(true, sender),
             Msg::UnpackHere => self.begin_unpack(false, sender),
             Msg::VerifySfv => self.start_verify(sender),
@@ -695,7 +698,6 @@ impl App {
             }
             Some(Ask::Trash) => self.spawn_delete(false, sender),
             Some(Ask::Permanent) => self.spawn_delete(true, sender),
-            Some(Ask::Pack) => self.confirm_pack(PathBuf::from(text.trim()), sender),
             Some(Ask::Password) => self.retry_password(text, sender),
             Some(Ask::Overwrite) => self.confirm_overwrite(sender),
             None => {}
@@ -1211,6 +1213,21 @@ impl App {
         self.reload_pane(PaneId::Left);
         self.state.tab_mut(PaneId::Left).marked.insert(left.join("note.txt"));
         self.state.tab_mut(PaneId::Left).marked.insert(left.join("sub"));
+        self.sync();
+        if !self.shell.pack.is_visible() {
+            errors.push("pack hint".into());
+        }
+        self.start_pack(sender);
+        if self.dialog.is_none() {
+            errors.push("pack dialog".into());
+        }
+        self.close_dialog();
+        let packed = right.join("smoke.zip");
+        self.confirm_pack(packed.clone(), comarchy::pack::Options { level: 9, password: Some("smoke".into()) }, sender);
+        if !self.wait_job(sender) || !comarchy::archive::list(&packed, None).is_ok_and(|listed| listed.needs_password) {
+            errors.push("pack failed".into());
+        }
+        let _ = std::fs::remove_file(&packed);
         self.on_fkey(5, false, sender);
         self.on_submit(&right.display().to_string(), sender);
         if !self.wait_job(sender) || !right.join("note.txt").is_file() || !right.join("sub/b.txt").is_file() {
@@ -1219,6 +1236,10 @@ impl App {
         self.reload_pane(PaneId::Left);
         self.reload_pane(PaneId::Right);
         self.state.tab_mut(PaneId::Left).marked.clear();
+        self.sync();
+        if self.shell.pack.is_visible() {
+            errors.push("pack hint stays".into());
+        }
         if !self.point_at(PaneId::Left, "move-me.txt") {
             errors.push("missing move-me".into());
         }

@@ -63,6 +63,7 @@ pub enum Msg {
     CloseSettings,
     ArchiveListed(Result<comarchy::archive::Listed, String>),
     UnpackPick(String, Vec<String>),
+    PackPick(String, comarchy::pack::Options),
     UnpackList,
     UnpackHere,
     VerifySfv,

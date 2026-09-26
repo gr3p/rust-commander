@@ -40,6 +40,7 @@ pub struct Shell {
     pub unpack_list: gtk::Button,
     pub unpack_here: gtk::Button,
     pub verify_sfv: gtk::Button,
+    pub pack: gtk::Button,
     pub active: Rc<Cell<usize>>,
     pub drives: Vec<(PathBuf, gtk::Button)>,
     pub edit_button: gtk::Button,
@@ -78,6 +79,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
     let status = gtk::Label::new(Some(""));
     status.set_xalign(0.0);
     status.add_css_class("status");
+    status.set_margin_top(4);
     status.set_margin_start(8);
     root.append(&status);
 
@@ -113,6 +115,8 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
     let unpack_list = hint_button("Alt+F9 Unpack to right panel", || super::msg::Msg::UnpackList, sender);
     let unpack_here = hint_button("Ctrl+Alt+F10 Extract here", || super::msg::Msg::UnpackHere, sender);
     let verify_sfv = hint_button("Enter Verify", || super::msg::Msg::VerifySfv, sender);
+    let pack = hint_button("Alt+F5 Pack", || super::msg::Msg::Key(gtk::gdk::Key::F5, gtk::gdk::ModifierType::ALT_MASK), sender);
+    context_row.append(&pack);
     context_row.append(&unpack_list);
     context_row.append(&unpack_here);
     context_row.append(&verify_sfv);
@@ -201,6 +205,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
         unpack_list,
         unpack_here,
         verify_sfv,
+        pack,
         active,
         drives,
         edit_button,
