@@ -33,7 +33,7 @@ Speciallägen byter knapparna längst ner i huvudfönstret till kommandon för d
 
 Alt+F5 packar markerade filer. Ändelsen väljer format: `.zip` byggs in, `.7z` använder 7-Zip (`7z` eller `7zz`, till exempel `/usr/bin/7z`) och `.rar` använder RARLAB `rar` (till exempel `/usr/bin/rar`). `unrar` packar inte. Sökvägarna sätts i F12. Tomt fält söker i PATH.
 
-Alt+F9 packar upp ett zip eller rar till den andra panelen och visar fillistan. Ctrl+Alt+F10 packar upp hela arkivet i panelen där arkivet ligger. När markören står på ett zip- eller rar-arkiv visar knappraden längst ner `Alt+F9 Unpack to right panel` (eller left, beroende på aktiv panel) och `Ctrl+Alt+F10 Extract here`. Enter på en `.sfv` kontrollerar CRC32. Shift+F9 skapar en `.sfv` för det som är markerat.
+Alt+F9 packar upp ett zip eller rar till den andra panelen och visar fillistan. Ctrl+Alt+F10 packar upp hela arkivet i panelen där arkivet ligger. När markören står på ett zip- eller rar-arkiv visar den övre knappraden längst ner `Alt+F9 Unpack to right panel` (eller left, beroende på aktiv panel) och `Ctrl+Alt+F10 Extract here`. F-tangenterna ligger på raden under. Progressfönstret visar vilken rar-volym som läses (`From:`), målmappen (`To:`) och vilken fil som packas upp. Trasiga filer hoppas över och listas när uppackningen är klar. Saknas en volym står det vilken. Enter på en `.sfv` kontrollerar CRC32. Shift+F9 skapar en `.sfv` för det som är markerat.
 
 Ctrl+1 till Ctrl+9 väljer disk i den aktiva panelen. Siffran står före ikonen. Ctrl+F3 namn, Ctrl+F4 ändelse, Ctrl+F5 tid, Ctrl+F6 storlek. Alt+F1 och Alt+F2 är platser. Alt+F3 är extern visare. Ctrl+Q förhandsvisar. Där byter vänster och höger bild i den mappen. Ctrl+T ny flik, Ctrl+W stäng flik, Alt+vänster och Alt+höger är historik.
 

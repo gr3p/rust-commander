@@ -31,6 +31,7 @@ pub enum Fail {
     NeedPassword,
     BadPassword,
     Cancelled,
+    Damaged(String),
     Message(String),
 }
 
@@ -40,6 +41,7 @@ impl std::fmt::Display for Fail {
             Fail::NeedPassword => write!(f, "Password required"),
             Fail::BadPassword => write!(f, "Wrong password"),
             Fail::Cancelled => write!(f, "Cancelled"),
+            Fail::Damaged(why) => write!(f, "Damaged data: {why}"),
             Fail::Message(text) => write!(f, "{text}"),
         }
     }
@@ -57,6 +59,7 @@ impl From<zip::result::ZipError> for Fail {
             zip::result::ZipError::InvalidPassword => Fail::BadPassword,
             zip::result::ZipError::UnsupportedArchive(zip::result::ZipError::PASSWORD_REQUIRED) => Fail::NeedPassword,
             zip::result::ZipError::Io(err) => Fail::Message(err.to_string()),
+            other @ zip::result::ZipError::InvalidArchive(_) => Fail::Message(format!("Archive is damaged or incomplete ({other})")),
             other => Fail::Message(other.to_string()),
         }
     }
@@ -177,6 +180,7 @@ fn extract_zip(
     let mut file_index = 0u64;
     let mut written = 0u64;
     let mut files = 0u64;
+    let mut damaged = Vec::new();
     let mut policy = Policy::Ask;
     for (index, name, dir, size) in plan {
         if cancel.load(Ordering::Relaxed) {
@@ -194,8 +198,9 @@ fn extract_zip(
             Keep::Write => {}
         }
         let mut file = zip_at(&mut archive, index, password)?;
+        let encrypted = file.encrypted();
         file_index += 1;
-        let note = unpack_note(path, file_index, file_total, &name);
+        let note = format!("{}\n{}", volume_label(path), file_line(file_index, file_total, &name));
         let mut step = |update: &Progress| {
             let mut update = update.clone();
             update.note = note.clone();
@@ -207,13 +212,21 @@ fn extract_zip(
                 let _ = fs::remove_file(&target);
                 return Ok(Report { cancelled: true, files });
             }
+            Err(Fail::Damaged(why)) => {
+                let _ = fs::remove_file(&target);
+                // ZipCrypto lets 1 in 256 wrong passwords through to the CRC check.
+                if encrypted {
+                    return Err(Fail::BadPassword);
+                }
+                damaged.push(format!("{name}  ({why})"));
+            }
             Err(err) => {
                 let _ = fs::remove_file(&target);
                 return Err(err);
             }
         }
     }
-    Ok(Report { cancelled: false, files })
+    finish(files, damaged)
 }
 
 fn zip_at<'a, R: Read + io::Seek>(
@@ -234,10 +247,10 @@ fn zip_name(file: &zip::read::ZipFile<'_, impl Read>) -> Option<String> {
 
 fn list_rar(path: &Path, password: Option<&str>) -> Result<Listed, Fail> {
     let owned = rar_path(path);
-    let opened = open_rar(&owned, password).open_for_listing()?;
+    let opened = open_rar(&owned, password).open_for_listing().map_err(|err| in_volume(err.into(), &volume_label(&owned)))?;
     let mut listed = Listed { members: Vec::new(), needs_password: false };
     for item in opened {
-        let header = item?;
+        let header = item.map_err(|err| in_volume(err.into(), &volume_label(&owned)))?;
         if header.is_encrypted() {
             listed.needs_password = true;
         }
@@ -260,10 +273,38 @@ fn push_rar(listed: &mut Listed, header: &unrar_ng::FileHeader, dir: bool) {
     listed.members.push(Member { name, size: header.unpacked_size, dir });
 }
 
-fn unpack_note(archive: &Path, index: u64, total_files: u64, name: &str) -> String {
-    let label = archive.file_name().and_then(|name| name.to_str()).unwrap_or("archive");
-    let left = total_files.saturating_sub(index).saturating_add(1);
-    format!("{label}   {index}/{total_files}   {left} left   {name}")
+fn volume_label(path: &Path) -> String {
+    path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| "archive".into())
+}
+
+fn in_volume(fail: Fail, volume: &str) -> Fail {
+    match fail {
+        Fail::Message(text) => Fail::Message(format!("{text} in {volume}")),
+        other => other,
+    }
+}
+
+fn file_line(index: u64, total_files: u64, name: &str) -> String {
+    if total_files > 1 {
+        format!("File {index} of {total_files}   {name}")
+    } else {
+        name.to_string()
+    }
+}
+
+fn finish(files: u64, damaged: Vec<String>) -> Result<Report, Fail> {
+    if damaged.is_empty() {
+        return Ok(Report { cancelled: false, files });
+    }
+    let mut text = format!("Archive is damaged: {} failed, {files} unpacked OK", damaged.len());
+    for line in damaged.iter().take(20) {
+        text.push_str("\n  ");
+        text.push_str(line);
+    }
+    if damaged.len() > 20 {
+        text.push_str(&format!("\n  ... {} more", damaged.len() - 20));
+    }
+    Err(Fail::Message(text))
 }
 
 // Shared through the unrar callback's user data, so every field uses interior mutability.
@@ -276,21 +317,29 @@ struct RarJob<'a> {
     seen: Cell<u64>,
     sent: Cell<u64>,
     too_big: Cell<bool>,
-    note: RefCell<String>,
+    volume: RefCell<String>,
+    missing: RefCell<Option<String>>,
+    line: RefCell<String>,
 }
 
 impl RarJob<'_> {
-    fn start(&self, base: u64, limit: u64, note: String) {
+    fn start(&self, base: u64, limit: u64, line: String) {
         self.base.set(base);
         self.limit.set(limit);
         self.seen.set(0);
         self.sent.set(0);
-        *self.note.borrow_mut() = note;
+        *self.line.borrow_mut() = line;
     }
 
     fn report(&self, done: u64, current: PathBuf) {
-        let note = self.note.borrow().clone();
+        let note = format!("{}\n{}", self.volume.borrow(), self.line.borrow());
         (self.progress.borrow_mut())(&Progress { done, total: self.total, current, note });
+    }
+
+    fn change_volume(&self, name: String) -> c_int {
+        *self.volume.borrow_mut() = name;
+        self.report(self.base.get().saturating_add(self.seen.get()), PathBuf::new());
+        if self.cancel.load(Ordering::Relaxed) { -1 } else { 0 }
     }
 
     fn data(&self, count: u64) -> c_int {
@@ -315,7 +364,7 @@ impl RarJob<'_> {
 extern "C" fn on_rar_event(
     msg: unrar_ng_sys::UINT,
     user: unrar_ng_sys::LPARAM,
-    _p1: unrar_ng_sys::LPARAM,
+    p1: unrar_ng_sys::LPARAM,
     p2: unrar_ng_sys::LPARAM,
 ) -> c_int {
     if user == 0 {
@@ -324,7 +373,15 @@ extern "C" fn on_rar_event(
     let job = unsafe { &*(user as *const RarJob<'_>) };
     match msg {
         unrar_ng_sys::UCM_PROCESSDATA => job.data(p2.max(0) as u64),
-        unrar_ng_sys::UCM_CHANGEVOLUMEW if p2 == unrar_ng_sys::RAR_VOL_ASK => -1,
+        unrar_ng_sys::UCM_CHANGEVOLUMEW => {
+            let name = volume_label(Path::new(&unsafe { wide_ptr(p1 as *const libc::wchar_t) }));
+            if p2 == unrar_ng_sys::RAR_VOL_ASK {
+                *job.missing.borrow_mut() = Some(name);
+                -1
+            } else {
+                job.change_volume(name)
+            }
+        }
         // The password, if any, is set before reading headers.
         unrar_ng_sys::UCM_NEEDPASSWORD | unrar_ng_sys::UCM_NEEDPASSWORDW => -1,
         _ => 0,
@@ -366,6 +423,19 @@ fn open_rar_extract(path: &Path, password: Option<&str>) -> Result<RarHandle, Fa
     Ok(handle)
 }
 
+fn wide_text(chars: &[libc::wchar_t]) -> String {
+    chars.iter().take_while(|&&c| c != 0).map(|&c| char::from_u32(c as u32).unwrap_or('?')).collect()
+}
+
+// unrar passes volume names as NUL-terminated wide strings of at most 2048 chars.
+unsafe fn wide_ptr(ptr: *const libc::wchar_t) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    let len = (0..2048).take_while(|&i| unsafe { *ptr.add(i) } != 0).count();
+    wide_text(unsafe { std::slice::from_raw_parts(ptr, len) })
+}
+
 fn rar_header_name(header: &unrar_ng_sys::HeaderDataEx) -> Option<String> {
     let wide = header.filename_w;
     let name: Option<String> = wide.iter().take_while(|&&c| c != 0).map(|&c| char::from_u32(c as u32)).collect();
@@ -401,18 +471,27 @@ fn extract_rar(
         seen: Cell::new(0),
         sent: Cell::new(0),
         too_big: Cell::new(false),
-        note: RefCell::new(String::new()),
+        volume: RefCell::new(volume_label(&owned)),
+        missing: RefCell::new(None),
+        line: RefCell::new(String::new()),
     };
     // Declared after `job` so the archive closes before the callback context goes away.
     let handle = open_rar_extract(&owned, password)?;
     unsafe { unrar_ng_sys::RARSetCallback(handle.0, Some(on_rar_event), &raw const job as unrar_ng_sys::LPARAM) };
+    let fail = |code: c_int, when: unrar_ng::error::When| -> Fail {
+        if let Some(volume) = job.missing.borrow_mut().take() {
+            return Fail::Message(format!("Missing volume {volume}\nPut all parts of the archive in the same folder."));
+        }
+        in_volume(rar_fail(code, when), &job.volume.borrow())
+    };
     let skip = |handle: &RarHandle| -> Result<(), Fail> {
         let code = unsafe { unrar_ng_sys::RARProcessFile(handle.0, unrar_ng_sys::RAR_SKIP, ptr::null(), ptr::null()) };
-        if code == unrar_ng_sys::ERAR_SUCCESS { Ok(()) } else { Err(rar_fail(code, unrar_ng::error::When::Process)) }
+        if code == unrar_ng_sys::ERAR_SUCCESS { Ok(()) } else { Err(fail(code, unrar_ng::error::When::Process)) }
     };
     let mut header = Box::new(unrar_ng_sys::HeaderDataEx::default());
     let mut written = 0u64;
     let mut files = 0u64;
+    let mut damaged = Vec::new();
     let mut policy = Policy::Ask;
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -422,8 +501,14 @@ fn extract_rar(
             unrar_ng_sys::ERAR_SUCCESS => {}
             unrar_ng_sys::ERAR_END_ARCHIVE => break,
             _ if cancel.load(Ordering::Relaxed) => return Ok(Report { cancelled: true, files }),
-            code => return Err(rar_fail(code, unrar_ng::error::When::Read)),
+            unrar_ng_sys::ERAR_BAD_DATA if job.missing.borrow().is_none() => {
+                damaged.push(format!("file header  (damaged in {})", job.volume.borrow()));
+                break;
+            }
+            code => return Err(fail(code, unrar_ng::error::When::Read)),
         }
+        let arc_name = header.archive_name_w;
+        *job.volume.borrow_mut() = volume_label(Path::new(&wide_text(&arc_name)));
         let flags = header.flags;
         let dir = flags & unrar_ng_sys::RHDF_DIRECTORY != 0;
         let size = ((header.unp_size_high as u64) << 32) | header.unp_size as u64;
@@ -453,8 +538,7 @@ fn extract_rar(
             ensure_dir(parent)?;
         }
         file_index += 1;
-        let note = unpack_note(path, file_index, file_total, &name);
-        job.start(written, size, note);
+        job.start(written, size, file_line(file_index, file_total, &name));
         job.report(written, rel.clone());
         let dest_name = c_path(&target)?;
         let code = unsafe { unrar_ng_sys::RARProcessFile(handle.0, unrar_ng_sys::RAR_EXTRACT, ptr::null(), dest_name.as_ptr()) };
@@ -470,7 +554,11 @@ fn extract_rar(
             if code == unrar_ng_sys::ERAR_BAD_DATA && password.is_some() && flags & unrar_ng_sys::RHDF_ENCRYPTED != 0 {
                 return Err(Fail::BadPassword);
             }
-            return Err(rar_fail(code, unrar_ng::error::When::Process));
+            if code == unrar_ng_sys::ERAR_BAD_DATA && job.missing.borrow().is_none() {
+                damaged.push(format!("{name}  (CRC error in {})", job.volume.borrow()));
+                continue;
+            }
+            return Err(fail(code, unrar_ng::error::When::Process));
         }
         if fs::symlink_metadata(&target).is_ok_and(|meta| meta.file_type().is_symlink()) {
             let _ = fs::remove_file(&target);
@@ -486,7 +574,7 @@ fn extract_rar(
         files += 1;
         job.report(written, rel);
     }
-    Ok(Report { cancelled: false, files })
+    finish(files, damaged)
 }
 
 fn open_rar<'a>(path: &'a Path, password: Option<&'a str>) -> unrar_ng::Archive<'a> {
@@ -692,7 +780,10 @@ fn write_reader(
         if cancel.load(Ordering::Relaxed) {
             return Err(Fail::Cancelled);
         }
-        let n = input.read(&mut buf)?;
+        let n = input.read(&mut buf).map_err(|err| match err.kind() {
+            io::ErrorKind::InvalidData => Fail::Damaged(err.to_string()),
+            _ => err.into(),
+        })?;
         if n == 0 {
             break;
         }
@@ -773,8 +864,54 @@ mod tests {
         let dest = dir.join("out");
         fs::create_dir(&dest).unwrap();
         let cancel = AtomicBool::new(false);
-        extract(&archive, &dest, None, None, &cancel, &mut |_| {}, &mut no_conflict).unwrap();
+        let mut notes = Vec::new();
+        extract(&archive, &dest, None, None, &cancel, &mut |p| notes.push(p.note.clone()), &mut no_conflict).unwrap();
         assert_eq!(fs::read(dest.join("VERSION")).unwrap(), b"unrar-0.4.0");
+        assert!(notes.iter().any(|note| note == "version.rar\nVERSION"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn damaged_rar_names_file_and_volume() {
+        let dir = tmp("rar-bad");
+        let mut bytes = fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/version.rar")).unwrap();
+        // Inside the packed data of VERSION, past its header.
+        bytes[0x48] ^= 0xff;
+        let archive = dir.join("broken.rar");
+        fs::write(&archive, bytes).unwrap();
+        let dest = dir.join("out");
+        fs::create_dir(&dest).unwrap();
+        let cancel = AtomicBool::new(false);
+        let err = extract(&archive, &dest, None, None, &cancel, &mut |_| {}, &mut no_conflict).unwrap_err().to_string();
+        assert!(err.starts_with("Archive is damaged: 1 failed, 0 unpacked OK"), "{err}");
+        assert!(err.contains("VERSION  (CRC error in broken.rar)"), "{err}");
+        assert!(!dest.join("VERSION").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn damaged_zip_member_is_reported_and_others_kept() {
+        let dir = tmp("zip-bad");
+        let archive = dir.join("bad.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive).unwrap());
+        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, body) in [("a.txt", "first payload"), ("b.txt", "second payload")] {
+            zip.start_file(name, opts).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        let mut bytes = fs::read(&archive).unwrap();
+        let at = bytes.windows(13).position(|w| w == b"first payload").unwrap();
+        bytes[at] ^= 0x20;
+        fs::write(&archive, bytes).unwrap();
+        let dest = dir.join("out");
+        fs::create_dir(&dest).unwrap();
+        let cancel = AtomicBool::new(false);
+        let err = extract(&archive, &dest, None, None, &cancel, &mut |_| {}, &mut no_conflict).unwrap_err().to_string();
+        assert!(err.starts_with("Archive is damaged: 1 failed, 1 unpacked OK"), "{err}");
+        assert!(err.contains("a.txt"), "{err}");
+        assert!(!dest.join("a.txt").exists());
+        assert_eq!(fs::read_to_string(dest.join("b.txt")).unwrap(), "second payload");
         let _ = fs::remove_dir_all(&dir);
     }
 

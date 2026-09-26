@@ -81,9 +81,13 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
     status.set_margin_start(8);
     root.append(&status);
 
-    let fbar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let fbar = gtk::Box::new(gtk::Orientation::Vertical, 4);
     fbar.add_css_class("fbar");
     fbar.set_margin_all(4);
+    let context_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let fkey_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    fbar.append(&context_row);
+    fbar.append(&fkey_row);
     let mut f_labels = Vec::new();
     for (n, label) in [
         (3, "F3 View"),
@@ -104,14 +108,14 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
         f_labels.push(label.to_string());
         let tx = sender.clone();
         button.connect_clicked(move |_| tx.emit(super::msg::Msg::FKey(n, false)));
-        fbar.append(&button);
+        fkey_row.append(&button);
     }
     let unpack_list = hint_button("Alt+F9 Unpack to right panel", || super::msg::Msg::UnpackList, sender);
     let unpack_here = hint_button("Ctrl+Alt+F10 Extract here", || super::msg::Msg::UnpackHere, sender);
     let verify_sfv = hint_button("Enter Verify", || super::msg::Msg::VerifySfv, sender);
-    fbar.append(&unpack_list);
-    fbar.append(&unpack_here);
-    fbar.append(&verify_sfv);
+    context_row.append(&unpack_list);
+    context_row.append(&unpack_here);
+    context_row.append(&verify_sfv);
     let filter_button = bar_button("Ctrl+S Filter", || super::msg::Msg::Key(gtk::gdk::Key::s, gtk::gdk::ModifierType::CONTROL_MASK), sender);
     let search_button = bar_button(
         "Ctrl+Shift+S Search",
@@ -120,8 +124,8 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
     );
     filter_button.set_visible(true);
     search_button.set_visible(true);
-    fbar.append(&filter_button);
-    fbar.append(&search_button);
+    context_row.append(&filter_button);
+    context_row.append(&search_button);
     let image_bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     image_bar.add_css_class("fbar");
     image_bar.set_margin_all(4);
@@ -141,6 +145,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
     text_modes.bar.append(&save_button);
     let editing = Rc::new(Cell::new(false));
     let mode_bar = gtk::Stack::new();
+    mode_bar.set_vhomogeneous(false);
     mode_bar.add_named(&fbar, Some("files"));
     mode_bar.add_named(&image_bar, Some("image"));
     mode_bar.add_named(&text_modes.bar, Some("text"));

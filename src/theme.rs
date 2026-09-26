@@ -263,6 +263,11 @@ textview, textview text {{
   background: {bg};
   color: {fg};
 }}
+progressbar.job text {{
+  font-size: 2.2em;
+  font-weight: bold;
+  color: {bright};
+}}
 button.drive {{
   background: transparent;
   border: 1px solid transparent;

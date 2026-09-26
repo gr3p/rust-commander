@@ -85,6 +85,7 @@ impl App {
             let mut line = None;
             let mut show = false;
             let mut fraction: Option<Option<f64>> = None;
+            let mut amount = None;
             while let Ok(progress) = job.progress_rx.try_recv() {
                 line = Some(if progress.note.is_empty() {
                     format!("{}/{}  {}", progress.done, progress.total, progress.current.display())
@@ -96,6 +97,14 @@ impl App {
                 } else {
                     Some(progress.done as f64 / progress.total as f64)
                 });
+                if matches!(job.work, Work::Unpack) && progress.total > 0 {
+                    amount = Some(format!(
+                        "{:.0}%   {} / {}",
+                        (progress.done as f64 / progress.total as f64 * 100.0).min(100.0),
+                        comarchy::listing::format_size(progress.done),
+                        comarchy::listing::format_size(progress.total)
+                    ));
+                }
                 show = job.started.elapsed() > Duration::from_millis(200);
             }
             let conflict = if job.conflict_open { None } else { job.conflict_rx.try_recv().ok() };
@@ -103,11 +112,11 @@ impl App {
                 job.conflict_open = true;
             }
             let done = job.done_rx.try_recv().ok();
-            (line, show, fraction, conflict, done)
+            (line, show, fraction, amount, conflict, done)
         };
-        let (line, show, fraction, conflict, done) = polled;
-        if let Some(line) = line {
-            self.status = line;
+        let (line, show, fraction, amount, conflict, done) = polled;
+        if let Some(line) = &line {
+            self.status = line.replace('\n', "   ");
         }
         if let Some(next) = fraction {
             self.meter = next;
@@ -115,13 +124,17 @@ impl App {
         if show {
             self.ensure_progress();
         }
-        if self.progress.is_some() {
-            if let Some((_, label, bar)) = &self.progress {
-                label.set_text(&self.status);
-                match self.meter {
-                    Some(value) => bar.set_fraction(value.clamp(0.0, 1.0)),
-                    None => bar.pulse(),
-                }
+        if let Some((_, label, bar)) = &self.progress {
+            if let Some(line) = &line {
+                label.set_text(line);
+            }
+            if let Some(amount) = &amount {
+                bar.set_text(Some(amount));
+                bar.set_show_text(true);
+            }
+            match self.meter {
+                Some(value) => bar.set_fraction(value.clamp(0.0, 1.0)),
+                None => bar.pulse(),
             }
         }
         if let Some((src, dst)) = conflict {
@@ -151,6 +164,7 @@ impl App {
             self.pending = None;
             if !matches!(work, Work::Transfer) {
                 let title = match work {
+                    Work::Unpack if err.starts_with("Archive is damaged") => "Damaged archive",
                     Work::Unpack => "Unpack failed",
                     Work::Pack => "Pack failed",
                     Work::Sfv | Work::Verify => "SFV failed",
@@ -314,7 +328,11 @@ impl App {
                 password.as_deref(),
                 &pipes.cancel,
                 &mut |progress| {
-                    let _ = pipes.progress_tx.send(progress.clone());
+                    let mut progress = progress.clone();
+                    if let Some((volume, file)) = progress.note.split_once('\n') {
+                        progress.note = format!("From: {volume}\nTo:   {}\n{file}", dest.display());
+                    }
+                    let _ = pipes.progress_tx.send(progress);
                 },
                 &mut |src, dst| {
                     if pipes.conflict_tx.send((src.to_path_buf(), dst.to_path_buf())).is_err() {
@@ -687,12 +705,17 @@ impl App {
         win.set_title(Some("Working"));
         win.set_modal(true);
         win.set_transient_for(Some(&self.shell.window));
-        win.set_default_width(420);
+        win.set_default_width(520);
         let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
         column.set_margin_all(12);
         let label = gtk::Label::new(Some(if self.status.is_empty() { "Working" } else { &self.status }));
         label.set_wrap(true);
+        label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        label.set_xalign(0.0);
+        label.set_lines(4);
+        label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
         let bar = gtk::ProgressBar::new();
+        bar.add_css_class("job");
         bar.set_show_text(false);
         let cancel = gtk::Button::with_label("Cancel");
         if let Some(job) = &self.job {
