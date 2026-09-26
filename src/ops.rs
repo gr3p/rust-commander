@@ -26,6 +26,7 @@ pub struct Progress {
     pub done: u64,
     pub total: u64,
     pub current: PathBuf,
+    pub note: String,
 }
 
 #[derive(Clone, Debug)]
@@ -189,6 +190,7 @@ fn one(
             done: *done,
             total,
             current: src.to_path_buf(),
+            note: String::new(),
         });
         let _ = n;
     })?;
@@ -217,6 +219,7 @@ fn bump_n(
     *done += n;
     progress(&Progress {
         done: *done,
+        note: String::new(),
         total,
         current: src.to_path_buf(),
     });

@@ -20,16 +20,22 @@ Prova kopiera, flytta och radera i en skräpkatalog, till exempel `~/comarchy-pr
 3. F6 flyttar en fil tillbaka.
 4. F7 skapar en mapp. Shift+F6 byter namn på den.
 5. F8 lägger en fil i papperskorgen. Återställ den från korgen om du vill se att den inte är borta på riktigt.
-6. F3 visar en textfil. Ctrl+Q förhandsvisar den i den andra panelen.
+6. F3 visar en textfil, eller en bild i ett eget fönster. Ctrl+Q förhandsvisar i den andra panelen. Vänster och höger byter bild i den mappen.
 7. Stäng och starta igen. Fönstret kommer tillbaka.
 
 ## Tangenter
 
 Tab byter panel. Upp och ned flyttar markören. Space markerar raden under markören. Insert markerar och går till nästa rad. F2 laddar om. Ctrl+S filtrerar. Ctrl+H visar eller döljer punktfiler.
 
-F3 Lister, F4 editor, F5 kopiera, Shift+F5 kopiera med nytt namn, F6 flytta, Shift+F6 byt namn, F7 ny mapp, F8 papperskorg, Shift+F8 radera permanent.
+F3 visar text eller bild. I bildfönstret byter piltangenterna bild i mappen där fönstret öppnades. När Quick View eller bildfönstret visar en bild byts knapparna längst ner till S Fit eller S 1:1. S på en textfil är fortfarande ASCII. F4 editor, F5 kopiera, Shift+F5 kopiera med nytt namn, F6 flytta, Shift+F6 byt namn, F7 ny mapp, F8 papperskorg, Shift+F8 radera permanent.
 
-Ctrl+F3 namn, Ctrl+F4 ändelse, Ctrl+F5 tid, Ctrl+F6 storlek. Alt+F1 och Alt+F2 är platser. Alt+F3 är extern visare. Ctrl+T ny flik, Ctrl+W stäng flik, Alt+vänster och Alt+höger är historik.
+Speciallägen byter knapparna längst ner i huvudfönstret till kommandon för det läget. Raden stängs av med Mode buttons i F12.
+
+Alt+F5 packar markerade filer. Ändelsen väljer format: `.zip` byggs in, `.7z` använder 7-Zip (`7z` eller `7zz`, till exempel `/usr/bin/7z`) och `.rar` använder RARLAB `rar` (till exempel `/usr/bin/rar`). `unrar` packar inte. Sökvägarna sätts i F12. Tomt fält söker i PATH.
+
+Alt+F9 packar upp ett zip eller rar till den andra panelen och visar fillistan. Ctrl+Alt+F10 packar upp hela arkivet i panelen där arkivet ligger. Enter på en `.sfv` kontrollerar CRC32. Shift+F9 skapar en `.sfv` för det som är markerat.
+
+Ctrl+F3 namn, Ctrl+F4 ändelse, Ctrl+F5 tid, Ctrl+F6 storlek. Alt+F1 och Alt+F2 är platser. Alt+F3 är extern visare. Ctrl+Q förhandsvisar. Där byter vänster och höger bild i den mappen. Ctrl+T ny flik, Ctrl+W stäng flik, Alt+vänster och Alt+höger är historik.
 
 ## Tester
 
@@ -39,9 +45,9 @@ Ctrl+F3 namn, Ctrl+F4 ändelse, Ctrl+F5 tid, Ctrl+F6 storlek. Alt+F1 och Alt+F2 
 
 ## Checklista
 
-MVP, med grönt acceptanstest: två paneler, kopiera och flytta träd, konflikt, Lister (text, binärt, hex, fönsterläsning), Quick View, filter, sortering, historik, bokmärken och flikar.
+MVP, med grönt acceptanstest: två paneler, kopiera och flytta träd, konflikt, Lister (text, binärt, hex, fönsterläsning), Quick View, bilder i Quick View och F3, filter, sortering, historik, bokmärken och flikar.
 
-Senare, en i taget: flerval-namnbyte (Ctrl+M), sök (Alt+F7), arkiv som mappar, bilder i Lister, katalogsynk.
+Senare, en i taget: flerval-namnbyte (Ctrl+M), sök (Alt+F7), arkiv som mappar, katalogsynk.
 
 Utelämnat: Windows-byggen, nätverksgrannskap, parallellport, USB-kabel, UAC, Windows-kontextmeny, WLX/WCX/WDX/WFX och IrfanView/XnView.
 

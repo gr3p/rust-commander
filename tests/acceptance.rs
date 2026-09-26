@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use comarchy::config::{self, Bookmark, Config};
 use comarchy::entry::{Entry, DIR, HIDDEN};
 use comarchy::external;
-use comarchy::lister::{self, Charset, ViewMode};
+use comarchy::imageview;
+use comarchy::lister::{self, Charset, PreviewBody, ViewMode};
 use comarchy::listing::{self, SortKey};
 use comarchy::ops::{self, Choice, Kind};
 use comarchy::state::{AppState, PaneId};
@@ -92,6 +93,7 @@ const MEMORY: &[(&str, fn() -> Result<(), String>)] = &[
     ("visible_keeps_raw_order", visible_keeps_raw_order),
     ("hidden_files_follow_toggle", hidden_files_follow_toggle),
     ("sort_keys_order_entries", sort_keys_order_entries),
+    ("pane_sort_is_independent", pane_sort_is_independent),
     ("columns_ext_date_attr", columns_ext_date_attr),
     ("column_widths_follow_text", column_widths_follow_text),
     ("filter_keeps_substring", filter_keeps_substring),
@@ -112,6 +114,9 @@ const MEMORY: &[(&str, fn() -> Result<(), String>)] = &[
     ("ctrl_arrow_shows_active_dir_on_other_pane", ctrl_arrow_shows_active_dir_on_other_pane),
     ("terminal_argv_without_starting", terminal_argv_without_starting),
     ("quick_view_ignores_stale_generation", quick_view_ignores_stale_generation),
+    ("image_list_skips_other_files", image_list_skips_other_files),
+    ("image_step_stops_at_end", image_step_stops_at_end),
+    ("image_decode_png_and_scales", image_decode_png_and_scales),
     ("lister_ansi_and_ascii", lister_ansi_and_ascii),
     ("hotlist_accel_submenu", hotlist_accel_submenu),
 ];
@@ -211,12 +216,36 @@ fn column_widths_follow_text() -> Result<(), String> {
     let a = listing::column_pixels(listing::column_chars(&[short]), 8);
     let b = listing::column_pixels(listing::column_chars(&[long]), 8);
     if b[0] <= a[0] {
-        return Err(format!("ext {} <= {}", b[0], a[0]));
+        return Err(format!("name {} <= {}", b[0], a[0]));
     }
-    if b[2] < 16 * 8 {
-        return Err(format!("date {}", b[2]));
+    if b[1] <= a[1] {
+        return Err(format!("ext {} <= {}", b[1], a[1]));
+    }
+    if b[3] < 16 * 8 {
+        return Err(format!("date {}", b[3]));
     }
     Ok(())
+}
+
+fn pane_sort_is_independent() -> Result<(), String> {
+    let mut state = AppState::new(pb("/left"), pb("/right"));
+    let entries = vec![file("b.txt", 1), file("a.txt", 2)];
+    state.tab_mut(PaneId::Left).entries = entries.clone();
+    state.tab_mut(PaneId::Right).entries = entries;
+    state.pane_mut(PaneId::Left).sort = SortKey::Name;
+    state.pane_mut(PaneId::Right).sort = SortKey::Size;
+    let left: Vec<_> = state
+        .visible(PaneId::Left)
+        .into_iter()
+        .map(|i| state.tab(PaneId::Left).entries[i].name.to_string())
+        .collect();
+    let right: Vec<_> = state
+        .visible(PaneId::Right)
+        .into_iter()
+        .map(|i| state.tab(PaneId::Right).entries[i].name.to_string())
+        .collect();
+    eq(left, vec!["a.txt".to_string(), "b.txt".to_string()], "left name")?;
+    eq(right, vec!["b.txt".to_string(), "a.txt".to_string()], "right size")
 }
 
 fn filter_keeps_substring() -> Result<(), String> {
@@ -422,7 +451,37 @@ fn external_argv() -> Result<(), String> {
     eq(editor, vec!["nvim".to_string(), "/tmp/a".to_string()], "editor")?;
     let viewer = external::viewer_argv("less -N", Path::new("/tmp/a"));
     eq(viewer[0].as_str(), "less", "viewer")?;
-    eq(viewer[1].as_str(), "-N", "viewer arg")
+    eq(viewer[1].as_str(), "-N", "viewer arg")?;
+    let has = |name: &str| matches!(name, "gnome-text-editor" | "code" | "gnome-terminal" | "nvim");
+    let auto = external::editor_argv_with("", None, has, Path::new("/tmp/a"));
+    eq(
+        auto,
+        vec!["gnome-text-editor".into(), "--standalone".into(), "/tmp/a".into()],
+        "auto editor",
+    )?;
+    let code = external::editor_argv_with("code", Some("nvim"), has, Path::new("/tmp/a"));
+    eq(code, vec!["code".into(), "/tmp/a".into()], "code")?;
+    let nvim = external::editor_argv_with("nvim", None, has, Path::new("/tmp/a"));
+    eq(
+        nvim,
+        vec!["gnome-terminal".into(), "--".into(), "nvim".into(), "/tmp/a".into()],
+        "nvim",
+    )?;
+    let custom = external::editor_argv_with("/opt/ed --wait", None, |_| false, Path::new("/tmp/a"));
+    eq(custom, vec!["/opt/ed".into(), "--wait".into(), "/tmp/a".into()], "custom")?;
+    if !external::editor_argv_with("", None, |_| false, Path::new("/tmp/a")).is_empty() {
+        return Err("xdg-open used".into());
+    }
+    eq(external::editor_id_for_path(Path::new("/usr/bin/code")), "code".into(), "code id")?;
+    let choices = external::editor_choices_with("", None, has);
+    let labeled = external::editor_choices_with("", Some("nvim"), |_| false);
+    if !labeled[0].label.contains("nvim") {
+        return Err("editor env label".into());
+    }
+    if !choices.iter().any(|choice| choice.id == "code" && choice.label.contains("Visual Studio Code")) {
+        return Err("code missing from choices".into());
+    }
+    eq(choices.last().map(|choice| choice.id.as_str()), Some(external::EDITOR_BROWSE), "other")
 }
 
 fn lister_ansi_and_ascii() -> Result<(), String> {
@@ -442,11 +501,67 @@ fn lister_ansi_and_ascii() -> Result<(), String> {
 }
 
 fn quick_view_ignores_stale_generation() -> Result<(), String> {
-    let mut slot = lister::PreviewSlot { generation: 2, text: String::new() };
-    if lister::apply_preview(&mut slot, 1, "stale".into()) {
+    let mut slot = lister::PreviewSlot { generation: 2, ..lister::PreviewSlot::default() };
+    if lister::apply_preview(&mut slot, 1, PreviewBody::Text("stale".into())) {
         return Err("stale applied".into());
     }
-    eq(slot.text.as_str(), "", "stale text")
+    eq(slot.text(), "", "stale text")
+}
+
+fn image_list_skips_other_files() -> Result<(), String> {
+    let mut folder = file("photo.jpg", 1);
+    folder.flags |= DIR;
+    let entries = vec![Entry::dotdot(), file("a.txt", 1), file("b.JPG", 1), folder, file("c.png", 1)];
+    let order: Vec<usize> = (0..entries.len()).collect();
+    let paths = imageview::image_paths(Path::new("/pics"), &entries, &order);
+    eq(paths, vec![pb("/pics/b.JPG"), pb("/pics/c.png")], "images")
+}
+
+fn image_step_stops_at_end() -> Result<(), String> {
+    eq(imageview::step_index(3, 0, -1), None, "step back")?;
+    eq(imageview::step_index(3, 2, 1), None, "step forward")?;
+    eq(imageview::step_index(3, 1, 1), Some(2), "step mid")
+}
+
+fn image_decode_png_and_scales() -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("comarchy-img-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).map_err(s)?;
+    let png = dir.join("dot.png");
+    fs::write(&png, TINY_PNG).map_err(s)?;
+    let small = imageview::decode(&png, imageview::MAX_EDGE).map_err(|err| format!("png {err}"))?;
+    if small.width != 1 || small.height != 1 {
+        let _ = fs::remove_dir_all(&dir);
+        return Err(format!("png {}x{}", small.width, small.height));
+    }
+    let wide = dir.join("wide.bmp");
+    fs::write(&wide, bmp24(3000, 2)).map_err(s)?;
+    let scaled = imageview::decode(&wide, 2048).map_err(|err| format!("bmp {err}"))?;
+    let _ = fs::remove_dir_all(&dir);
+    if scaled.width != 2048 || scaled.height != 1 {
+        return Err(format!("scaled {}x{}", scaled.width, scaled.height));
+    }
+    Ok(())
+}
+
+const TINY_PNG: &[u8] = &[
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 218, 99, 252, 207, 192, 80, 15, 0, 4, 133, 1, 128, 132, 169, 140, 33, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+];
+
+fn bmp24(w: u32, h: u32) -> Vec<u8> {
+    let stride = (w as usize * 3 + 3) & !3;
+    let size = (54 + stride * h as usize) as u32;
+    let mut out = vec![0u8; size as usize];
+    out[0] = b'B';
+    out[1] = b'M';
+    out[2..6].copy_from_slice(&size.to_le_bytes());
+    out[10..14].copy_from_slice(&54u32.to_le_bytes());
+    out[14..18].copy_from_slice(&40u32.to_le_bytes());
+    out[18..22].copy_from_slice(&w.to_le_bytes());
+    out[22..26].copy_from_slice(&h.to_le_bytes());
+    out[26..28].copy_from_slice(&1u16.to_le_bytes());
+    out[28..30].copy_from_slice(&24u16.to_le_bytes());
+    out
 }
 
 fn landlock_blocks_outside_write(dir: &Path) -> Result<(), String> {
@@ -718,6 +833,14 @@ fn bookmark_roundtrip_config(dir: &Path) -> Result<(), String> {
     }
     if loaded.auto_columns || loaded.column_widths != vec![10, 20, 30, 40, 50] {
         return Err("columns".into());
+    }
+    if !loaded.mode_buttons {
+        return Err("mode buttons".into());
+    }
+    fs::write(&path, "show_hidden = true\n").map_err(s)?;
+    let loaded = config::load_from(&path);
+    if !loaded.mode_buttons {
+        return Err("mode buttons default".into());
     }
     Ok(())
 }

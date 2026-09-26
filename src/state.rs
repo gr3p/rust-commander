@@ -57,6 +57,8 @@ pub struct Pane {
     pub tabs: Vec<Tab>,
     pub active: usize,
     pub filter: String,
+    pub sort: SortKey,
+    pub ascending: bool,
 }
 
 impl Pane {
@@ -65,6 +67,8 @@ impl Pane {
             tabs: vec![Tab::new(path)],
             active: 0,
             filter: String::new(),
+            sort: SortKey::Name,
+            ascending: true,
         }
     }
 
@@ -82,8 +86,6 @@ impl Pane {
 pub struct AppState {
     pub panes: [Pane; 2],
     pub active: PaneId,
-    pub sort: SortKey,
-    pub ascending: bool,
     pub show_hidden: bool,
     pub quick_view: bool,
     pub preview_gen: u64,
@@ -95,8 +97,6 @@ impl AppState {
         Self {
             panes: [Pane::new(left), Pane::new(right)],
             active: PaneId::Left,
-            sort: SortKey::Name,
-            ascending: true,
             show_hidden: false,
             quick_view: false,
             preview_gen: 0,
@@ -124,8 +124,8 @@ impl AppState {
         let pane = self.pane(id);
         listing::visible_indices(
             &pane.tab().entries,
-            self.sort,
-            self.ascending,
+            pane.sort,
+            pane.ascending,
             self.show_hidden,
             &pane.filter,
         )
@@ -268,10 +268,10 @@ impl AppState {
     }
 
     pub fn apply_listing(&mut self, id: PaneId, tab_index: usize, token: u64, entries: Vec<Entry>) -> bool {
-        let sort = self.sort;
-        let ascending = self.ascending;
         let show_hidden = self.show_hidden;
         let pane = self.pane_mut(id);
+        let sort = pane.sort;
+        let ascending = pane.ascending;
         let filter = pane.filter.clone();
         let Some(tab) = pane.tabs.get_mut(tab_index) else {
             return false;

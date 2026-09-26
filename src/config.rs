@@ -40,6 +40,12 @@ pub struct Config {
     pub background_color: String,
     #[serde(default)]
     pub background_alpha: u8,
+    #[serde(default)]
+    pub seven_zip: String,
+    #[serde(default)]
+    pub rar: String,
+    #[serde(default = "default_true")]
+    pub mode_buttons: bool,
 }
 
 fn default_theme() -> String {
@@ -68,6 +74,9 @@ impl Default for Config {
             background: String::new(),
             background_color: String::new(),
             background_alpha: 0,
+            seven_zip: String::new(),
+            rar: String::new(),
+            mode_buttons: true,
         }
     }
 }

@@ -1,12 +1,16 @@
+pub mod archive;
 pub mod config;
 pub mod log;
 pub mod entry;
 pub mod hotlist;
 pub mod external;
+pub mod imageview;
 pub mod listing;
 pub mod lister;
 pub mod ops;
+pub mod pack;
 pub mod places;
 pub mod sandbox;
+pub mod sfv;
 pub mod state;
 pub mod theme;

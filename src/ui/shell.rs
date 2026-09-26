@@ -1,3 +1,6 @@
+use std::cell::Cell;
+use std::rc::Rc;
+
 use relm4::gtk;
 use relm4::gtk::gio;
 use relm4::gtk::prelude::*;
@@ -17,6 +20,9 @@ pub struct PaneUi {
     pub store: gio::ListStore,
     pub selection: gtk::SingleSelection,
     pub preview: gtk::TextView,
+    pub picture: gtk::Picture,
+    pub picture_scroll: gtk::ScrolledWindow,
+    pub preview_kind: gtk::Stack,
     pub spinner: gtk::Spinner,
 }
 
@@ -26,6 +32,12 @@ pub struct Shell {
     pub status: gtk::Label,
     pub css: gtk::CssProvider,
     pub f_labels: Vec<String>,
+    pub mode_bar: gtk::Stack,
+    pub image_scale: gtk::Button,
+    pub unpack_list: gtk::Button,
+    pub unpack_here: gtk::Button,
+    pub verify_sfv: gtk::Button,
+    pub active: Rc<Cell<usize>>,
 }
 
 pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> Shell {
@@ -38,15 +50,16 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
         );
     }
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    if let Some(drives) = drive_bar(sender) {
+    let active = Rc::new(Cell::new(0));
+    if let Some(drives) = drive_bar(sender, &active) {
         root.append(&drives);
     }
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
     paned.set_hexpand(true);
     paned.set_vexpand(true);
     paned.set_position(560);
-    let left = pane(0, sender);
-    let right = pane(1, sender);
+    let left = pane(0, sender, &active);
+    let right = pane(1, sender, &active);
     paned.set_start_child(Some(&left.frame));
     paned.set_end_child(Some(&right.frame));
     paned.set_resize_start_child(true);
@@ -84,7 +97,28 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
         button.connect_clicked(move |_| tx.emit(super::msg::Msg::FKey(n, false)));
         fbar.append(&button);
     }
-    root.append(&fbar);
+    let unpack_list = hint_button("Alt+F9 List", || super::msg::Msg::UnpackList, sender);
+    let unpack_here = hint_button("Ctrl+Alt+F10 Here", || super::msg::Msg::UnpackHere, sender);
+    let verify_sfv = hint_button("Enter Verify", || super::msg::Msg::VerifySfv, sender);
+    fbar.append(&unpack_list);
+    fbar.append(&unpack_here);
+    fbar.append(&verify_sfv);
+    let image_bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    image_bar.add_css_class("fbar");
+    image_bar.set_margin_all(4);
+    let image_scale = hint_button("S Fit", || super::msg::Msg::ToggleImageScale, sender);
+    let image_prev = hint_button("Left Previous", || super::msg::Msg::ImageStep(-1), sender);
+    let image_next = hint_button("Right Next", || super::msg::Msg::ImageStep(1), sender);
+    image_scale.set_visible(true);
+    image_prev.set_visible(true);
+    image_next.set_visible(true);
+    image_bar.append(&image_scale);
+    image_bar.append(&image_prev);
+    image_bar.append(&image_next);
+    let mode_bar = gtk::Stack::new();
+    mode_bar.add_named(&fbar, Some("files"));
+    mode_bar.add_named(&image_bar, Some("image"));
+    root.append(&mode_bar);
     window.set_child(Some(&root));
 
     let keys = gtk::EventControllerKey::new();
@@ -108,33 +142,55 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
         status,
         css,
         f_labels,
+        mode_bar,
+        image_scale,
+        unpack_list,
+        unpack_here,
+        verify_sfv,
+        active,
     }
 }
 
-fn drive_bar(sender: &relm4::Sender<super::msg::Msg>) -> Option<gtk::Box> {
+fn hint_button(
+    label: &str,
+    make: impl Fn() -> super::msg::Msg + 'static,
+    sender: &relm4::Sender<super::msg::Msg>,
+) -> gtk::Button {
+    let button = gtk::Button::with_label(label);
+    button.add_css_class("fkey");
+    button.set_hexpand(true);
+    button.set_visible(false);
+    let tx = sender.clone();
+    button.connect_clicked(move |_| tx.emit(make()));
+    button
+}
+
+fn drive_bar(sender: &relm4::Sender<super::msg::Msg>, active: &Rc<Cell<usize>>) -> Option<gtk::Box> {
     let mounts = comarchy::places::mounts();
     if mounts.is_empty() {
         return None;
     }
-    let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
     bar.add_css_class("drives");
-    bar.set_margin_start(6);
-    bar.set_margin_end(6);
-    bar.set_margin_top(4);
+    bar.set_margin_start(4);
+    bar.set_margin_end(4);
+    bar.set_margin_top(2);
     for mount in mounts {
         let button = gtk::Button::new();
         button.add_css_class("drive");
-        let column = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        column.append(&drive_icon(mount.removable, mount.network));
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+        row.append(&drive_icon(mount.removable, mount.network));
         let caption = gtk::Label::new(Some(&mount.label));
         caption.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        caption.set_max_width_chars(12);
-        column.append(&caption);
-        button.set_child(Some(&column));
+        caption.set_max_width_chars(10);
+        row.append(&caption);
+        button.set_child(Some(&row));
         button.set_tooltip_text(Some(&format!("{}  {}", mount.device, mount.path.display())));
+        button.set_focus_on_click(false);
         let tx = sender.clone();
         let path = mount.path;
-        button.connect_clicked(move |_| tx.emit(super::msg::Msg::Mount(path.clone())));
+        let active = active.clone();
+        button.connect_clicked(move |_| tx.emit(super::msg::Msg::Mount(active.get(), path.clone())));
         bar.append(&button);
     }
     Some(bar)
@@ -151,7 +207,7 @@ fn drive_icon(removable: bool, network: bool) -> gtk::Widget {
     let theme = gtk::gdk::Display::default().map(|display| gtk::IconTheme::for_display(&display));
     if theme.is_some_and(|theme| theme.has_icon(name)) {
         let icon = gtk::Image::from_icon_name(name);
-        icon.set_pixel_size(22);
+        icon.set_pixel_size(12);
         icon.upcast()
     } else {
         gtk::Label::new(Some(fallback)).upcast()
@@ -174,23 +230,22 @@ fn bind_header_clicks(list: &gtk::ColumnView, index: usize, sender: &relm4::Send
                 return;
             }
             for (title, key) in titles.into_iter().zip(keys) {
-                let Some(label) = title_label(&title) else { continue };
-                label.set_xalign(0.0);
-                label.set_halign(gtk::Align::Start);
-                label.set_hexpand(true);
-                if let Some(parent) = label.parent() {
-                    parent.set_halign(gtk::Align::Start);
-                    parent.set_hexpand(true);
+                if let Some(label) = title_label(&title) {
+                    label.set_xalign(0.0);
+                    label.set_halign(gtk::Align::Start);
                 }
-                label.set_can_target(true);
+                // Header claims the click in bubble phase, so listen on the way down.
                 let click = gtk::GestureClick::new();
+                click.set_propagation_phase(gtk::PropagationPhase::Capture);
+                click.set_button(1);
                 let tx = sender.clone();
-                click.connect_released(move |_, n, _, _| {
+                click.connect_pressed(move |gesture, n, _, _| {
                     if n == 1 {
+                        gesture.set_state(gtk::EventSequenceState::Claimed);
                         tx.emit(super::msg::Msg::Sort(index, key));
                     }
                 });
-                label.add_controller(click);
+                title.add_controller(click);
             }
             bound.set(true);
         }
@@ -204,6 +259,7 @@ fn bind_header_clicks(list: &gtk::ColumnView, index: usize, sender: &relm4::Send
 pub fn header_titles(list: &gtk::ColumnView) -> Vec<gtk::Widget> {
     let mut titles = Vec::new();
     collect_titles(list.upcast_ref(), &mut titles);
+    titles.retain(|title| title_label(title).is_some_and(|label| !label.text().is_empty()));
     titles
 }
 
@@ -260,7 +316,7 @@ fn is_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
         || alt
 }
 
-fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>) -> PaneUi {
+fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<Cell<usize>>) -> PaneUi {
     let frame = gtk::Frame::new(None);
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let tabs = gtk::Box::new(gtk::Orientation::Horizontal, 4);
@@ -307,6 +363,22 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>) -> PaneUi {
     bind_header_clicks(&list, index, sender);
     let tx = sender.clone();
     list.connect_activate(move |_, _| tx.emit(super::msg::Msg::Activate(index)));
+    let focus = gtk::EventControllerFocus::new();
+    let tx = sender.clone();
+    focus.connect_enter(move |_| tx.emit(super::msg::Msg::FocusPane(index)));
+    list.add_controller(focus);
+    let watch = gtk::EventControllerLegacy::new();
+    watch.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let tx = sender.clone();
+    let active_pane = active_pane.clone();
+    watch.connect_event(move |_, event| {
+        if event.event_type() == gtk::gdk::EventType::ButtonPress {
+            active_pane.set(index);
+            tx.emit(super::msg::Msg::FocusPane(index));
+        }
+        gtk::glib::Propagation::Proceed
+    });
+    frame.add_controller(watch);
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_child(Some(&list));
     scroll.set_vexpand(true);
@@ -321,9 +393,23 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>) -> PaneUi {
     let preview_scroll = gtk::ScrolledWindow::new();
     preview_scroll.set_child(Some(&preview));
     preview_scroll.set_vexpand(true);
+    let picture = gtk::Picture::new();
+    picture.set_can_shrink(true);
+    picture.set_content_fit(gtk::ContentFit::Contain);
+    picture.set_hexpand(true);
+    picture.set_vexpand(true);
+    let picture_scroll = gtk::ScrolledWindow::new();
+    picture_scroll.set_child(Some(&picture));
+    picture_scroll.set_hexpand(true);
+    picture_scroll.set_vexpand(true);
+    picture_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Never);
+    let preview_kind = gtk::Stack::new();
+    preview_kind.add_named(&preview_scroll, Some("text"));
+    preview_kind.add_named(&picture_scroll, Some("image"));
+    preview_kind.set_vexpand(true);
     let stack = gtk::Stack::new();
     stack.add_named(&scroll, Some("list"));
-    stack.add_named(&preview_scroll, Some("preview"));
+    stack.add_named(&preview_kind, Some("preview"));
     stack.set_vexpand(true);
     let spinner = gtk::Spinner::new();
     let overlay = gtk::Overlay::new();
@@ -348,6 +434,9 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>) -> PaneUi {
         store,
         selection,
         preview,
+        picture,
+        picture_scroll,
+        preview_kind,
         spinner,
     }
 }

@@ -13,8 +13,14 @@ name = "acceptance"
 harness = false
 
 [dependencies]
+crc32fast = "1.5.2"
+gtk4 = { version = "0.11.5", features = ["v4_8"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff", "ico"] }
 landlock = "0.4.7"
 libc = "0.2.189"
 relm4 = { version = "0.11.0", features = ["macros"] }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.6"
+unrar-ng = "0.7"
+unrar-ng-sys = { version = "0.7.7", default-features = false, features = ["std"] }
+zip = "8"

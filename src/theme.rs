@@ -168,7 +168,30 @@ window {{
   border: 1px solid {accent};
 }}
 .marked {{
+  color: #9ece6a;
+}}
+label.glyph.marked {{
   color: {accent};
+}}
+label.glyph {{
+  font-size: 8px;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  min-height: 0;
+}}
+label.glyph.cursor {{
+  color: #ffffff;
+  font-size: 13px;
+}}
+columnview > listview > row > cell:first-child {{
+  padding: 0;
+}}
+columnview > header > button:first-child {{
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
 }}
 listview > row:selected,
 listview row:selected {{
@@ -206,8 +229,12 @@ textview, textview text {{
 }}
 button.drive {{
   background: transparent;
-  padding: 4px 8px;
+  padding: 10px 4px;
   min-width: 0;
+  min-height: 0;
+}}
+button.drive label {{
+  font-size: 11px;
 }}
 button.drive:hover {{
   background: {sel};
@@ -229,6 +256,30 @@ button.fkey label {{
 }}
 label.settings-on {{
   color: {accent};
+}}
+label.cmd-key {{
+  font-family: monospace;
+  color: {accent};
+}}
+label.cmd-head {{
+  font-weight: 700;
+  padding-top: 14px;
+}}
+dropdown.editor-pick > button {{
+  background: {sel};
+  color: {fg};
+  padding: 2px 8px;
+  min-height: 0;
+}}
+dropdown.editor-pick popover,
+dropdown.editor-pick popover listview,
+dropdown.editor-pick popover listview > row {{
+  background: {bg};
+  color: {fg};
+}}
+dropdown.editor-pick popover listview > row:selected {{
+  background: {sel};
+  color: {bright};
 }}
 button.hot {{
   background: transparent;

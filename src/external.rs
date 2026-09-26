@@ -1,6 +1,42 @@
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+// Not stored. The settings row uses it for "Other…".
+pub const EDITOR_BROWSE: &str = "\u{0}";
+
+struct Preset {
+    id: &'static str,
+    name: &'static str,
+    bins: &'static [&'static str],
+    args: &'static [&'static str],
+    terminal: bool,
+}
+
+const PRESETS: &[Preset] = &[
+    // --standalone skips the saved session, which can reopen admin:// and ask for a password.
+    Preset { id: "gnome-text-editor", name: "Text Editor", bins: &["gnome-text-editor"], args: &["--standalone"], terminal: false },
+    Preset { id: "code", name: "Visual Studio Code", bins: &["code"], args: &[], terminal: false },
+    Preset { id: "cursor", name: "Cursor", bins: &["cursor"], args: &[], terminal: false },
+    Preset { id: "code-insiders", name: "VS Code Insiders", bins: &["code-insiders"], args: &[], terminal: false },
+    Preset { id: "codium", name: "VSCodium", bins: &["codium"], args: &[], terminal: false },
+    Preset { id: "zed", name: "Zed", bins: &["zed", "zeditor"], args: &[], terminal: false },
+    Preset { id: "gedit", name: "gedit", bins: &["gedit"], args: &[], terminal: false },
+    Preset { id: "kate", name: "Kate", bins: &["kate"], args: &[], terminal: false },
+    Preset { id: "mousepad", name: "Mousepad", bins: &["mousepad"], args: &[], terminal: false },
+    Preset { id: "xed", name: "Xed", bins: &["xed"], args: &[], terminal: false },
+    Preset { id: "emacs", name: "Emacs", bins: &["emacs"], args: &[], terminal: false },
+    Preset { id: "subl", name: "Sublime Text", bins: &["subl"], args: &[], terminal: false },
+    Preset { id: "nano", name: "Nano", bins: &["nano"], args: &[], terminal: true },
+    Preset { id: "vim", name: "Vim", bins: &["vim"], args: &[], terminal: true },
+    Preset { id: "nvim", name: "Neovim", bins: &["nvim"], args: &[], terminal: true },
+    Preset { id: "hx", name: "Helix", bins: &["hx"], args: &[], terminal: true },
+];
+
+pub struct EditorChoice {
+    pub id: String,
+    pub label: String,
+}
 
 const TERMINALS: &[&str] = &[
     "x-terminal-emulator",
@@ -18,7 +54,112 @@ pub fn viewer_argv(configured: &str, path: &Path) -> Vec<String> {
 }
 
 pub fn editor_argv(configured: &str, editor_env: Option<&str>, path: &Path) -> Vec<String> {
-    argv(configured, editor_env, "xdg-open", path)
+    editor_argv_with(configured, editor_env, program_on_path, path)
+}
+
+pub fn editor_argv_with(
+    configured: &str,
+    editor_env: Option<&str>,
+    exists: impl Fn(&str) -> bool,
+    path: &Path,
+) -> Vec<String> {
+    let configured = configured.trim();
+    if !configured.is_empty() && configured != EDITOR_BROWSE {
+        if let Some(preset) = PRESETS.iter().find(|preset| preset.id == configured) {
+            return preset_cmd(preset, &exists, path).unwrap_or_default();
+        }
+        return with_file(words(configured), path);
+    }
+    if let Some(env) = editor_env.map(str::trim).filter(|line| !line.is_empty()) {
+        return with_file(words(env), path);
+    }
+    auto_preset(&exists)
+        .and_then(|preset| preset_cmd(preset, &exists, path))
+        .unwrap_or_default()
+}
+
+pub fn editor_choices(configured: &str) -> Vec<EditorChoice> {
+    let env = std::env::var("EDITOR").ok();
+    editor_choices_with(configured, env.as_deref(), program_on_path)
+}
+
+pub fn editor_choices_with(configured: &str, editor_env: Option<&str>, exists: impl Fn(&str) -> bool) -> Vec<EditorChoice> {
+    let mut out = Vec::new();
+    let label = if let Some(env) = editor_env.map(str::trim).filter(|line| !line.is_empty()) {
+        format!("Automatic  ({env})")
+    } else {
+        match auto_preset(&exists) {
+            Some(preset) => format!("Automatic  ({})", preset.name),
+            None => "Automatic".into(),
+        }
+    };
+    out.push(EditorChoice { id: String::new(), label });
+    for preset in PRESETS {
+        let Some(bin) = preset.bins.iter().copied().find(|name| exists(name)) else { continue };
+        let shown = program_path(bin).map(|p| p.display().to_string()).unwrap_or_else(|| bin.to_string());
+        out.push(EditorChoice {
+            id: preset.id.to_string(),
+            label: format!("{}  {shown}", preset.name),
+        });
+    }
+    let configured = configured.trim();
+    if !configured.is_empty() && configured != EDITOR_BROWSE && !out.iter().any(|choice| choice.id == configured) {
+        out.push(EditorChoice { id: configured.to_string(), label: configured.to_string() });
+    }
+    out.push(EditorChoice { id: EDITOR_BROWSE.into(), label: "Other…".into() });
+    out
+}
+
+pub fn editor_id_for_path(path: &Path) -> String {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return path.display().to_string();
+    };
+    if let Some(preset) = PRESETS.iter().find(|preset| preset.id == name || preset.bins.iter().any(|bin| *bin == name)) {
+        return preset.id.to_string();
+    }
+    path.display().to_string()
+}
+
+fn auto_preset(exists: &impl Fn(&str) -> bool) -> Option<&'static Preset> {
+    PRESETS.iter().find(|preset| preset.bins.iter().any(|name| exists(name)))
+}
+
+fn preset_cmd(preset: &Preset, exists: &impl Fn(&str) -> bool, path: &Path) -> Option<Vec<String>> {
+    let bin = preset.bins.iter().copied().find(|name| exists(name))?;
+    let mut parts = vec![bin.to_string()];
+    parts.extend(preset.args.iter().copied().map(str::to_string));
+    parts.push(path.display().to_string());
+    if preset.terminal {
+        Some(in_terminal(parts, exists))
+    } else {
+        Some(parts)
+    }
+}
+
+fn in_terminal(cmd: Vec<String>, exists: &impl Fn(&str) -> bool) -> Vec<String> {
+    let Some(term) = TERMINALS.iter().copied().find(|name| exists(name)) else {
+        return cmd;
+    };
+    let mut parts = vec![term.to_string()];
+    match term {
+        "gnome-terminal" => parts.push("--".into()),
+        "kitty" | "foot" => {}
+        _ => parts.push("-e".into()),
+    }
+    parts.extend(cmd);
+    parts
+}
+
+fn words(line: &str) -> Vec<String> {
+    line.split_whitespace().map(str::to_string).collect()
+}
+
+fn with_file(mut parts: Vec<String>, path: &Path) -> Vec<String> {
+    if parts.is_empty() {
+        return Vec::new();
+    }
+    parts.push(path.display().to_string());
+    parts
 }
 
 fn argv(configured: &str, env: Option<&str>, fallback: &str, path: &Path) -> Vec<String> {
@@ -81,9 +222,11 @@ pub fn run_shell(dir: &Path, line: &str) -> io::Result<String> {
     Ok(text)
 }
 
+fn program_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).map(|dir| dir.join(name)).find(|file| file.is_file())
+}
+
 fn program_on_path(name: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| dir.join(name).is_file())
+    program_path(name).is_some()
 }

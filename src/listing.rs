@@ -38,19 +38,26 @@ impl SortKey {
 }
 
 pub fn read_dir(path: &Path) -> io::Result<Vec<Entry>> {
+    read_dir_while(path, || false)
+}
+
+// `stop` closes the directory fd before the next name.
+pub fn read_dir_while(path: &Path, stop: impl Fn() -> bool) -> io::Result<Vec<Entry>> {
     let mut out = Vec::new();
     if path.parent().is_some() {
         out.push(Entry::dotdot());
     }
     for item in fs::read_dir(path)? {
+        if stop() {
+            return Ok(out);
+        }
         let item = item?;
         let name = item.file_name();
         let name = name.to_string_lossy();
-        let full = item.path();
-        let meta = fs::symlink_metadata(&full)?;
+        let meta = item.metadata()?; // statx on the directory fd, not a path walk from /
         let is_link = meta.file_type().is_symlink();
         let is_dir = if is_link {
-            fs::metadata(&full).map(|m| m.is_dir()).unwrap_or(false)
+            fs::metadata(item.path()).map(|m| m.is_dir()).unwrap_or(false)
         } else {
             meta.is_dir()
         };
@@ -198,7 +205,8 @@ fn civil_from_unix_days(days: i64) -> (i32, u32, u32) {
     (y as i32, m as u32, d as u32)
 }
 
-pub fn column_chars(entries: &[Entry]) -> [usize; 4] {
+pub fn column_chars(entries: &[Entry]) -> [usize; 5] {
+    let mut name = 4;
     let mut ext = 3;
     let mut size = 4;
     let mut date = 4;
@@ -207,23 +215,29 @@ pub fn column_chars(entries: &[Entry]) -> [usize; 4] {
         if entry.name.as_ref() == ".." {
             continue;
         }
+        name = name.max(shown_name_chars(entry));
         ext = ext.max(extension(&entry.name).len());
         let size_len = if entry.is_dir() { 5 } else { format_size(entry.size).len() };
         size = size.max(size_len);
         date = date.max(format_mtime(entry.mtime).len());
         attr = attr.max(format_attr(entry.mode).len());
     }
-    [ext, size, date, attr]
+    [name, ext, size, date, attr]
 }
 
-pub fn column_pixels(chars: [usize; 4], unit: i32) -> [i32; 4] {
+fn shown_name_chars(entry: &Entry) -> usize {
+    let suffix = usize::from(entry.is_dir() || entry.is_symlink());
+    entry.name.chars().count() + suffix
+}
+
+pub fn column_pixels(chars: [usize; 5], unit: i32) -> [i32; 5] {
     let unit = unit.max(7);
     // Cell padding plus the label's horizontal margins. Date has a wider end margin.
-    let pad = [28, 28, 36, 28];
-    let min = [48, 64, 140, 96];
-    let max = [200, 140, 240, 160];
-    let mut out = [0; 4];
-    for i in 0..4 {
+    let pad = [28, 28, 28, 36, 28];
+    let min = [96, 48, 64, 140, 96];
+    let max = [640, 200, 140, 240, 160];
+    let mut out = [0; 5];
+    for i in 0..5 {
         out[i] = ((chars[i] as i32) * unit + pad[i]).clamp(min[i], max[i]);
     }
     out
