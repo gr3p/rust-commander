@@ -52,7 +52,7 @@ impl App {
         let choose = gtk::Button::with_label("Choose folder");
         let root_choice = root.clone();
         let window_choice = window.downgrade();
-        choose.connect_clicked(move |_| {
+        crate::ui::shell::on_click(&choose, move || {
             let Some(window_choice) = window_choice.upgrade() else { return };
             let chooser = gtk::FileChooserNative::new(
                 Some("Search in"), Some(&window_choice), gtk::FileChooserAction::SelectFolder,
@@ -88,13 +88,13 @@ impl App {
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let start = gtk::Button::with_label("Search");
         let tx = sender.input_sender().clone();
-        start.connect_clicked(move |_| tx.emit(Msg::SearchStart));
+        crate::ui::shell::on_click(&start, move || tx.emit(Msg::SearchStart));
         let tx = sender.input_sender().clone();
         query.connect_activate(move |_| tx.emit(Msg::SearchStart));
         let cancel = gtk::Button::with_label("Cancel search");
         cancel.set_sensitive(false);
         let tx = sender.input_sender().clone();
-        cancel.connect_clicked(move |_| tx.emit(Msg::SearchCancel));
+        crate::ui::shell::on_click(&cancel, move || tx.emit(Msg::SearchCancel));
         actions.append(&start);
         actions.append(&cancel);
         content.append(&actions);
@@ -128,14 +128,14 @@ impl App {
         go.set_sensitive(false);
         let tx = sender.input_sender().clone();
         let selection = list.clone();
-        go.connect_clicked(move |_| {
+        crate::ui::shell::on_click(&go, move || {
             if let Some(row) = selection.selected_row() {
                 tx.emit(Msg::SearchGo(row.index() as usize));
             }
         });
         let close = gtk::Button::with_label("Close");
         let tx = sender.input_sender().clone();
-        close.connect_clicked(move |_| tx.emit(Msg::CloseSearch));
+        crate::ui::shell::on_click(&close, move || tx.emit(Msg::CloseSearch));
         footer.append(&go);
         footer.append(&close);
         content.append(&footer);

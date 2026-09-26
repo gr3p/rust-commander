@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
@@ -412,15 +411,13 @@ impl App {
         let entry_ok = entry.clone();
         let tx_ok = tx.clone();
         let names: Vec<String> = members.iter().map(|member| member.name.clone()).collect();
-        let fire = Rc::new(move || {
+        crate::ui::shell::on_click(&ok, move || {
             tx_ok.emit(Msg::UnpackPick(entry_ok.text().to_string(), names.clone()));
         });
-        let fire_ok = Rc::clone(&fire);
-        ok.connect_clicked(move |_| fire_ok());
-        let fire_entry = Rc::clone(&fire);
-        entry.connect_activate(move |_| fire_entry());
+        let ok_entry = ok.clone();
+        entry.connect_activate(move |_| ok_entry.emit_clicked());
         let cancel = gtk::Button::with_label("Cancel");
-        cancel.connect_clicked(move |_| tx.emit(Msg::CancelAsk));
+        crate::ui::shell::on_click(&cancel, move || tx.emit(Msg::CancelAsk));
         row.append(&ok);
         row.append(&cancel);
         column.append(&heading("Target location"));
@@ -516,7 +513,7 @@ impl App {
         let ok = gtk::Button::with_label("Pack");
         let (entry_ok, level_ok, password_ok, repeat_ok, error_ok, tx_ok) =
             (entry.clone(), level.clone(), password.clone(), repeat.clone(), error.clone(), tx.clone());
-        let fire = Rc::new(move || {
+        crate::ui::shell::on_click(&ok, move || {
             let dest = entry_ok.text().trim().to_string();
             let secret = password_ok.text().to_string();
             let problem = if pack::format_of(Path::new(&dest)).is_none() {
@@ -534,16 +531,14 @@ impl App {
             let level = pack::LEVELS.get(level_ok.selected() as usize).map(|(_, n)| *n).unwrap_or(5);
             tx_ok.emit(Msg::PackPick(dest, Options { level, password: (!secret.is_empty()).then_some(secret) }));
         });
-        let fire_ok = Rc::clone(&fire);
-        ok.connect_clicked(move |_| fire_ok());
-        let fire_entry = Rc::clone(&fire);
-        entry.connect_activate(move |_| fire_entry());
-        let fire_password = Rc::clone(&fire);
-        password.connect_activate(move |_| fire_password());
-        let fire_repeat = Rc::clone(&fire);
-        repeat.connect_activate(move |_| fire_repeat());
+        let ok_entry = ok.clone();
+        entry.connect_activate(move |_| ok_entry.emit_clicked());
+        let ok_password = ok.clone();
+        password.connect_activate(move |_| ok_password.emit_clicked());
+        let ok_repeat = ok.clone();
+        repeat.connect_activate(move |_| ok_repeat.emit_clicked());
         let cancel = gtk::Button::with_label("Cancel");
-        cancel.connect_clicked(move |_| tx.emit(Msg::CancelAsk));
+        crate::ui::shell::on_click(&cancel, move || tx.emit(Msg::CancelAsk));
         row.append(&ok);
         row.append(&cancel);
         column.append(&heading("Target location"));
@@ -712,7 +707,7 @@ impl App {
         label.set_selectable(true);
         let ok = gtk::Button::with_label("OK");
         let win_ok = win.clone();
-        ok.connect_clicked(move |_| win_ok.close());
+        crate::ui::shell::on_click(&ok, move || win_ok.close());
         column.append(&label);
         column.append(&ok);
         win.set_child(Some(&column));
@@ -753,15 +748,15 @@ impl App {
         if title == "Password" {
             entry.set_visibility(false);
         }
-        let tx_ok = tx.clone();
-        entry.connect_activate(move |entry| tx_ok.emit(Msg::Submit(entry.text().to_string())));
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let ok = gtk::Button::with_label("OK");
+        let ok_entry = ok.clone();
+        entry.connect_activate(move |_| ok_entry.emit_clicked());
         let entry_ok = entry.clone();
         let tx_ok = tx.clone();
-        ok.connect_clicked(move |_| tx_ok.emit(Msg::Submit(entry_ok.text().to_string())));
+        crate::ui::shell::on_click(&ok, move || tx_ok.emit(Msg::Submit(entry_ok.text().to_string())));
         let cancel = gtk::Button::with_label("Cancel");
-        cancel.connect_clicked(move |_| tx.emit(Msg::CancelAsk));
+        crate::ui::shell::on_click(&cancel, move || tx.emit(Msg::CancelAsk));
         row.append(&ok);
         row.append(&cancel);
         column.append(&entry);
@@ -782,9 +777,9 @@ impl App {
         row.set_margin_all(12);
         let ok = gtk::Button::with_label("OK");
         let tx_ok = tx.clone();
-        ok.connect_clicked(move |_| tx_ok.emit(Msg::Submit(String::new())));
+        crate::ui::shell::on_click(&ok, move || tx_ok.emit(Msg::Submit(String::new())));
         let cancel = gtk::Button::with_label("Cancel");
-        cancel.connect_clicked(move |_| tx.emit(Msg::CancelAsk));
+        crate::ui::shell::on_click(&cancel, move || tx.emit(Msg::CancelAsk));
         row.append(&ok);
         row.append(&cancel);
         win.set_child(Some(&row));
@@ -813,7 +808,7 @@ impl App {
         ] {
             let button = gtk::Button::with_label(caption);
             let tx = tx.clone();
-            button.connect_clicked(move |_| tx.emit(Msg::Conflict(choice)));
+            crate::ui::shell::on_click(&button, move || tx.emit(Msg::Conflict(choice)));
             row.append(&button);
         }
         column.append(&row);
@@ -843,10 +838,12 @@ impl App {
         bar.add_css_class("job");
         bar.set_show_text(false);
         let cancel = gtk::Button::with_label("Cancel");
-        if let Some(job) = &self.job {
-            let flag = Arc::clone(&job.cancel);
-            cancel.connect_clicked(move |_| flag.store(true, Ordering::Relaxed));
-        }
+        let flag = self.job.as_ref().map(|job| Arc::clone(&job.cancel));
+        crate::ui::shell::on_click(&cancel, move || {
+            if let Some(flag) = &flag {
+                flag.store(true, Ordering::Relaxed);
+            }
+        });
         column.append(&label);
         column.append(&bar);
         column.append(&cancel);

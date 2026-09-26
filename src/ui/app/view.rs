@@ -54,7 +54,7 @@ impl App {
         scale.add_css_class("fkey");
         scale.set_hexpand(true);
         let tx_scale = sender.input_sender().clone();
-        scale.connect_clicked(move |_| tx_scale.emit(Msg::ToggleImageScale));
+        crate::ui::shell::on_click(&scale, move || tx_scale.emit(Msg::ToggleImageScale));
         bar.append(&scale);
         bar.set_visible(self.cfg.mode_buttons);
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);

@@ -48,6 +48,8 @@ pub struct Config {
     pub mode_buttons: bool,
     #[serde(default)]
     pub file_icons: bool,
+    #[serde(default = "default_true")]
+    pub flash_feedback: bool,
 }
 
 fn default_theme() -> String {
@@ -84,6 +86,7 @@ impl Default for Config {
             rar: String::new(),
             mode_buttons: true,
             file_icons: false,
+            flash_feedback: true,
         }
     }
 }
@@ -128,4 +131,18 @@ pub fn save_to(path: &Path, cfg: &Config) -> io::Result<()> {
     }
     let text = toml::to_string_pretty(cfg).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     fs::write(path, text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confirmation_flash_defaults_to_enabled() {
+        assert!(Config::default().flash_feedback);
+        let old_config: Config = toml::from_str("").unwrap();
+        assert!(old_config.flash_feedback);
+        let disabled: Config = toml::from_str("flash_feedback = false").unwrap();
+        assert!(!disabled.flash_feedback);
+    }
 }

@@ -207,18 +207,17 @@ pub fn add_dialog(parent: &gtk::Window, title: &str, path: &str, sender: &relm4:
     let entry_ok = entry.clone();
     let path_ok = path_entry.clone();
     let target_ok = save_target.clone();
-    let emit = move || {
+    super::shell::on_click(&ok, move || {
         tx_ok.emit(Msg::HotlistAdded(
             entry_ok.text().to_string(),
             path_ok.text().to_string(),
             target_ok.is_active(),
         ));
-    };
-    let emit_ok = emit.clone();
-    ok.connect_clicked(move |_| emit_ok());
-    entry.connect_activate(move |_| emit());
+    });
+    let ok_entry = ok.clone();
+    entry.connect_activate(move |_| ok_entry.emit_clicked());
     let tx_cancel = sender.clone();
-    cancel.connect_clicked(move |_| tx_cancel.emit(Msg::CancelAsk));
+    super::shell::on_click(&cancel, move || tx_cancel.emit(Msg::CancelAsk));
     row.append(&ok);
     row.append(&cancel);
     column.append(&entry);
@@ -273,19 +272,19 @@ pub fn configure(parent: &gtk::Window, marks: Vec<Bookmark>, sender: &relm4::Sen
     for (label, edit) in buttons {
         let button = gtk::Button::with_label(label);
         let state = state.clone();
-        button.connect_clicked(move |_| apply(&state, edit));
+        super::shell::on_click(&button, move || apply(&state, edit));
         tools.append(&button);
     }
     let save_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let ok = gtk::Button::with_label("OK");
     let cancel = gtk::Button::with_label("Cancel");
     let state_ok = state.clone();
-    ok.connect_clicked(move |_| {
+    super::shell::on_click(&ok, move || {
         write_back(&state_ok);
         state_ok.sender.emit(Msg::HotlistStored(state_ok.draft.borrow().clone()));
     });
     let tx_cancel = sender.clone();
-    cancel.connect_clicked(move |_| tx_cancel.emit(Msg::CancelAsk));
+    super::shell::on_click(&cancel, move || tx_cancel.emit(Msg::CancelAsk));
     save_row.append(&ok);
     save_row.append(&cancel);
     column.append(&scroll);

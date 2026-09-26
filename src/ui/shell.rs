@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use relm4::gtk;
@@ -11,6 +12,8 @@ use relm4::RelmWidgetExt;
 use comarchy::listing::SortKey;
 
 use super::row::{self, EntryObject};
+
+static FLASH_ENABLED: AtomicBool = AtomicBool::new(true);
 
 pub struct PaneUi {
     pub frame: gtk::Frame,
@@ -110,7 +113,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
         button.set_hexpand(true);
         f_labels.push(label.to_string());
         let tx = sender.clone();
-        button.connect_clicked(move |_| tx.emit(super::msg::Msg::FKey(n, false)));
+        on_click(&button, move || tx.emit(super::msg::Msg::FKey(n, false)));
         fkey_row.append(&button);
     }
     let unpack_list = hint_button("Alt+F9 Unpack to right panel", || super::msg::Msg::UnpackList, sender);
@@ -265,7 +268,7 @@ fn hint_button(
     button.set_hexpand(true);
     button.set_visible(false);
     let tx = sender.clone();
-    button.connect_clicked(move |_| tx.emit(make()));
+    on_click(&button, move || tx.emit(make()));
     button
 }
 
@@ -317,24 +320,62 @@ fn drive_bar(
 }
 
 pub fn blink_drive(button: &gtk::Button) {
-    let button = button.clone();
-    button.add_css_class("flash");
+    blink_button(button);
+}
+
+/// Blinks the button and runs `action` once the blink is over, so it stays visible even when the action closes the window.
+pub fn on_click(button: &gtk::Button, action: impl Fn() + 'static) {
+    let action = Rc::new(action);
+    let pending = Rc::new(Cell::new(false));
+    button.connect_clicked(move |button| {
+        if !FLASH_ENABLED.load(Ordering::Relaxed) {
+            action();
+            return;
+        }
+        if pending.replace(true) {
+            return;
+        }
+        blink_button(button);
+        let (action, pending, button) = (Rc::clone(&action), Rc::clone(&pending), button.downgrade());
+        gtk::glib::timeout_add_local_once(Duration::from_millis(240), move || {
+            pending.set(false);
+            if button.upgrade().is_some_and(|button| button.is_mapped()) {
+                action();
+            }
+        });
+    });
+}
+
+pub fn blink_button(button: &gtk::Button) {
+    blink_widget(button.upcast_ref());
+}
+
+pub fn blink_widget(widget: &gtk::Widget) {
+    if !FLASH_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let widget = widget.clone();
+    widget.add_css_class("flash");
     let step = Cell::new(0u8);
     gtk::glib::timeout_add_local(Duration::from_millis(80), move || {
         let n = step.get() + 1;
         step.set(n);
         if n % 2 == 0 {
-            button.add_css_class("flash");
+            widget.add_css_class("flash");
         } else {
-            button.remove_css_class("flash");
+            widget.remove_css_class("flash");
         }
         if n >= 3 {
-            button.remove_css_class("flash");
+            widget.remove_css_class("flash");
             gtk::glib::ControlFlow::Break
         } else {
             gtk::glib::ControlFlow::Continue
         }
     });
+}
+
+pub fn set_flash_enabled(enabled: bool) {
+    FLASH_ENABLED.store(enabled, Ordering::Relaxed);
 }
 
 fn drive_icon(removable: bool, network: bool) -> gtk::Widget {
@@ -380,8 +421,10 @@ fn bind_header_clicks(list: &gtk::ColumnView, index: usize, sender: &relm4::Send
                 click.set_propagation_phase(gtk::PropagationPhase::Capture);
                 click.set_button(1);
                 let tx = sender.clone();
+                let flash = title.clone();
                 click.connect_pressed(move |gesture, n, _, _| {
                     if n == 1 {
+                        blink_widget(&flash);
                         gesture.set_state(gtk::EventSequenceState::Claimed);
                         tx.emit(super::msg::Msg::Sort(index, key));
                     }
@@ -487,8 +530,10 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     path.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     let path_click = gtk::GestureClick::new();
     let tx = sender.clone();
+    let path_flash = path.clone();
     path_click.connect_released(move |_, n, _, _| {
         if n == 2 {
+            blink_widget(path_flash.upcast_ref());
             tx.emit(super::msg::Msg::Hotlist);
         }
     });

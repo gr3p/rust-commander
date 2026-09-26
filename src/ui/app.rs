@@ -117,6 +117,7 @@ struct SettingsUi {
     hidden: gtk::Label,
     hints: gtk::Label,
     icons: gtk::Label,
+    flash: gtk::Label,
     image: gtk::Label,
     clear: gtk::Button,
     strength_name: gtk::Label,
@@ -189,6 +190,7 @@ impl SimpleComponent for App {
         let widgets = view_output!();
         let shell = shell::build(&root, sender.input_sender());
         let cfg = config::load();
+        shell::set_flash_enabled(cfg.flash_feedback);
         let (left, right) = if smoke {
             smoke_dirs()
         } else {
@@ -383,6 +385,7 @@ impl App {
             Msg::ToggleHidden => self.toggle_hidden(),
             Msg::ToggleModeButtons => self.toggle_mode_buttons(),
             Msg::ToggleFileIcons => self.toggle_file_icons(),
+            Msg::ToggleFlashFeedback => self.toggle_flash_feedback(),
             Msg::ToggleImageScale => self.toggle_shown_scale(sender),
             Msg::SetCharset(charset) => self.set_charset(charset, sender),
             Msg::ToggleQuickEdit => self.toggle_quick_edit(sender),
@@ -891,7 +894,7 @@ impl App {
             let button = gtk::Button::with_label(&format!("{label}  {}", path.display()));
             button.set_halign(gtk::Align::Start);
             let tx = tx.clone();
-            button.connect_clicked(move |_| {
+            shell::on_click(&button, move || {
                 tx.emit(Msg::PickPlace(pane, path.clone()));
             });
             list.append(&button);

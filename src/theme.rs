@@ -367,6 +367,43 @@ window.hotlist {{
 button.hot-on {{
   background: {sel};
 }}
+button.flash:hover,
+button.flash:focus,
+button.flash:focus-visible,
+button.flash:active,
+button.fkey.flash,
+button.hot.flash,
+.settings-row.flash,
+box.flash,
+label.flash,
+colorbutton.flash > button {{
+  background: {accent};
+  color: {bg};
+}}
+.flash label {{
+  color: {bg};
+}}
+@define-color accent_color {accent};
+@define-color accent_bg_color {accent};
+@define-color accent_fg_color {bg};
+@define-color theme_selected_bg_color {accent};
+@define-color theme_selected_fg_color {bg};
+checkbutton check:checked,
+checkbutton check:indeterminate,
+checkbutton radio:checked,
+check:checked,
+radio:checked {{
+  background: {accent};
+  border-color: {accent};
+  color: {bg};
+}}
+switch:checked {{
+  background: {accent};
+}}
+*:focus-visible,
+entry:focus-within {{
+  outline-color: {accent};
+}}
 "#,
         bg = p.background,
         fg = p.foreground,

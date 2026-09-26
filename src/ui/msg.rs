@@ -50,6 +50,7 @@ pub enum Msg {
     ToggleHidden,
     ToggleModeButtons,
     ToggleFileIcons,
+    ToggleFlashFeedback,
     ToggleImageScale,
     ImageStep(i32),
     SetCharset(comarchy::lister::Charset),

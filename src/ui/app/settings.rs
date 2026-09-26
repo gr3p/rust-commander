@@ -141,28 +141,54 @@ impl App {
         column.append(&editor_row);
         let (columns_row, columns) = settings_row("Auto column size", self.cfg.auto_columns);
         let tx_columns = tx.clone();
+        let flash = columns_row.clone();
         let click = gtk::GestureClick::new();
-        click.connect_released(move |_, _, _, _| tx_columns.emit(Msg::ToggleAutoColumns));
+        click.connect_released(move |_, _, _, _| {
+            crate::ui::shell::blink_widget(flash.upcast_ref());
+            tx_columns.emit(Msg::ToggleAutoColumns);
+        });
         columns_row.add_controller(click);
         let (hidden_row, hidden) = settings_row("Show hidden files    Ctrl+H", self.state.show_hidden);
         let tx_hidden = tx.clone();
+        let flash = hidden_row.clone();
         let click = gtk::GestureClick::new();
-        click.connect_released(move |_, _, _, _| tx_hidden.emit(Msg::ToggleHidden));
+        click.connect_released(move |_, _, _, _| {
+            crate::ui::shell::blink_widget(flash.upcast_ref());
+            tx_hidden.emit(Msg::ToggleHidden);
+        });
         hidden_row.add_controller(click);
         let (hints_row, hints) = settings_row("Mode buttons", self.cfg.mode_buttons);
         let tx_hints = tx.clone();
+        let flash = hints_row.clone();
         let click = gtk::GestureClick::new();
-        click.connect_released(move |_, _, _, _| tx_hints.emit(Msg::ToggleModeButtons));
+        click.connect_released(move |_, _, _, _| {
+            crate::ui::shell::blink_widget(flash.upcast_ref());
+            tx_hints.emit(Msg::ToggleModeButtons);
+        });
         hints_row.add_controller(click);
         let (icons_row, icons) = settings_row("File icons", self.cfg.file_icons);
         let tx_icons = tx.clone();
+        let flash = icons_row.clone();
         let click = gtk::GestureClick::new();
-        click.connect_released(move |_, _, _, _| tx_icons.emit(Msg::ToggleFileIcons));
+        click.connect_released(move |_, _, _, _| {
+            crate::ui::shell::blink_widget(flash.upcast_ref());
+            tx_icons.emit(Msg::ToggleFileIcons);
+        });
         icons_row.add_controller(click);
+        let (flash_row, flash_switch) = settings_row("Confirmation flash", self.cfg.flash_feedback);
+        let tx_flash = tx.clone();
+        let flash_widget = flash_row.clone();
+        let click = gtk::GestureClick::new();
+        click.connect_released(move |_, _, _, _| {
+            crate::ui::shell::blink_widget(flash_widget.upcast_ref());
+            tx_flash.emit(Msg::ToggleFlashFeedback);
+        });
+        flash_row.add_controller(click);
         column.append(&columns_row);
         column.append(&hidden_row);
         column.append(&hints_row);
         column.append(&icons_row);
+        column.append(&flash_row);
         let palette = theme::load_named(&theme::active_name(&self.cfg.theme, &config::active_theme_path()));
         let color_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         color_row.add_css_class("settings-row");
@@ -170,12 +196,16 @@ impl App {
         color_name.set_xalign(0.0);
         color_name.set_hexpand(true);
         let color_btn = gtk::ColorButton::new();
+        let color_flash = color_btn.clone();
         let shown = if self.cfg.background_color.is_empty() { palette.background.as_str() } else { self.cfg.background_color.as_str() };
         if let Ok(rgba) = gtk::gdk::RGBA::parse(shown) {
             color_btn.set_rgba(&rgba);
         }
         let tx_color = tx.clone();
-        color_btn.connect_color_set(move |btn| tx_color.emit(Msg::BackgroundColor(hex_rgb(&btn.rgba()))));
+        color_btn.connect_color_set(move |btn| {
+            crate::ui::shell::blink_widget(color_flash.upcast_ref());
+            tx_color.emit(Msg::BackgroundColor(hex_rgb(&btn.rgba())));
+        });
         color_row.append(&color_name);
         color_row.append(&color_btn);
         let image_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -191,13 +221,17 @@ impl App {
         pick.append(&image_name);
         pick.append(&image);
         let tx_image = tx.clone();
+        let flash = pick.clone();
         let click = gtk::GestureClick::new();
-        click.connect_released(move |_, _, _, _| tx_image.emit(Msg::PickBackground));
+        click.connect_released(move |_, _, _, _| {
+            crate::ui::shell::blink_widget(flash.upcast_ref());
+            tx_image.emit(Msg::PickBackground);
+        });
         pick.add_controller(click);
         let clear = gtk::Button::with_label("Remove");
         clear.set_sensitive(!self.cfg.background.trim().is_empty());
         let tx_clear = tx.clone();
-        clear.connect_clicked(move |_| tx_clear.emit(Msg::ClearBackground));
+        crate::ui::shell::on_click(&clear, move || tx_clear.emit(Msg::ClearBackground));
         image_row.append(&pick);
         image_row.append(&clear);
         let strength_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -241,7 +275,7 @@ impl App {
         win.add_controller(keys);
         win.present();
         win.grab_focus();
-        self.settings = Some(SettingsUi { window: win, columns, hidden, hints, icons, image, clear, strength_name, strength, editor, editor_ids, editor_guard });
+        self.settings = Some(SettingsUi { window: win, columns, hidden, hints, icons, flash: flash_switch, image, clear, strength_name, strength, editor, editor_ids, editor_guard });
     }
 
     pub(in crate::ui::app) fn set_editor(&mut self, id: String) {
@@ -334,6 +368,13 @@ impl App {
         self.paint_settings_switch();
     }
 
+    pub(in crate::ui::app) fn toggle_flash_feedback(&mut self) {
+        self.cfg.flash_feedback = !self.cfg.flash_feedback;
+        crate::ui::shell::set_flash_enabled(self.cfg.flash_feedback);
+        let _ = config::save(&self.cfg);
+        self.paint_settings_switch();
+    }
+
     pub(in crate::ui::app) fn relayout_columns(&mut self) {
         for pane in 0..2 {
             let id = PaneId::from_index(pane);
@@ -353,6 +394,7 @@ impl App {
         paint_switch(&ui.hidden, self.state.show_hidden);
         paint_switch(&ui.hints, self.cfg.mode_buttons);
         paint_switch(&ui.icons, self.cfg.file_icons);
+        paint_switch(&ui.flash, self.cfg.flash_feedback);
         ui.image.set_text(&image_caption(&self.cfg.background));
         ui.clear.set_sensitive(!self.cfg.background.trim().is_empty());
         let label = if self.background_path().is_empty() { "Opacity" } else { "Image strength" };
@@ -547,7 +589,7 @@ pub(in crate::ui::app) fn commands_row(parent: &gtk::Window) -> gtk::Box {
     let open = gtk::Button::with_label("Commands");
     open.add_css_class("fkey");
     let parent = parent.clone();
-    open.connect_clicked(move |_| show_commands(&parent));
+    crate::ui::shell::on_click(&open, move || show_commands(&parent));
     row.append(&name);
     row.append(&open);
     row
