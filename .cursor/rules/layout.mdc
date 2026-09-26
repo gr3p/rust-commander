@@ -1,0 +1,34 @@
+---
+description: Filkarta för Comarchy. Läs den innan du söker i trädet efter vilken modul som äger ett kommando eller en vy.
+alwaysApply: false
+---
+
+# Karta
+
+Bibliotek i `src/lib.rs`. Fönstret startar i `src/main.rs` via `ui::run`.
+
+| Sök | Fil |
+|---|---|
+| Tangenter, aktiv panel, synk | `src/ui/app.rs` (stor; dela inte upp den) |
+| F3, bild, Lister, Quick View | `src/ui/app/view.rs` |
+| Kopiera, flytta, packa, packa upp, sfv | `src/ui/app/jobs.rs` |
+| F12 | `src/ui/app/settings.rs` |
+| Fönster, paneler, tangentfångst | `src/ui/shell.rs` |
+| Kolumner, ikon, markör | `src/ui/row.rs` |
+| Meddelanden | `src/ui/msg.rs` |
+| Hotlist-fönster | `src/ui/hotlist.rs` |
+| Paneler, Enter i katalog, markering | `src/state.rs` |
+| Kataloglista, sortering, filikoner | `src/listing.rs` |
+| Enter på fil, viewer, editor | `src/ui/app.rs` `open_external`, kommando i `src/external.rs` |
+| Zip och rar | `src/archive.rs`, skapa i `src/pack.rs` |
+| Kopiera, flytta, radera | `src/ops.rs` |
+| Textvisare | `src/lister.rs` |
+| Bilder | `src/imageview.rs` |
+| SFV | `src/sfv.rs` |
+| Config | `src/config.rs`, fil `~/.config/comarchy/config.toml` |
+| Bokmärken | `src/hotlist.rs` |
+| Diskar | `src/places.rs` |
+| Tema | `src/theme.rs` |
+| Rad i listan | `src/entry.rs` |
+| Logg | `src/log.rs`, fil `~/.local/state/comarchy/comarchy.log` |
+| Tester | `tests/acceptance.rs` |

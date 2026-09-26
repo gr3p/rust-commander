@@ -1,0 +1,13 @@
+---
+description: Kommandon gäller den filpanel användaren står i
+alwaysApply: true
+---
+
+# Aktiv panel
+
+Commander har två filpaneler. Den panel som har fokus är källan. Den andra är målet för kopiera och flytta.
+
+- Sätt `state.active` när en fillista får fokus, inte bara när markören flyttar sig.
+- Diskrad, genvägar, Enter, Backspace och övriga navigering byter katalog i den aktiva panelen.
+- F5 och F6 tar filer från den aktiva panelen och lägger dem i den andra.
+- En kontroll som ritas en gång ovanför båda panelerna, till exempel diskraden, får inte hårdkoda vänster panel.
