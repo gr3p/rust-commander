@@ -1,58 +1,58 @@
 # Rust Commander
 
-Fristående dual-pane-filhanterare för Linux. Tokyo Night används tills ett Omarchy-tema finns på en verifierad sökväg.
+Standalone dual-pane file manager for Linux. Tokyo Night is used until an Omarchy theme is found on a verified path.
 
-## Köra på Ubuntu
+## Run on Ubuntu
 
 ```bash
 sudo apt install build-essential pkg-config libgtk-4-dev
 cargo run --release
 ```
 
-`bubblewrap` behövs bara för `scripts/test-sandbox.sh`, inte för att starta programmet. Omarchy behöver inte vara installerat.
+`bubblewrap` is only needed for `scripts/test-sandbox.sh`, not to start the program. Omarchy does not need to be installed.
 
-Loggen skrivs till `~/.local/state/rust-commander/rust-commander.log`.
+The log is written to `~/.local/state/rust-commander/rust-commander.log`.
 
-Prova kopiera, flytta och radera i en skräpkatalog, till exempel `~/rust-commander-prov` med två undermappar.
+Try copy, move, and delete in a scratch directory, for example `~/rust-commander-prov` with two subdirectories.
 
-1. Öppna vänster panel i den ena mappen och höger i den andra.
-2. F5 kopierar en fil och en mapp med innehåll till höger.
-3. F6 flyttar en fil tillbaka.
-4. F7 skapar en mapp. Shift+F6 byter namn på den.
-5. F8 lägger en fil i papperskorgen. Återställ den från korgen om du vill se att den inte är borta på riktigt.
-6. F3 visar en textfil, eller en bild i ett eget fönster. Ctrl+Q förhandsvisar i den andra panelen. Vänster och höger byter bild i den mappen.
-7. Stäng och starta igen. Fönstret kommer tillbaka.
+1. Open the left panel in one folder and the right panel in the other.
+2. F5 copies a file and a folder with contents to the right.
+3. F6 moves a file back.
+4. F7 creates a folder. Shift+F6 renames it.
+5. F8 moves a file to the trash. Restore it from the trash if you want to see that it is not really gone.
+6. F3 shows a text file, or an image in its own window. Ctrl+Q previews in the other panel. Left and right change the image in that folder.
+7. Close and start again. The window comes back.
 
-## Tangenter
+## Keys
 
-Tab byter panel. Upp och ned flyttar markören. Space markerar raden under markören. Insert markerar och går till nästa rad. F2 laddar om. Ctrl+S filtrerar filnamn i aktiv panel: vanlig text matchar delar av namn, medan `*.md` eller `edit?.txt` använder `*` och `?` mot hela namnet. Ctrl+Shift+S söker fil- och katalognamn från aktiv panels katalog, även i undermappar. Sökfönstret kan begränsa sökningen till filer, välja dolda namn och skiftlägeskänslighet, avbryta en sökning och gå till en träff. Ctrl+H visar eller döljer punktfiler.
+Tab switches panel. Up and down move the cursor. Space marks the row under the cursor. Insert marks and moves to the next row. F2 reloads. Ctrl+S filters file names in the active panel: plain text matches parts of names, while `*.md` or `edit?.txt` uses `*` and `?` against the whole name. Ctrl+Shift+S searches file and directory names from the active panel's directory, including subdirectories. The search window can limit the search to files, choose hidden names and case sensitivity, cancel a search, and go to a hit. Ctrl+H shows or hides dotfiles.
 
-F3 visar text eller bild. I bildfönstret byter piltangenterna bild i mappen där fönstret öppnades. När Quick View eller bildfönstret visar en bild byts knapparna längst ner till S Fit eller S 1:1. S på en textfil är fortfarande ASCII. F4 editor, Shift+F4 ny fil, F5 kopiera, Shift+F5 kopiera med nytt namn, F6 flytta, Shift+F6 byt namn, F7 ny mapp, F8 papperskorg, Shift+F8 radera permanent.
+F3 shows text or an image. In the image window the arrow keys change the image in the folder where the window was opened. When Quick View or the image window shows an image, the buttons at the bottom change to S Fit or S 1:1. S on a text file is still ASCII. F4 editor, Shift+F4 new file, F5 copy, Shift+F5 copy with a new name, F6 move, Shift+F6 rename, F7 new folder, F8 trash, Shift+F8 delete permanently.
 
-Speciallägen byter knapparna längst ner i huvudfönstret till kommandon för det läget. Raden stängs av med Mode buttons i F12.
+Special modes change the buttons at the bottom of the main window to commands for that mode. The row is turned off with Mode buttons in F12.
 
-Alt+F5 packar markerade filer. Ändelsen väljer format: `.zip` byggs in, `.7z` använder 7-Zip (`7z` eller `7zz`, till exempel `/usr/bin/7z`) och `.rar` använder RARLAB `rar` (till exempel `/usr/bin/rar`). `unrar` packar inte. Sökvägarna sätts i F12. Tomt fält söker i PATH.
+Alt+F5 packs selected files. The extension chooses the format: `.zip` is built in, `.7z` uses 7-Zip (`7z` or `7zz`, for example `/usr/bin/7z`) and `.rar` uses RARLAB `rar` (for example `/usr/bin/rar`). `unrar` does not pack. The paths are set in F12. An empty field searches PATH.
 
-Alt+F9 packar upp ett zip eller rar till den andra panelen och visar fillistan. Ctrl+Alt+F10 packar upp hela arkivet i panelen där arkivet ligger. När markören står på ett zip- eller rar-arkiv visar den övre knappraden längst ner `Alt+F9 Unpack to right panel` (eller left, beroende på aktiv panel) och `Ctrl+Alt+F10 Extract here`. F-tangenterna ligger på raden under. Progressfönstret visar vilken rar-volym som läses (`From:`), målmappen (`To:`) och vilken fil som packas upp. Trasiga filer hoppas över och listas när uppackningen är klar. Saknas en volym står det vilken. Enter på en `.sfv` kontrollerar CRC32. Shift+F9 skapar en `.sfv` för det som är markerat.
+Alt+F9 unpacks a zip or rar into the other panel and shows the file list. Ctrl+Alt+F10 unpacks the whole archive in the panel where the archive is. When the cursor is on a zip or rar archive, the upper button row at the bottom shows `Alt+F9 Unpack to right panel` (or left, depending on the active panel) and `Ctrl+Alt+F10 Extract here`. The F keys are on the row below. The progress window shows which rar volume is being read (`From:`), the target folder (`To:`), and which file is being unpacked. Broken files are skipped and listed when unpacking finishes. If a volume is missing, it says which one. Enter on a `.sfv` checks CRC32. Shift+F9 creates a `.sfv` for the selection.
 
-Ctrl+1 till Ctrl+9 väljer disk i den aktiva panelen. Siffran står före ikonen. Ctrl+F3 namn, Ctrl+F4 ändelse, Ctrl+F5 tid, Ctrl+F6 storlek. Alt+F1 och Alt+F2 är platser. Alt+F3 är extern visare. Ctrl+Q förhandsvisar. Där byter vänster och höger bild i den mappen. Ctrl+T ny flik, Ctrl+W stäng flik, Alt+vänster och Alt+höger är historik.
+Ctrl+1 to Ctrl+9 selects a drive in the active panel. The number is shown before the icon. Ctrl+F3 name, Ctrl+F4 extension, Ctrl+F5 time, Ctrl+F6 size. Alt+F1 and Alt+F2 are places. Alt+F3 is the external viewer. Ctrl+Q previews. There, left and right change the image in that folder. Ctrl+T new tab, Ctrl+W close tab, Alt+left and Alt+right are history.
 
-## Tester
+## Tests
 
-`scripts/test-sandbox.sh` bygger på värden och kör acceptanstesterna i bubblewrap. Skrivbar yta är en tmpfs på 256 MiB. Den riktiga hemkatalogen monteras inte. Varje filtest lägger landlock på sin fixtur innan något ändras.
+`scripts/test-sandbox.sh` builds on the host and runs the acceptance tests in bubblewrap. The writable area is a 256 MiB tmpfs. The real home directory is not mounted. Each file test applies landlock to its fixture before anything is changed.
 
-`scripts/gui-smoke.sh` gör samma sak mot fönstret och binder bara Wayland-socketen.
+`scripts/gui-smoke.sh` does the same against the window and binds only the Wayland socket.
 
-## Checklista
+## Checklist
 
-MVP, med grönt acceptanstest: två paneler, kopiera och flytta träd, konflikt, Lister (text, binärt, hex, fönsterläsning), Quick View, bilder i Quick View och F3, filter, sortering, historik, bokmärken och flikar.
+MVP, with a green acceptance test: two panels, copy and move trees, conflict, Lister (text, binary, hex, windowed reading), Quick View, images in Quick View and F3, filter, sorting, history, bookmarks, and tabs.
 
-Senare, en i taget: flerval-namnbyte (Ctrl+M), sökning i filinnehåll och avancerade sökvillkor, arkiv som mappar, katalogsynk.
+Later, one at a time: multi-select rename (Ctrl+M), search in file contents and advanced search conditions, archives as folders, directory sync.
 
-Utelämnat: Windows-byggen, nätverksgrannskap, parallellport, USB-kabel, UAC, Windows-kontextmeny, WLX/WCX/WDX/WFX och IrfanView/XnView.
+Left out: Windows builds, network neighborhood, parallel port, USB cable, UAC, Windows context menu, WLX/WCX/WDX/WFX, and IrfanView/XnView.
 
 ## Omarchy
 
-`omarchy/theme-set` tar temanamnet som första argument, skriver `~/.config/rust-commander/active-theme` och skickar SIGUSR1 till Rust Commander. Teman läses från `/usr/share/omarchy/themes/<namn>/colors.toml` eller `~/.config/omarchy/themes/<namn>/colors.toml`. Saknas filen används Tokyo Night.
+`omarchy/theme-set` takes the theme name as the first argument, writes `~/.config/rust-commander/active-theme`, and sends SIGUSR1 to Rust Commander. Themes are read from `/usr/share/omarchy/themes/<name>/colors.toml` or `~/.config/omarchy/themes/<name>/colors.toml`. If the file is missing, Tokyo Night is used.
 
-`.desktop`-filen ligger i `data/rust-commander.desktop`.
+The `.desktop` file is in `data/rust-commander.desktop`.
