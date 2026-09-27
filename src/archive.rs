@@ -76,8 +76,11 @@ impl From<unrar_ng::error::UnrarError> for Fail {
 }
 
 pub fn unpack_mark(name: &str) -> &'static str {
-    if name.len() >= 4 && name.as_bytes()[name.len() - 4..].eq_ignore_ascii_case(b".zip") {
+    let bytes = name.as_bytes();
+    if bytes.len() >= 4 && bytes[bytes.len() - 4..].eq_ignore_ascii_case(b".zip") {
         "Z"
+    } else if bytes.len() >= 4 && bytes[bytes.len() - 4..].eq_ignore_ascii_case(b".tar") {
+        "T"
     } else {
         ""
     }
@@ -85,7 +88,7 @@ pub fn unpack_mark(name: &str) -> &'static str {
 
 pub fn is_archive(path: &Path) -> bool {
     match extension(path) {
-        Some("zip" | "rar") => true,
+        Some("zip" | "rar" | "tar") => true,
         _ => false,
     }
 }
@@ -94,6 +97,7 @@ pub fn list(path: &Path, password: Option<&str>) -> Result<Listed, Fail> {
     match extension(path) {
         Some("zip") => list_zip(path, password),
         Some("rar") => list_rar(path, password),
+        Some("tar") => list_tar(path),
         _ => Err(Fail::Message("Not an archive".into())),
     }
 }
@@ -110,6 +114,7 @@ pub fn extract(
     match extension(path) {
         Some("zip") => extract_zip(path, dest, names, password, cancel, progress, conflict),
         Some("rar") => extract_rar(path, dest, names, password, cancel, progress, conflict),
+        Some("tar") => extract_tar(path, dest, names, cancel, progress, conflict),
         _ => Err(Fail::Message("Not an archive".into())),
     }
 }
@@ -120,6 +125,8 @@ fn extension(path: &Path) -> Option<&str> {
         Some("zip")
     } else if ext.eq_ignore_ascii_case("rar") {
         Some("rar")
+    } else if ext.eq_ignore_ascii_case("tar") {
+        Some("tar")
     } else {
         None
     }
@@ -277,6 +284,194 @@ fn zip_time(file: &zip::read::ZipFile<'_, impl Read>) -> Option<std::time::Syste
     };
     let secs = u64::try_from(secs).ok()?;
     std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs))
+}
+
+enum TarKind {
+    File,
+    Dir,
+    Skip(&'static str),
+}
+
+fn open_tar(path: &Path) -> Result<tar::Archive<File>, Fail> {
+    let mut archive = tar::Archive::new(File::open(path)?);
+    archive.set_preserve_permissions(false);
+    archive.set_preserve_ownerships(false);
+    archive.set_preserve_mtime(false);
+    Ok(archive)
+}
+
+fn tar_kind(kind: tar::EntryType) -> Option<TarKind> {
+    if kind.is_file() || kind.is_contiguous() {
+        Some(TarKind::File)
+    } else if kind.is_dir() {
+        Some(TarKind::Dir)
+    } else if kind.is_symlink() {
+        Some(TarKind::Skip("symlink"))
+    } else if kind.is_hard_link() {
+        Some(TarKind::Skip("hard link"))
+    } else if kind.is_fifo() {
+        Some(TarKind::Skip("fifo"))
+    } else if kind.is_character_special() || kind.is_block_special() {
+        Some(TarKind::Skip("device"))
+    } else if kind.is_gnu_sparse() {
+        Some(TarKind::Skip("sparse"))
+    } else if kind.is_gnu_longname()
+        || kind.is_gnu_longlink()
+        || kind.is_pax_local_extensions()
+        || kind.is_pax_global_extensions()
+    {
+        None
+    } else {
+        Some(TarKind::Skip("special"))
+    }
+}
+
+enum Seen {
+    File { name: String, size: u64 },
+    Dir { name: String },
+    Skip { name: String, kind: &'static str },
+}
+
+fn classify(entry: &tar::Entry<File>) -> Result<Option<Seen>, Fail> {
+    let Some(kind) = tar_kind(entry.header().entry_type()) else { return Ok(None) };
+    let path = entry.path()?;
+    let Some(raw) = path.to_str() else { return Ok(None) };
+    let Some(name) = slash(raw) else { return Ok(None) };
+    Ok(Some(match kind {
+        TarKind::File => Seen::File { name, size: entry.size() },
+        TarKind::Dir => Seen::Dir { name },
+        TarKind::Skip(kind) => Seen::Skip { name, kind },
+    }))
+}
+
+fn list_tar(path: &Path) -> Result<Listed, Fail> {
+    let mut archive = open_tar(path)?;
+    let mut listed = Listed { members: Vec::new(), needs_password: false };
+    for entry in archive.entries()? {
+        match classify(&entry?)? {
+            Some(Seen::File { name, size }) => listed.members.push(Member { name, size, dir: false }),
+            Some(Seen::Dir { name }) => listed.members.push(Member { name, size: 0, dir: true }),
+            _ => {}
+        }
+    }
+    Ok(listed)
+}
+
+// Headers once, then the bytes. Dropping an unread entry drains its body so the next header stays aligned.
+fn tar_span(path: &Path, names: Option<&HashSet<String>>, cancel: &AtomicBool) -> Result<Option<(u64, u64)>, Fail> {
+    let mut archive = open_tar(path)?;
+    let mut total = 0u64;
+    let mut files = 0u64;
+    for entry in archive.entries()? {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let Some(Seen::File { name, size }) = classify(&entry?)? else { continue };
+        if names.is_some_and(|set| !set.contains(&name)) {
+            continue;
+        }
+        total = total.saturating_add(size);
+        files += 1;
+    }
+    Ok(Some((total, files)))
+}
+
+fn extract_tar(
+    path: &Path,
+    dest: &Path,
+    names: Option<&HashSet<String>>,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(&Progress),
+    conflict: &mut dyn FnMut(&Path, &Path) -> Choice,
+) -> Result<Report, Fail> {
+    let Some((total, file_total)) = tar_span(path, names, cancel)? else {
+        return Ok(Report { cancelled: true, files: 0 });
+    };
+    ensure_room(dest, total)?;
+    let mut archive = open_tar(path)?;
+    let mut file_index = 0u64;
+    let mut written = 0u64;
+    let mut files = 0u64;
+    let mut skipped = Vec::new();
+    let mut policy = Policy::Ask;
+    for entry in archive.entries()? {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(Report { cancelled: true, files });
+        }
+        let mut entry = entry?;
+        let Some(seen) = classify(&entry)? else { continue };
+        let (name, dir, size) = match seen {
+            Seen::Skip { name, kind } => {
+                if names.is_none_or(|set| set.contains(&name)) {
+                    skipped.push(format!("{name} ({kind})"));
+                }
+                continue;
+            }
+            Seen::Dir { name } => (name, true, 0),
+            Seen::File { name, size } => (name, false, size),
+        };
+        if names.is_some_and(|set| !set.contains(&name)) {
+            continue;
+        }
+        let rel = PathBuf::from(&name);
+        let target = located(dest, &rel)?;
+        if dir {
+            ensure_dir(&target)?;
+            continue;
+        }
+        match keep(&target, &rel, &mut policy, conflict)? {
+            Keep::Skip => continue,
+            Keep::Cancel => return Ok(Report { cancelled: true, files }),
+            Keep::Write => {}
+        }
+        let mode = if entry.header().mode().ok().is_some_and(|mode| mode & 0o111 != 0) { 0o755 } else { 0o644 };
+        let time = tar_mtime(entry.header());
+        file_index += 1;
+        let note = format!("{}\n{}", volume_label(path), file_line(file_index, file_total, &name));
+        let mut step = |update: &Progress| {
+            let mut update = update.clone();
+            update.note = note.clone();
+            progress(&update);
+        };
+        match write_reader(&mut entry, &target, mode, size, &mut written, total, &rel, cancel, &mut step) {
+            Ok(out) => {
+                if let Some(time) = time {
+                    let _ = out.set_modified(time);
+                }
+                files += 1;
+            }
+            Err(Fail::Cancelled) => {
+                let _ = fs::remove_file(&target);
+                return Ok(Report { cancelled: true, files });
+            }
+            Err(err) => {
+                let _ = fs::remove_file(&target);
+                return Err(err);
+            }
+        }
+    }
+    skipped_report(files, skipped)
+}
+
+fn tar_mtime(header: &tar::Header) -> Option<std::time::SystemTime> {
+    let secs = header.mtime().ok()?;
+    std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs))
+}
+
+fn skipped_report(files: u64, skipped: Vec<String>) -> Result<Report, Fail> {
+    if skipped.is_empty() {
+        return Ok(Report { cancelled: false, files });
+    }
+    let word = if skipped.len() == 1 { "entry" } else { "entries" };
+    let mut text = format!("Skipped {} special {word}, {files} unpacked OK", skipped.len());
+    for line in skipped.iter().take(20) {
+        text.push_str("\n  ");
+        text.push_str(line);
+    }
+    if skipped.len() > 20 {
+        text.push_str(&format!("\n  ... {} more", skipped.len() - 20));
+    }
+    Err(Fail::Message(text))
 }
 
 fn list_rar(path: &Path, password: Option<&str>) -> Result<Listed, Fail> {
@@ -966,7 +1161,113 @@ mod tests {
     fn zip_keeps_unpack_mark() {
         assert_eq!(unpack_mark("Movie.rar"), "");
         assert_eq!(unpack_mark("notes.ZIP"), "Z");
+        assert_eq!(unpack_mark("notes.TAR"), "T");
         assert_eq!(unpack_mark("notes.txt"), "");
+        assert!(is_archive(Path::new("notes.tar")));
+        assert!(!is_archive(Path::new("notes.tar.gz")));
+    }
+
+    fn tar_header(name: &str, body: &[u8]) -> Vec<u8> {
+        let mut header = tar::Header::new_gnu();
+        header.set_path("x").unwrap();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        let mut bytes = *header.as_bytes();
+        bytes[..100].fill(0);
+        bytes[..name.len()].copy_from_slice(name.as_bytes());
+        bytes[148..156].fill(b' ');
+        let sum: u32 = bytes.iter().map(|b| u32::from(*b)).sum();
+        let octal = format!("{sum:o}");
+        let mut field = [b'0'; 8];
+        field[7] = 0;
+        for (i, digit) in octal.bytes().rev().enumerate() {
+            field[6 - i] = digit;
+        }
+        bytes[148..156].copy_from_slice(&field);
+        let mut out = bytes.to_vec();
+        out.extend_from_slice(body);
+        out.extend(std::iter::repeat(0).take((512 - (body.len() % 512)) % 512));
+        out
+    }
+
+    #[test]
+    fn unpacks_tar_tree_and_skips_escape_and_links() {
+        let dir = tmp("tar");
+        let archive = dir.join("sample.tar");
+        let mut builder = tar::Builder::new(File::create(&archive).unwrap());
+        let mut file = tar::Header::new_gnu();
+        file.set_size(5);
+        file.set_mode(0o644);
+        file.set_mtime(1_700_000_000);
+        builder.append_data(&mut file, "ok.txt", &b"hello"[..]).unwrap();
+        let mut dir_header = tar::Header::new_gnu();
+        dir_header.set_entry_type(tar::EntryType::dir());
+        dir_header.set_size(0);
+        dir_header.set_mode(0o755);
+        builder.append_data(&mut dir_header, "sub", std::io::empty()).unwrap();
+        let mut nested = tar::Header::new_gnu();
+        nested.set_size(6);
+        nested.set_mode(0o644);
+        builder.append_data(&mut nested, "sub/note.txt", &b"nested"[..]).unwrap();
+        let long = format!("{}.txt", "n".repeat(120));
+        let mut long_header = tar::Header::new_gnu();
+        long_header.set_size(4);
+        long_header.set_mode(0o644);
+        builder.append_data(&mut long_header, &long, &b"long"[..]).unwrap();
+        let mut exec = tar::Header::new_gnu();
+        exec.set_size(2);
+        exec.set_mode(0o755);
+        builder.append_data(&mut exec, "run.sh", &b"sh"[..]).unwrap();
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::symlink());
+        link.set_size(0);
+        builder.append_link(&mut link, "link", "ok.txt").unwrap();
+        let mut hard = tar::Header::new_gnu();
+        hard.set_entry_type(tar::EntryType::hard_link());
+        hard.set_size(0);
+        builder.append_link(&mut hard, "hard", "ok.txt").unwrap();
+        builder.get_mut().write_all(&tar_header("../evil.txt", b"nope")).unwrap();
+        builder.get_mut().write_all(&tar_header("/tmp/rust-commander-tar-abs.txt", b"nope")).unwrap();
+        builder.finish().unwrap();
+
+        let dest = dir.join("out");
+        fs::create_dir(&dest).unwrap();
+        let cancel = AtomicBool::new(false);
+        let err = extract(&archive, &dest, None, None, &cancel, &mut |_| {}, &mut no_conflict).unwrap_err().to_string();
+        assert!(err.starts_with("Skipped 2 special entries, 4 unpacked OK"), "{err}");
+        assert!(err.contains("link (symlink)"), "{err}");
+        assert!(err.contains("hard (hard link)"), "{err}");
+        assert_eq!(fs::read_to_string(dest.join("ok.txt")).unwrap(), "hello");
+        assert_eq!(fs::read_to_string(dest.join("sub/note.txt")).unwrap(), "nested");
+        assert_eq!(fs::read_to_string(dest.join(&long)).unwrap(), "long");
+        assert!(dest.join("sub").is_dir());
+        assert_ne!(fs::metadata(dest.join("run.sh")).unwrap().permissions().mode() & 0o111, 0);
+        assert_eq!(fs::metadata(dest.join("ok.txt")).unwrap().permissions().mode() & 0o111, 0);
+        let modified = fs::metadata(dest.join("ok.txt")).unwrap().modified().unwrap();
+        assert!(modified >= std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000));
+        assert!(!dir.join("evil.txt").exists());
+        assert!(!Path::new("/tmp/rust-commander-tar-abs.txt").exists());
+        assert!(!dest.join("link").exists());
+        assert!(!dest.join("hard").exists());
+        let listed = list(&archive, Some("ignored")).unwrap();
+        let names: Vec<_> = listed.members.iter().map(|member| member.name.as_str()).collect();
+        assert!(names.contains(&"ok.txt"));
+        assert!(names.contains(&"sub"));
+        assert!(names.iter().any(|name| *name == long));
+        assert!(!names.iter().any(|name| *name == "link" || *name == "hard" || name.contains("evil")));
+        assert!(!listed.needs_password);
+
+        let mut only = HashSet::new();
+        only.insert("ok.txt".into());
+        let picked = dir.join("picked");
+        fs::create_dir(&picked).unwrap();
+        let report = extract(&archive, &picked, Some(&only), None, &cancel, &mut |_| {}, &mut no_conflict).unwrap();
+        assert_eq!(report.files, 1);
+        assert!(picked.join("ok.txt").is_file());
+        assert!(!picked.join("sub").exists());
+        assert!(!picked.join("link").exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -157,6 +157,7 @@ impl App {
             if !matches!(work, Work::Transfer | Work::Delete) {
                 let title = match work {
                     Work::Unpack if err.starts_with("Archive is damaged") => "Damaged archive",
+                    Work::Unpack if err.starts_with("Skipped ") => "Unpack",
                     Work::Unpack => "Unpack failed",
                     Work::Pack => "Pack failed",
                     Work::Sfv | Work::Verify => "SFV failed",
@@ -605,7 +606,7 @@ impl App {
         let sources = self.state.selected_paths(self.state.active);
         let cwd = self.state.tab(self.state.active).path.clone();
         let Some(pipes) = self.open_job(Work::Pack) else { return };
-        self.status = "Packing".into();
+        self.status = "Compressing...".into();
         rust_commander::log::info(&format!("pack {}", dest.display()));
         self.ensure_progress();
         let _ = sender;
@@ -830,13 +831,14 @@ impl App {
             return;
         }
         let win = gtk::Window::new();
-        win.set_title(Some("Working"));
+        let caption = if self.status.is_empty() { "Working" } else { self.status.as_str() };
+        win.set_title(Some(caption));
         win.set_modal(true);
         win.set_transient_for(Some(&self.shell.window));
         win.set_default_width(520);
         let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
         column.set_margin_all(12);
-        let label = gtk::Label::new(Some(if self.status.is_empty() { "Working" } else { &self.status }));
+        let label = gtk::Label::new(Some(caption));
         label.set_wrap(true);
         label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         label.set_xalign(0.0);

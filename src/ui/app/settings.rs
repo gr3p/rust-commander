@@ -23,9 +23,20 @@ impl App {
         let sheet = format!(
             "window, label, entry, button {{ font-family: \"JetBrainsMono Nerd Font\", \"JetBrains Mono\", monospace; font-size: 13px; }}\ntextview, textview text {{ font-family: \"DejaVu Sans Mono\", \"JetBrains Mono\", monospace; font-size: 13px; }}\n{}{}",
             theme::stylesheet(palette),
-            theme::list_background(palette, &self.cfg.background_color, &image, self.cfg.background_alpha),
+            theme::list_background(
+                palette,
+                &self.cfg.background_color,
+                &image,
+                self.cfg.background_alpha,
+                self.cfg.background_stretch,
+            ),
         );
         self.shell.css.load_from_data(&sheet);
+        let name = theme::active_name(&self.cfg.theme, &config::active_theme_path());
+        let terminal = theme::load_terminal(&name, &self.cfg.background_color);
+        for shell in &self.shell.shells {
+            crate::ui::shell::paint_terminal(&shell.term, &terminal);
+        }
     }
 
     pub(in crate::ui::app) fn watch_columns(&self, sender: &ComponentSender<Self>) {
@@ -195,14 +206,14 @@ impl App {
         let color_name = gtk::Label::new(Some("Background color"));
         color_name.set_xalign(0.0);
         color_name.set_hexpand(true);
-        let color_btn = gtk::ColorButton::new();
+        let color_btn = gtk::ColorDialogButton::new(Some(gtk::ColorDialog::new()));
         let color_flash = color_btn.clone();
         let shown = if self.cfg.background_color.is_empty() { palette.background.as_str() } else { self.cfg.background_color.as_str() };
         if let Ok(rgba) = gtk::gdk::RGBA::parse(shown) {
             color_btn.set_rgba(&rgba);
         }
         let tx_color = tx.clone();
-        color_btn.connect_color_set(move |btn| {
+        color_btn.connect_rgba_notify(move |btn| {
             crate::ui::shell::blink_widget(color_flash.upcast_ref());
             tx_color.emit(Msg::BackgroundColor(hex_rgb(&btn.rgba())));
         });
@@ -234,6 +245,15 @@ impl App {
         crate::ui::shell::on_click(&clear, move || tx_clear.emit(Msg::ClearBackground));
         image_row.append(&pick);
         image_row.append(&clear);
+        let (stretch_row, stretch) = settings_row("Stretch background", self.cfg.background_stretch);
+        let tx_stretch = tx.clone();
+        let flash = stretch_row.clone();
+        let click = gtk::GestureClick::new();
+        click.connect_released(move |_, _, _, _| {
+            crate::ui::shell::blink_widget(flash.upcast_ref());
+            tx_stretch.emit(Msg::ToggleBackgroundStretch);
+        });
+        stretch_row.add_controller(click);
         let strength_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         strength_row.add_css_class("settings-row");
         let strength_label = if self.background_path().is_empty() { "Opacity" } else { "Image strength" };
@@ -251,6 +271,7 @@ impl App {
         strength_row.append(&strength);
         column.append(&color_row);
         column.append(&image_row);
+        column.append(&stretch_row);
         column.append(&strength_row);
         column.append(&tool_row("7-Zip", rust_commander::pack::SEVEN_ZIP_HINT, &self.cfg.seven_zip, "/usr/bin/7z", tx.clone(), true));
         column.append(&tool_row("RAR", rust_commander::pack::RAR_HINT, &self.cfg.rar, "/usr/bin/rar", tx.clone(), false));
@@ -275,7 +296,22 @@ impl App {
         win.add_controller(keys);
         win.present();
         win.grab_focus();
-        self.settings = Some(SettingsUi { window: win, columns, hidden, hints, icons, flash: flash_switch, image, clear, strength_name, strength, editor, editor_ids, editor_guard });
+        self.settings = Some(SettingsUi {
+            window: win,
+            columns,
+            hidden,
+            hints,
+            icons,
+            flash: flash_switch,
+            image,
+            clear,
+            stretch,
+            strength_name,
+            strength,
+            editor,
+            editor_ids,
+            editor_guard,
+        });
     }
 
     pub(in crate::ui::app) fn set_editor(&mut self, id: String) {
@@ -296,31 +332,23 @@ impl App {
 
     pub(in crate::ui::app) fn pick_editor(&mut self, sender: &ComponentSender<Self>) {
         let Some(parent) = self.settings.as_ref().map(|ui| ui.window.clone()) else { return };
-        let dialog = gtk::FileChooserNative::new(
-            Some("Editor program"),
-            Some(&parent),
-            gtk::FileChooserAction::Open,
-            Some("Choose"),
-            Some("Cancel"),
-        );
+        let dialog = gtk::FileDialog::new();
+        dialog.set_title("Editor program");
         dialog.set_modal(true);
+        dialog.set_accept_label(Some("Choose"));
         let bin = PathBuf::from("/usr/bin");
         if bin.is_dir() {
-            let _ = dialog.set_current_folder(Some(&gtk::gio::File::for_path(&bin)));
+            dialog.set_initial_folder(Some(&gtk::gio::File::for_path(&bin)));
         }
         let tx = sender.input_sender().clone();
-        dialog.connect_response(move |dialog, response| {
-            if response == gtk::ResponseType::Accept {
-                if let Some(path) = dialog.file().and_then(|file| file.path()) {
+        dialog.open(Some(&parent), None::<&gtk::gio::Cancellable>, move |result| match result {
+            Ok(file) => {
+                if let Some(path) = file.path() {
                     tx.emit(Msg::SetEditor(rust_commander::external::editor_id_for_path(&path)));
                 }
-            } else {
-                tx.emit(Msg::EditorPickCancelled);
             }
-            dialog.hide();
+            Err(_) => tx.emit(Msg::EditorPickCancelled),
         });
-        dialog.show();
-        self.chooser = Some(dialog);
     }
 
     pub(in crate::ui::app) fn close_settings(&mut self) {
@@ -375,6 +403,13 @@ impl App {
         self.paint_settings_switch();
     }
 
+    pub(in crate::ui::app) fn toggle_background_stretch(&mut self) {
+        self.cfg.background_stretch = !self.cfg.background_stretch;
+        let _ = config::save(&self.cfg);
+        self.restyle();
+        self.paint_settings_switch();
+    }
+
     pub(in crate::ui::app) fn relayout_columns(&mut self) {
         for pane in 0..2 {
             let id = PaneId::from_index(pane);
@@ -395,6 +430,7 @@ impl App {
         paint_switch(&ui.hints, self.cfg.mode_buttons);
         paint_switch(&ui.icons, self.cfg.file_icons);
         paint_switch(&ui.flash, self.cfg.flash_feedback);
+        paint_switch(&ui.stretch, self.cfg.background_stretch);
         ui.image.set_text(&image_caption(&self.cfg.background));
         ui.clear.set_sensitive(!self.cfg.background.trim().is_empty());
         let label = if self.background_path().is_empty() { "Opacity" } else { "Image strength" };
@@ -413,41 +449,34 @@ impl App {
 
     pub(in crate::ui::app) fn pick_background(&mut self, sender: &ComponentSender<Self>) {
         let Some(parent) = self.settings.as_ref().map(|ui| ui.window.clone()) else { return };
-        let dialog = gtk::FileChooserNative::new(
-            Some("Background image"),
-            Some(&parent),
-            gtk::FileChooserAction::Open,
-            Some("Open"),
-            Some("Cancel"),
-        );
+        let dialog = gtk::FileDialog::new();
+        dialog.set_title("Background image");
         dialog.set_modal(true);
+        dialog.set_accept_label(Some("Open"));
         let filter = gtk::FileFilter::new();
         filter.set_name(Some("Images"));
         filter.add_mime_type("image/png");
         filter.add_mime_type("image/jpeg");
         filter.add_mime_type("image/webp");
         filter.add_mime_type("image/gif");
-        dialog.set_filter(&filter);
+        dialog.set_default_filter(Some(&filter));
         let path = PathBuf::from(&self.cfg.background);
         if path.is_file() {
-            let _ = dialog.set_file(&gtk::gio::File::for_path(&path));
+            dialog.set_initial_file(Some(&gtk::gio::File::for_path(&path)));
         } else {
             let pictures = home_dir().join("Pictures");
             if pictures.is_dir() {
-                let _ = dialog.set_current_folder(Some(&gtk::gio::File::for_path(&pictures)));
+                dialog.set_initial_folder(Some(&gtk::gio::File::for_path(&pictures)));
             }
         }
         let tx = sender.input_sender().clone();
-        dialog.connect_response(move |dialog, response| {
-            if response == gtk::ResponseType::Accept {
-                if let Some(path) = dialog.file().and_then(|file| file.path()) {
+        dialog.open(Some(&parent), None::<&gtk::gio::Cancellable>, move |result| {
+            if let Ok(file) = result {
+                if let Some(path) = file.path() {
                     tx.emit(Msg::BackgroundImage(path));
                 }
             }
-            dialog.hide();
         });
-        dialog.show();
-        self.chooser = Some(dialog);
     }
 
     pub(in crate::ui::app) fn clear_background(&mut self) {
@@ -466,7 +495,6 @@ impl App {
     }
 
     pub(in crate::ui::app) fn set_background_image(&mut self, path: PathBuf) {
-        self.chooser = None;
         self.cfg.background = path.display().to_string();
         if self.cfg.background_alpha == 0 {
             self.cfg.background_alpha = 70;
@@ -566,7 +594,7 @@ pub(in crate::ui::app) fn focused_control(win: &gtk::Window) -> bool {
     let Some(mut widget) = relm4::gtk::prelude::GtkWindowExt::focus(win) else { return false };
     loop {
         if widget.downcast_ref::<gtk::Scale>().is_some()
-            || widget.downcast_ref::<gtk::ColorButton>().is_some()
+            || widget.downcast_ref::<gtk::ColorDialogButton>().is_some()
             || widget.downcast_ref::<gtk::DropDown>().is_some()
             || widget.downcast_ref::<gtk::Entry>().is_some()
             || widget.downcast_ref::<gtk::Button>().is_some()
@@ -659,7 +687,7 @@ pub(in crate::ui::app) fn show_commands(parent: &gtk::Window) {
             ("Alt+F5", "Pack"),
             ("Ctrl+Shift+F5", "Pack here"),
             ("Alt+F9", "Unpack to other panel"),
-            ("Ctrl+Alt+F10", "Extract here"),
+            ("Shift+Alt+F9", "Extract here"),
             ("Shift+F9", "Create SFV"),
             ("Enter", "Verify SFV"),
         ]),
@@ -667,6 +695,10 @@ pub(in crate::ui::app) fn show_commands(parent: &gtk::Window) {
             ("Ctrl+S", "Filter"),
             ("Ctrl+H", "Hidden"),
             ("Ctrl+Q", "Quick view"),
+            ("F9", "Terminal in other panel"),
+            ("Ctrl+F9", "New shell"),
+            ("Ctrl+W", "Close shell"),
+            ("Alt+1…9", "Switch shell"),
             ("Alt+F3", "Viewer"),
             ("Escape", "Close view"),
             ("S", "Fit or 1:1"),

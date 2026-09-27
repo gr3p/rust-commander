@@ -2,14 +2,29 @@
 
 Standalone dual-pane file manager for Linux. Tokyo Night is used until an Omarchy theme is found on a verified path.
 
-## Run on Ubuntu
+## Build on Linux
 
 ```bash
-sudo apt install build-essential pkg-config libgtk-4-dev
+# Ubuntu / Debian
+sudo apt install build-essential pkg-config libgtk-4-dev libvte-2.91-gtk4-dev
+
+# Arch / Omarchy
+sudo pacman -S --needed base-devel pkgconf gtk4 vte4
+```
+
+```bash
 cargo run --release
 ```
 
-`bubblewrap` is only needed for `scripts/test-sandbox.sh`, not to start the program. Omarchy does not need to be installed.
+Optional runtime tools (not required to build):
+
+- 7-Zip for `.7z`: Ubuntu `p7zip-full`, Arch `p7zip` (binary `7z`)
+- RAR pack: RARLAB `rar` (`unrar` does not pack)
+- Sandbox tests: `bubblewrap` on Ubuntu and Arch
+
+`bubblewrap` is only needed for `scripts/test-sandbox.sh`, not to start the program. Omarchy does not need to be installed; it uses the same Arch packages.
+
+If `cargo build` fails on `vte-2.91-gtk4`, install the VTE GTK4 package for your distro (table above).
 
 The log is written to `~/.local/state/rust-commander/rust-commander.log`.
 
@@ -33,9 +48,9 @@ Special modes change the buttons at the bottom of the main window to commands fo
 
 Alt+F5 packs selected files. The extension chooses the format: `.zip` is built in, `.7z` uses 7-Zip (`7z` or `7zz`, for example `/usr/bin/7z`) and `.rar` uses RARLAB `rar` (for example `/usr/bin/rar`). `unrar` does not pack. The paths are set in F12. An empty field searches PATH.
 
-Alt+F9 unpacks a zip or rar into the other panel and shows the file list. Ctrl+Alt+F10 unpacks the whole archive in the panel where the archive is. When the cursor is on a zip or rar archive, the upper button row at the bottom shows `Alt+F9 Unpack to right panel` (or left, depending on the active panel) and `Ctrl+Alt+F10 Extract here`. The F keys are on the row below. The progress window shows which rar volume is being read (`From:`), the target folder (`To:`), and which file is being unpacked. Broken files are skipped and listed when unpacking finishes. If a volume is missing, it says which one. Enter on a `.sfv` checks CRC32. Shift+F9 creates a `.sfv` for the selection.
+Alt+F9 unpacks a zip, rar or tar into the other panel and shows the file list. Shift+Alt+F9 unpacks the whole archive in the panel where the archive is. When the cursor is on a zip, rar or tar archive, the upper button row at the bottom shows `Alt+F9 Unpack to right panel` (or left, depending on the active panel) and `Shift+Alt+F9 Extract here`. The F keys are on the row below. The progress window shows which rar volume is being read (`From:`), the target folder (`To:`), and which file is being unpacked. Broken files are skipped and listed when unpacking finishes. If a volume is missing, it says which one. Enter on a `.sfv` checks CRC32. Shift+F9 creates a `.sfv` for the selection.
 
-Ctrl+1 to Ctrl+9 selects a drive in the active panel. The number is shown before the icon. Ctrl+F3 name, Ctrl+F4 extension, Ctrl+F5 time, Ctrl+F6 size. Alt+F1 and Alt+F2 are places. Alt+F3 is the external viewer. Ctrl+Q previews. There, left and right change the image in that folder. Ctrl+T new tab, Ctrl+W close tab, Alt+left and Alt+right are history.
+Ctrl+1 to Ctrl+9 selects a drive in the active panel. The number is shown before the icon. F9 opens a shell in the other panel in the active panel's directory. The bottom button reads F9 Shell, and F9 Shell Toggle while that shell is showing. F9 hides it and leaves it running. Ctrl+F9 opens another shell. Each shell is a numbered button to the right of the drives; Alt+1 to Alt+9 switches to it. Ctrl+W in the shell closes that shell and returns to the file list. `exit` does the same. Ctrl+W in the file list still closes a tab. Ctrl+F3 name, Ctrl+F4 extension, Ctrl+F5 time, Ctrl+F6 size. Alt+F1 and Alt+F2 are places. Alt+F3 is the external viewer. Ctrl+Q previews. There, left and right change the image in that folder. Ctrl+T new tab, Ctrl+W close tab, Alt+left and Alt+right are history.
 
 ## Tests
 
@@ -53,6 +68,6 @@ Left out: Windows builds, network neighborhood, parallel port, USB cable, UAC, W
 
 ## Omarchy
 
-`omarchy/theme-set` takes the theme name as the first argument, writes `~/.config/rust-commander/active-theme`, and sends SIGUSR1 to Rust Commander. Themes are read from `/usr/share/omarchy/themes/<name>/colors.toml` or `~/.config/omarchy/themes/<name>/colors.toml`. If the file is missing, Tokyo Night is used.
+Omarchy is Arch-based, so use the pacman build packages above. `omarchy/theme-set` takes the theme name as the first argument, writes `~/.config/rust-commander/active-theme`, and sends SIGUSR1 to Rust Commander. Themes are read from `/usr/share/omarchy/themes/<name>/colors.toml` or `~/.config/omarchy/themes/<name>/colors.toml`. If the file is missing, Tokyo Night is used.
 
 The `.desktop` file is in `data/rust-commander.desktop`.

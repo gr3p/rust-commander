@@ -341,26 +341,30 @@ bright_foreground = \"#555555\"
 
 fn list_background_color_and_image() -> Result<(), String> {
     let palette = theme::builtin();
-    let plain = theme::list_background(&palette, "", "", 100);
+    let plain = theme::list_background(&palette, "", "", 100, true);
     if !plain.is_empty() {
         return Err(format!("plain {plain}"));
     }
-    let color = theme::list_background(&palette, "#abcdef", "", 100);
+    let color = theme::list_background(&palette, "#abcdef", "", 100, true);
     if !color.contains("#abcdef") || color.contains("url(") || color.contains("alpha(") {
         return Err(format!("color {color}"));
     }
-    let glass = theme::list_background(&palette, "#abcdef", "", 40);
+    let glass = theme::list_background(&palette, "#abcdef", "", 40, true);
     if !glass.contains("alpha(#abcdef, 0.40)") || glass.contains("url(") {
         return Err(format!("glass {glass}"));
     }
-    let clear = theme::list_background(&palette, "", "", 0);
+    let clear = theme::list_background(&palette, "", "", 0, true);
     if !clear.contains("alpha(") || clear.contains("url(") {
         return Err(format!("clear {clear}"));
     }
     eq(theme::css_file_url("/My Pictures/a.png").as_str(), "file:///My%20Pictures/a.png", "url")?;
-    let image = theme::list_background(&palette, "#abcdef", "/My Pictures/a.png", 70);
-    if !image.contains("file:///My%20Pictures/a.png") || !image.contains("0.30") {
+    let image = theme::list_background(&palette, "#abcdef", "/My Pictures/a.png", 70, true);
+    if !image.contains("paned.panes") || !image.contains("file:///My%20Pictures/a.png") || !image.contains("0.30") || !image.contains("100% 100%") {
         return Err(format!("image {image}"));
+    }
+    let cover = theme::list_background(&palette, "#abcdef", "/My Pictures/a.png", 100, false);
+    if !cover.contains("background-size: cover") || cover.contains("100% 100%") {
+        return Err(format!("cover {cover}"));
     }
     Ok(())
 }

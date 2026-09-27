@@ -70,15 +70,65 @@ pub fn omarchy_dirs() -> Vec<PathBuf> {
 }
 
 pub fn load_named(name: &str) -> Palette {
-    for dir in omarchy_dirs() {
-        let path = dir.join(name).join("colors.toml");
-        if let Ok(text) = fs::read_to_string(path) {
-            if let Some(palette) = from_colors_toml(&text) {
-                return palette;
+    read_theme(name).and_then(|text| from_colors_toml(&text)).unwrap_or_else(builtin)
+}
+
+pub struct TerminalTheme {
+    pub background: String,
+    pub foreground: String,
+    pub cursor: String,
+    pub selection: String,
+    pub ansi: [String; 16],
+}
+
+// Tokyo Night ANSI. Used when the theme file has no color0–color15.
+const TOKYO_ANSI: [&str; 16] = [
+    "#15161e", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#a9b1d6",
+    "#414868", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#c0caf5",
+];
+
+const ANSI_KEYS: [[&str; 2]; 16] = [
+    ["color0", "black"],
+    ["color1", "red"],
+    ["color2", "green"],
+    ["color3", "yellow"],
+    ["color4", "blue"],
+    ["color5", "magenta"],
+    ["color6", "cyan"],
+    ["color7", "white"],
+    ["color8", "bright_black"],
+    ["color9", "bright_red"],
+    ["color10", "bright_green"],
+    ["color11", "bright_yellow"],
+    ["color12", "bright_blue"],
+    ["color13", "bright_magenta"],
+    ["color14", "bright_cyan"],
+    ["color15", "bright_white"],
+];
+
+pub fn load_terminal(name: &str, bg_override: &str) -> TerminalTheme {
+    let palette = load_named(name);
+    let table = read_theme(name).and_then(|text| toml::from_str::<toml::Table>(&text).ok());
+    let mut ansi = TOKYO_ANSI.map(str::to_string);
+    if let Some(table) = &table {
+        for (i, keys) in ANSI_KEYS.iter().enumerate() {
+            if let Some(hex) = keys.iter().find_map(|key| color(table, key)) {
+                ansi[i] = hex;
             }
         }
     }
-    builtin()
+    let background = hex_color(bg_override).unwrap_or(palette.background.as_str()).to_string();
+    TerminalTheme {
+        background,
+        foreground: palette.foreground,
+        cursor: palette.bright,
+        selection: palette.selection,
+        ansi,
+    }
+}
+
+fn read_theme(name: &str) -> Option<String> {
+    omarchy_dirs().into_iter().find_map(|dir| fs::read_to_string(dir.join(name).join("colors.toml")).ok())
 }
 
 pub fn css_file_url(path: &str) -> String {
@@ -103,7 +153,7 @@ fn hex_color(color: &str) -> Option<&str> {
 
 // With a picture, 0 is the solid color and 100 is the picture alone.
 // With no picture, the value is opacity: 100 is the color, lower shows the desktop through.
-pub fn list_background(p: &Palette, color: &str, image: &str, strength: u8) -> String {
+pub fn list_background(p: &Palette, color: &str, image: &str, strength: u8, stretch: bool) -> String {
     let chosen = hex_color(color);
     let strength = strength.min(100);
     let image = image.trim();
@@ -121,24 +171,25 @@ pub fn list_background(p: &Palette, color: &str, image: &str, strength: u8) -> S
     }
     let url = css_file_url(image);
     let veil = f64::from(100 - strength) / 100.0;
+    let fit = if stretch { "100% 100%" } else { "cover" };
     let (picture, size, at, repeat) = if veil <= 0.0 {
-        (format!("url(\"{url}\")"), "cover", "center", "no-repeat")
+        (format!("url(\"{url}\")"), fit.to_string(), "center", "no-repeat")
     } else {
         (
             format!("linear-gradient(alpha({fill}, {veil:.2}), alpha({fill}, {veil:.2})), url(\"{url}\")"),
-            "cover, cover",
+            format!("{fit}, {fit}"),
             "center, center",
             "no-repeat, no-repeat",
         )
     };
     format!(
-        "columnview {{\n  background: {fill};\n}}\ncolumnview > listview {{\n  background-color: {fill};\n  background-image: {picture};\n  background-size: {size};\n  background-position: {at};\n  background-repeat: {repeat};\n}}\ncolumnview > listview > row,\ncolumnview > listview > row > cell {{\n  background: transparent;\n}}\n{selected}"
+        "paned.panes {{\n  background-color: {fill};\n  background-image: {picture};\n  background-size: {size};\n  background-position: {at};\n  background-repeat: {repeat};\n}}\npaned.panes > separator,\npaned.panes frame.pane,\npaned.panes frame.pane > border,\npaned.panes frame.pane box,\npaned.panes scrolledwindow,\npaned.panes columnview,\npaned.panes columnview > header > button,\npaned.panes columnview > listview,\npaned.panes columnview > listview > row,\npaned.panes columnview > listview > row > cell {{\n  background-color: transparent;\n  background-image: none;\n}}\n{selected}"
     )
 }
 
 fn selected_rows(p: &Palette) -> String {
     format!(
-        "columnview > listview > row:selected,\ncolumnview > listview > row:selected > cell {{\n  background: {sel};\n  color: {bright};\n}}\n",
+        "frame.pane columnview > listview > row:selected,\nframe.pane columnview > listview > row:selected > cell {{\n  background: {sel};\n  color: {bright};\n}}\n",
         sel = p.selection,
         bright = p.bright,
     )
@@ -241,9 +292,13 @@ entry {{
   color: {fg};
   caret-color: {bright};
 }}
-label.path {{
+entry.path {{
+  background: {bg};
+  color: {fg};
   padding: 2px 8px;
   border-bottom: 1px solid {muted};
+  box-shadow: none;
+  min-height: 0;
 }}
 columnview > listview > row > cell {{
   padding: 0 6px;

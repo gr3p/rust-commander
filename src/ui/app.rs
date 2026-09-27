@@ -27,6 +27,7 @@ use super::shell::{self, Shell};
 mod jobs;
 mod search;
 mod settings;
+mod term;
 mod view;
 
 // Targets are taken when the dialog opens, so a cursor move or a click behind it changes nothing.
@@ -130,6 +131,7 @@ struct SettingsUi {
     flash: gtk::Label,
     image: gtk::Label,
     clear: gtk::Button,
+    stretch: gtk::Label,
     strength_name: gtk::Label,
     strength: gtk::Scale,
     editor: gtk::DropDown,
@@ -158,6 +160,7 @@ pub struct App {
     charset: Charset,
     hot: Option<gtk::Window>,
     hot_stack: Vec<Option<usize>>,
+    hot_pane: PaneId,
     preview: lister::PreviewSlot,
     preview_sent: u64,
     preview_shown: [u64; 2],
@@ -172,11 +175,11 @@ pub struct App {
     search_gen: u64,
     search_target: Option<(PaneId, usize, u64, String)>,
     settings: Option<SettingsUi>,
-    chooser: Option<gtk::FileChooserNative>,
     smoke: bool,
 }
 
 pub fn run(smoke: bool) {
+    gtk::glib::log_set_writer_func(quiet_gdk_vulkan);
     rust_commander::log::info(&format!(
         "start version={} log={}",
         rust_commander::version(),
@@ -186,6 +189,33 @@ pub fn run(smoke: bool) {
     let app = RelmApp::new("se.rustcommander.RustCommander").with_args(args);
     app.allow_multiple_instances(true);
     app.run::<App>(smoke);
+}
+
+// GLIB_DOMAIN and MESSAGE are the fields g_warning writes.
+fn quiet_gdk_vulkan(
+    level: gtk::glib::LogLevel,
+    fields: &[gtk::glib::LogField<'_>],
+) -> gtk::glib::LogWriterOutput {
+    let mut gdk = false;
+    let mut hit = false;
+    if level == gtk::glib::LogLevel::Warning {
+        for field in fields {
+            match (field.key(), field.value_str()) {
+                ("GLIB_DOMAIN", Some("Gdk")) => gdk = true,
+                ("MESSAGE", Some(text))
+                    if text.contains("VK_ERROR_OUT_OF_DATE_KHR")
+                        || text.contains("VK_SUBOPTIMAL_KHR") =>
+                {
+                    hit = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    if gdk && hit {
+        return gtk::glib::LogWriterOutput::Handled;
+    }
+    gtk::glib::log_writer_default(level, fields)
 }
 
 #[relm4::component(pub)]
@@ -273,6 +303,7 @@ impl SimpleComponent for App {
             charset: Charset::Utf8,
             hot: None,
             hot_stack: Vec::new(),
+            hot_pane: PaneId::Left,
             preview: lister::PreviewSlot::default(),
             preview_sent: 0,
             preview_shown: [0, 0],
@@ -287,7 +318,6 @@ impl SimpleComponent for App {
             search_gen: 0,
             search_target: None,
             settings: None,
-            chooser: None,
             smoke,
         };
         model.apply_css(&theme::load_named(&theme::active_name(
@@ -342,8 +372,13 @@ impl App {
             Msg::FKey(n, shift) => self.on_fkey(n, shift, sender),
             Msg::Listed(pane, tab, token, result) => self.on_listed(pane, tab, token, result),
             Msg::Cursor(pane, pos) => {
+                let id = PaneId::from_index(pane);
+                // The hotlist popup can move the cursor in the left list while it is open.
+                if self.hot.is_some() && id != self.hot_pane {
+                    return;
+                }
                 self.shell.active.set(pane);
-                self.state.active = PaneId::from_index(pane);
+                self.state.active = id;
                 let current = self.state.tab(self.state.active).cursor;
                 if current != pos as usize {
                     self.state.set_cursor(pos as usize);
@@ -364,6 +399,7 @@ impl App {
                 self.state.tab_mut(PaneId::from_index(pane)).cursor = 0;
                 self.touch(PaneId::from_index(pane));
             }
+            Msg::PathGo(pane, text) => self.go_typed_path(pane, &text, sender),
             Msg::CloseSearch => self.close_search(),
             Msg::SearchEscape => self.escape_search(),
             Msg::SearchStart => self.start_search(sender),
@@ -417,10 +453,13 @@ impl App {
             Msg::ToggleModeButtons => self.toggle_mode_buttons(),
             Msg::ToggleFileIcons => self.toggle_file_icons(),
             Msg::ToggleFlashFeedback => self.toggle_flash_feedback(),
+            Msg::ToggleBackgroundStretch => self.toggle_background_stretch(),
             Msg::ToggleImageScale => self.toggle_shown_scale(sender),
             Msg::SetCharset(charset) => self.set_charset(charset, sender),
             Msg::ToggleQuickEdit => self.toggle_quick_edit(sender),
             Msg::SaveQuick => self.save_quick(),
+            Msg::ShellExited(id) => self.on_shell_exited(id),
+            Msg::SelectShell(id) => self.select_shell(id),
             Msg::CloseWindow => {
                 if self.leave_quick_edit(sender) {
                     self.shell.window.close();
@@ -457,6 +496,10 @@ impl App {
             Msg::HotlistAdded(title, path, with_target) => self.hot_added(title, path, with_target, sender),
             Msg::HotlistStored(marks) => self.hot_stored(marks),
             Msg::FocusPane(pane) => {
+                // The hotlist takes focus, and GTK then focuses the left list.
+                if self.hot.is_some() {
+                    return;
+                }
                 // A click in the quick editor must not make its pane active and hide the editor.
                 if self.quick_edit.as_ref().is_some_and(|edit| edit.pane == pane) {
                     self.shell.active.set(self.state.active.index());
@@ -512,15 +555,8 @@ impl App {
             }
             return;
         }
-        if self.state.quick_view && !ctrl && !alt && matches!(key, Key::e | Key::E) {
-            self.toggle_quick_edit(sender);
-            return;
-        }
+        // Ctrl+Alt+Fn is taken by the virtual terminals.
         if ctrl && alt {
-            match key {
-                Key::F10 => self.begin_unpack(false, sender),
-                _ => {}
-            }
             return;
         }
         if ctrl {
@@ -535,6 +571,7 @@ impl App {
                 Key::F5 => self.set_sort(rust_commander::listing::SortKey::Time),
                 Key::F6 => self.set_sort(rust_commander::listing::SortKey::Size),
                 Key::F7 => self.set_sort(rust_commander::listing::SortKey::Attr),
+                Key::F9 => self.new_shell(sender),
                 Key::s | Key::S => {
                     if shift {
                         self.open_search(sender);
@@ -547,15 +584,26 @@ impl App {
                 Key::h | Key::H => self.toggle_hidden(),
                 Key::t | Key::T => self.open_new_tab(sender),
                 Key::w | Key::W => {
-                    let id = self.state.active;
-                    self.state.close_tab(id);
-                    self.touch(id);
+                    if self.shell_has_focus() {
+                        self.close_current_shell();
+                    } else {
+                        let id = self.state.active;
+                        self.state.close_tab(id);
+                        self.touch(id);
+                    }
                 }
                 Key::d | Key::D => self.toggle_hotlist(sender),
+                Key::e | Key::E if self.state.quick_view && !self.shell.editing.get() => {
+                    self.toggle_quick_edit(sender);
+                }
+                Key::v | Key::V if self.state.quick_view && self.shell.editing.get() => {
+                    self.leave_quick_edit(sender);
+                }
                 Key::q | Key::Q => {
                     if self.shell.editing.get() && !self.leave_quick_edit(sender) {
                         return;
                     }
+                    self.state.panel_terminal = false;
                     self.state.quick_view = !self.state.quick_view;
                     if self.state.quick_view {
                         self.note_preview_target();
@@ -574,11 +622,16 @@ impl App {
             return;
         }
         if alt {
+            if let Some(slot) = drive_slot(key) {
+                self.show_shell_index(slot);
+                return;
+            }
             match key {
                 Key::F1 => self.show_places(PaneId::Left, sender),
                 Key::F2 => self.show_places(PaneId::Right, sender),
                 Key::F3 => self.open_external(true),
                 Key::F5 => self.start_pack(false, sender),
+                Key::F9 if shift => self.begin_unpack(false, sender),
                 Key::F9 => self.begin_unpack(true, sender),
                 Key::Left => self.history(true, sender),
                 Key::Right => self.history(false, sender),
@@ -595,6 +648,7 @@ impl App {
             Key::F7 => self.on_fkey(7, shift, sender),
             Key::F8 | Key::Delete => self.on_fkey(8, shift, sender),
             Key::F9 if shift => self.start_sfv(sender),
+            Key::F9 => self.toggle_panel_terminal(sender),
             Key::ISO_Left_Tab | Key::Tab if self.shell.editing.get() => {}
             Key::ISO_Left_Tab | Key::Tab => {
                 self.state.active = self.state.active.other();
@@ -633,6 +687,7 @@ impl App {
             Key::j | Key::J if self.state.quick_view => self.set_charset(Charset::Json, sender),
             Key::s | Key::S if self.state.quick_view && self.cursor_is_image() => self.toggle_quick_scale(),
             Key::s | Key::S | Key::d | Key::D if self.state.quick_view => self.set_charset(Charset::Ascii, sender),
+            Key::Escape if self.shell.panes.iter().any(|pane| pane.path.has_focus()) => self.cancel_path_edit(),
             Key::Escape if self.shell.editing.get() => {
                 self.leave_quick_edit(sender);
             }
@@ -1006,6 +1061,7 @@ impl App {
             self.close_hot();
             return;
         }
+        self.hot_pane = self.state.active;
         self.hot_stack = vec![None];
         config::reload_bookmarks(&mut self.cfg);
         self.present_hot(sender);
@@ -1016,7 +1072,7 @@ impl App {
             win.close();
         }
         let view = self.hot_stack.last().copied().flatten();
-        let current = self.state.tab(self.state.active).path.clone();
+        let current = self.state.tab(self.hot_pane).path.clone();
         let win = super::hotlist::popup(
             &self.shell.window,
             &self.cfg.bookmarks,
@@ -1033,6 +1089,8 @@ impl App {
         if let Some(win) = self.hot.take() {
             win.close();
         }
+        self.state.active = self.hot_pane;
+        self.focus_list();
     }
 
     fn hot_back(&mut self, sender: &ComponentSender<Self>) {
@@ -1054,9 +1112,10 @@ impl App {
         if !rust_commander::hotlist::is_dir(&mark) || mark.path.as_os_str().is_empty() {
             return;
         }
-        let source = self.state.active;
+        let source = self.hot_pane;
         let target = mark.target.clone();
         let path = mark.path.clone();
+        self.state.active = source;
         self.close_hot();
         let token = self.state.navigate(source, path.clone(), true);
         let tab = self.state.pane(source).active;
@@ -1142,11 +1201,16 @@ impl App {
 
     fn sync(&mut self) {
         SYNCING.store(true, Ordering::Relaxed);
+        if self.state.panel_terminal {
+            self.place_panel_terminal(self.state.active.other().index());
+        }
+        self.restamp_shells();
         let mut pending: [Option<Vec<Entry>>; 2] = [None, None];
         for pane in 0..2 {
             let id = PaneId::from_index(pane);
             let active = self.state.active == id;
-            let show_preview = self.state.quick_view && !active;
+            let show_terminal = self.state.panel_terminal && !active;
+            let show_preview = self.state.quick_view && !active && !show_terminal;
             let path = self.state.tab(id).path.display().to_string();
             let cursor = self.state.tab(id).cursor;
             let filter_on = !self.state.pane(id).filter.is_empty();
@@ -1173,14 +1237,20 @@ impl App {
             if !ui.frame.has_css_class(class) {
                 ui.frame.set_css_classes(&[class]);
             }
-            if ui.path.text().as_str() != path {
+            if !ui.path.has_focus() && ui.path.text().as_str() != path {
                 ui.path.set_text(&path);
             }
             let show_filter = filter_on || ui.filter.has_focus() || gtk::prelude::WidgetExt::is_visible(&ui.filter);
             if gtk::prelude::WidgetExt::is_visible(&ui.filter) != show_filter {
                 ui.filter.set_visible(show_filter);
             }
-            let page = if show_preview { "preview" } else { "list" };
+            let page = if show_terminal {
+                "terminal"
+            } else if show_preview {
+                "preview"
+            } else {
+                "list"
+            };
             if ui.stack.visible_child_name().as_deref() != Some(page) {
                 ui.stack.set_visible_child_name(page);
             }
@@ -1551,6 +1621,39 @@ impl App {
         self.goto_mount(self.state.active.index(), path, sender);
     }
 
+    fn go_typed_path(&mut self, pane: usize, text: &str, sender: &ComponentSender<Self>) {
+        let id = PaneId::from_index(pane);
+        let current = self.state.tab(id).path.clone();
+        let path = match typed_dir(&current, text) {
+            Ok(path) => path,
+            Err(err) => {
+                self.status = err;
+                return;
+            }
+        };
+        if path == current {
+            self.focus_list();
+            return;
+        }
+        self.state.active = id;
+        self.shell.active.set(pane);
+        let token = self.state.navigate(id, path.clone(), true);
+        let tab = self.state.pane(id).active;
+        self.spawn_load(sender, id, tab, path, token);
+        self.focus_list();
+    }
+
+    fn cancel_path_edit(&mut self) {
+        for pane in 0..2 {
+            let ui = &self.shell.panes[pane];
+            if ui.path.has_focus() {
+                let shown = self.state.tab(PaneId::from_index(pane)).path.display().to_string();
+                ui.path.set_text(&shown);
+            }
+        }
+        self.focus_list();
+    }
+
     fn goto_mount(&mut self, pane: usize, path: PathBuf, sender: &ComponentSender<Self>) {
         let id = PaneId::from_index(pane);
         self.state.active = id;
@@ -1684,6 +1787,20 @@ fn watch_load(tx: &relm4::Sender<Msg>, pane: usize, tab: usize, token: u64, path
     });
 }
 
+pub(super) fn shell_bin() -> String {
+    let candidates = [
+        std::env::var_os("SHELL").map(PathBuf::from),
+        Some(PathBuf::from("/bin/bash")),
+        Some(PathBuf::from("/bin/sh")),
+    ];
+    for path in candidates.into_iter().flatten() {
+        if path.is_absolute() && std::fs::metadata(&path).is_ok() {
+            return path.to_string_lossy().into_owned();
+        }
+    }
+    "/bin/sh".into()
+}
+
 fn reveal_row(list: &gtk::ColumnView, pos: u32) {
     let arg = gtk::glib::Variant::from(pos);
     let mut child = list.first_child();
@@ -1695,6 +1812,28 @@ fn reveal_row(list: &gtk::ColumnView, pos: u32) {
     }
 }
 
+
+// ~ and ~/ expand to $HOME. A relative path is joined onto the pane's current directory.
+fn typed_dir(current: &Path, text: &str) -> Result<PathBuf, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(current.to_path_buf());
+    }
+    let raw = if text == "~" {
+        home_dir()
+    } else if let Some(rest) = text.strip_prefix("~/") {
+        home_dir().join(rest)
+    } else {
+        PathBuf::from(text)
+    };
+    let path = if raw.is_absolute() { raw } else { current.join(&raw) };
+    let path = std::fs::canonicalize(&path).map_err(|_| format!("Not a directory: {text}"))?;
+    if path.is_dir() {
+        Ok(path)
+    } else {
+        Err(format!("Not a directory: {text}"))
+    }
+}
 
 fn tab_labels(titles: &[String], active: usize) -> Vec<String> {
     titles

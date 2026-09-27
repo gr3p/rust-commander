@@ -502,7 +502,7 @@ pub(in crate::ui::app) fn preview_body(path: &Path, max_edge: u32) -> PreviewBod
 }
 
 fn paint_edit(button: &gtk::Button, on: bool) {
-    button.set_label(if on { "E View" } else { "E Edit" });
+    button.set_label(if on { "Ctrl+V View" } else { "Ctrl+E Edit" });
     mark_button(button, on);
 }
 

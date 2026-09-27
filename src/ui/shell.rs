@@ -8,6 +8,8 @@ use relm4::gtk;
 use relm4::gtk::gio;
 use relm4::gtk::prelude::*;
 use relm4::RelmWidgetExt;
+use vte4::prelude::{TerminalExt, TerminalExtManual};
+use vte4::Terminal;
 
 use rust_commander::listing::SortKey;
 
@@ -17,7 +19,7 @@ static FLASH_ENABLED: AtomicBool = AtomicBool::new(true);
 
 pub struct PaneUi {
     pub frame: gtk::Frame,
-    pub path: gtk::Label,
+    pub path: gtk::Entry,
     pub tabs: gtk::Box,
     pub filter: gtk::Entry,
     pub stack: gtk::Stack,
@@ -28,6 +30,7 @@ pub struct PaneUi {
     pub picture: gtk::Picture,
     pub picture_scroll: gtk::ScrolledWindow,
     pub preview_kind: gtk::Stack,
+    pub terminal_slot: gtk::Box,
 }
 
 pub struct Shell {
@@ -49,6 +52,20 @@ pub struct Shell {
     pub edit_button: gtk::Button,
     pub save_button: gtk::Button,
     pub editing: Rc<Cell<bool>>,
+    pub shell_key: gtk::Label,
+    pub shell_bar: gtk::Box,
+    pub shell_buttons: gtk::Box,
+    pub shells: Vec<PanelShell>,
+    pub shell_current: Option<u64>,
+    pub shell_seq: u64,
+}
+
+pub struct PanelShell {
+    pub id: u64,
+    pub term: Terminal,
+    pub button: gtk::Button,
+    pub number: gtk::Label,
+    pub pid: std::rc::Rc<std::cell::Cell<Option<i32>>>,
 }
 
 pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> Shell {
@@ -64,11 +81,10 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
     }
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let active = Rc::new(Cell::new(0));
-    let (drive_bar, drives) = drive_bar(sender, &active);
-    if let Some(bar) = drive_bar {
-        root.append(&bar);
-    }
+    let (shell_bar, shell_buttons, drives) = drive_bar(sender, &active);
+    root.append(&shell_bar);
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
+    paned.add_css_class("panes");
     paned.set_hexpand(true);
     paned.set_vexpand(true);
     paned.set_position(560);
@@ -95,6 +111,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
     fbar.append(&context_row);
     fbar.append(&fkey_row);
     let mut f_labels = Vec::new();
+    let mut shell_key = gtk::Label::new(Some("F9 Shell"));
     for (n, label) in [
         (3, "F3 View"),
         (4, "F4 Edit"),
@@ -102,6 +119,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
         (6, "F6 Move"),
         (7, "F7 Mkdir"),
         (8, "F8 Delete"),
+        (9, "F9 Shell"),
         (12, "F12 Settings"),
     ] {
         let text = gtk::Label::new(Some(label));
@@ -113,11 +131,16 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
         button.set_hexpand(true);
         f_labels.push(label.to_string());
         let tx = sender.clone();
-        on_click(&button, move || tx.emit(super::msg::Msg::FKey(n, false)));
+        if n == 9 {
+            shell_key = text;
+            on_click(&button, move || tx.emit(super::msg::Msg::Key(gtk::gdk::Key::F9, gtk::gdk::ModifierType::empty())));
+        } else {
+            on_click(&button, move || tx.emit(super::msg::Msg::FKey(n, false)));
+        }
         fkey_row.append(&button);
     }
     let unpack_list = hint_button("Alt+F9 Unpack to right panel", || super::msg::Msg::UnpackList, sender);
-    let unpack_here = hint_button("Ctrl+Alt+F10 Extract here", || super::msg::Msg::UnpackHere, sender);
+    let unpack_here = hint_button("Shift+Alt+F9 Extract here", || super::msg::Msg::UnpackHere, sender);
     let verify_sfv = hint_button("Enter Verify", || super::msg::Msg::VerifySfv, sender);
     let pack = hint_button("Alt+F5 Pack", || super::msg::Msg::Key(gtk::gdk::Key::F5, gtk::gdk::ModifierType::ALT_MASK), sender);
     let pack_here = hint_button(
@@ -153,7 +176,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
     image_bar.append(&image_prev);
     image_bar.append(&image_next);
     let text_modes = charset_bar(sender);
-    let edit_button = bar_button("E Edit", || super::msg::Msg::ToggleQuickEdit, sender);
+    let edit_button = bar_button("Ctrl+E Edit", || super::msg::Msg::ToggleQuickEdit, sender);
     let save_button = bar_button("Ctrl+S Save", || super::msg::Msg::SaveQuick, sender);
     text_modes.bar.append(&edit_button);
     text_modes.bar.append(&save_button);
@@ -198,6 +221,13 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
                 }
             }
         }
+        let on_term = focused.as_ref().is_some_and(|widget| widget.has_css_class("panel-shell"));
+        if on_term && !terminal_command(key, mods) {
+            if let Some(widget) = focused.as_ref() {
+                controller.forward(widget);
+            }
+            return gtk::glib::Propagation::Stop;
+        }
         tx.emit(super::msg::Msg::Key(key, mods));
         gtk::glib::Propagation::Stop
     });
@@ -222,6 +252,12 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
         edit_button,
         save_button,
         editing,
+        shell_key,
+        shell_bar,
+        shell_buttons,
+        shells: Vec::new(),
+        shell_current: None,
+        shell_seq: 1,
     }
 }
 
@@ -275,11 +311,8 @@ fn hint_button(
 fn drive_bar(
     sender: &relm4::Sender<super::msg::Msg>,
     active: &Rc<Cell<usize>>,
-) -> (Option<gtk::Box>, Vec<(PathBuf, gtk::Button)>) {
+) -> (gtk::Box, gtk::Box, Vec<(PathBuf, gtk::Button)>) {
     let mounts = rust_commander::places::mounts();
-    if mounts.is_empty() {
-        return (None, Vec::new());
-    }
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
     bar.add_css_class("drives");
     bar.set_margin_top(2);
@@ -316,7 +349,12 @@ fn drive_bar(
         button.connect_clicked(move |_| tx.emit(super::msg::Msg::Mount(active.get(), path.clone())));
         bar.append(&button);
     }
-    (Some(bar), drives)
+    let shells = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    shells.set_margin_start(8);
+    shells.set_visible(false);
+    bar.append(&shells);
+    bar.set_visible(!drives.is_empty());
+    (bar, shells, drives)
 }
 
 pub fn blink_drive(button: &gtk::Button) {
@@ -406,13 +444,30 @@ fn drive_icon(removable: bool, network: bool) -> gtk::Widget {
     }
 }
 
-fn bind_header_clicks(list: &gtk::ColumnView, index: usize, sender: &relm4::Sender<super::msg::Msg>) {
+fn pointer_buttons_down() -> bool {
+    let Some(pointer) = gtk::gdk::Display::default().and_then(|display| display.default_seat()).and_then(|seat| seat.pointer()) else {
+        return false;
+    };
+    let mods = pointer.modifier_state();
+    mods.contains(gtk::gdk::ModifierType::BUTTON1_MASK)
+        || mods.contains(gtk::gdk::ModifierType::BUTTON2_MASK)
+        || mods.contains(gtk::gdk::ModifierType::BUTTON3_MASK)
+}
+
+fn bind_header_clicks(
+    list: &gtk::ColumnView,
+    index: usize,
+    sender: &relm4::Sender<super::msg::Msg>,
+    active: &Rc<Cell<usize>>,
+) {
     let keys = [SortKey::Name, SortKey::Ext, SortKey::Size, SortKey::Time, SortKey::Attr];
     let sender = sender.clone();
+    let active = active.clone();
     let bound = std::rc::Rc::new(std::cell::Cell::new(false));
     let list_for_map = list.clone();
     let try_bind = {
         let bound = std::rc::Rc::clone(&bound);
+        let active = active.clone();
         move |list: &gtk::ColumnView| {
             if bound.get() {
                 return;
@@ -432,8 +487,10 @@ fn bind_header_clicks(list: &gtk::ColumnView, index: usize, sender: &relm4::Send
                 click.set_button(1);
                 let tx = sender.clone();
                 let flash = title.clone();
+                let active = active.clone();
                 click.connect_pressed(move |gesture, n, _, _| {
                     if n == 1 {
+                        active.set(index);
                         blink_widget(&flash);
                         gesture.set_state(gtk::EventSequenceState::Claimed);
                         tx.emit(super::msg::Msg::Sort(index, key));
@@ -477,8 +534,28 @@ fn edit_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
     use gtk::gdk::Key;
     let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
     let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
-    // Plain E is text here. The Edit button or Escape leaves the editor.
-    key == Key::Escape || (ctrl && !alt && matches!(key, Key::s | Key::S))
+    // Ctrl+V leaves for view; Ctrl+E is reserved so typing stays free.
+    key == Key::Escape
+        || (ctrl && !alt && matches!(key, Key::s | Key::S | Key::v | Key::V | Key::e | Key::E))
+}
+
+fn terminal_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
+    use gtk::gdk::Key;
+    let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+    let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
+    // Escape stays in the shell (vim, fzf). F9 toggles back to the file list.
+    (!ctrl && !alt && matches!(key, Key::F9))
+        || (ctrl && !alt && matches!(key, Key::q | Key::Q | Key::w | Key::W | Key::F9))
+        || (alt && !ctrl && is_digit_key(key))
+}
+
+fn is_digit_key(key: gtk::gdk::Key) -> bool {
+    use gtk::gdk::Key;
+    matches!(
+        key,
+        Key::_1 | Key::KP_1 | Key::_2 | Key::KP_2 | Key::_3 | Key::KP_3 | Key::_4 | Key::KP_4 | Key::_5 | Key::KP_5
+            | Key::_6 | Key::KP_6 | Key::_7 | Key::KP_7 | Key::_8 | Key::KP_8 | Key::_9 | Key::KP_9
+    )
 }
 
 fn entry_input(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
@@ -532,23 +609,30 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let tabs = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     tabs.set_visible(false);
-    let path = gtk::Label::new(None);
+    let path = gtk::Entry::new();
     path.add_css_class("path");
-    path.set_xalign(0.0);
+    path.set_has_frame(false);
     path.set_hexpand(true);
-    path.set_can_focus(false);
-    path.set_selectable(false);
-    path.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-    let path_click = gtk::GestureClick::new();
     let tx = sender.clone();
-    let path_flash = path.clone();
-    path_click.connect_released(move |_, n, _, _| {
-        if n == 2 {
-            blink_widget(path_flash.upcast_ref());
-            tx.emit(super::msg::Msg::Hotlist);
-        }
+    path.connect_activate(move |entry| {
+        tx.emit(super::msg::Msg::PathGo(index, entry.text().to_string()));
     });
-    path.add_controller(path_click);
+    let path_focus = path.clone();
+    let tx = sender.clone();
+    let path_active = active_pane.clone();
+    let focus = gtk::EventControllerFocus::new();
+    focus.connect_enter(move |_| {
+        path_active.set(index);
+        tx.emit(super::msg::Msg::FocusPane(index));
+        // The click moves the cursor after focus; select the whole path once that is done.
+        let entry = path_focus.clone();
+        gtk::glib::idle_add_local_once(move || {
+            if entry.has_focus() {
+                entry.select_region(0, -1);
+            }
+        });
+    });
+    path.add_controller(focus);
     let filter = gtk::Entry::new();
     filter.set_placeholder_text(Some("Filter"));
     filter.set_visible(false);
@@ -573,12 +657,31 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     for col in row::file_columns() {
         list.append_column(&col);
     }
-    bind_header_clicks(&list, index, sender);
+    bind_header_clicks(&list, index, sender, active_pane);
     let tx = sender.clone();
     list.connect_activate(move |_, _| tx.emit(super::msg::Msg::Activate(index)));
+    // Already-selected rows do not notify, so a click in Ext/Size/Date/Attr must still activate the pane.
+    let column_click = gtk::GestureClick::new();
+    column_click.set_propagation_phase(gtk::PropagationPhase::Capture);
+    column_click.set_exclusive(false);
+    column_click.set_button(0);
+    let tx = sender.clone();
+    let column_active = active_pane.clone();
+    column_click.connect_pressed(move |_, _, _, _| {
+        column_active.set(index);
+        tx.emit(super::msg::Msg::FocusPane(index));
+    });
+    list.add_controller(column_click);
     let focus = gtk::EventControllerFocus::new();
     let tx = sender.clone();
-    focus.connect_enter(move |_| tx.emit(super::msg::Msg::FocusPane(index)));
+    let focus_active = active_pane.clone();
+    focus.connect_enter(move |_| {
+        // A click in the other pane can move focus here while the button is still down.
+        if pointer_buttons_down() && focus_active.get() != index {
+            return;
+        }
+        tx.emit(super::msg::Msg::FocusPane(index));
+    });
     list.add_controller(focus);
     let watch = gtk::EventControllerLegacy::new();
     watch.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -620,9 +723,13 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     preview_kind.add_named(&preview_scroll, Some("text"));
     preview_kind.add_named(&picture_scroll, Some("image"));
     preview_kind.set_vexpand(true);
+    let terminal_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    terminal_slot.set_hexpand(true);
+    terminal_slot.set_vexpand(true);
     let stack = gtk::Stack::new();
     stack.add_named(&scroll, Some("list"));
     stack.add_named(&preview_kind, Some("preview"));
+    stack.add_named(&terminal_slot, Some("terminal"));
     stack.set_vexpand(true);
     column.append(&tabs);
     column.append(&path);
@@ -643,6 +750,27 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
         picture,
         picture_scroll,
         preview_kind,
+        terminal_slot,
+    }
+}
+
+pub fn paint_terminal(term: &Terminal, theme: &rust_commander::theme::TerminalTheme) {
+    let Ok(fg) = gtk::gdk::RGBA::parse(&theme.foreground) else { return };
+    let Ok(bg) = gtk::gdk::RGBA::parse(&theme.background) else { return };
+    let ansi: Vec<gtk::gdk::RGBA> = theme.ansi.iter().filter_map(|hex| gtk::gdk::RGBA::parse(hex).ok()).collect();
+    if ansi.len() != 16 {
+        return;
+    }
+    let refs: Vec<&gtk::gdk::RGBA> = ansi.iter().collect();
+    term.set_colors(Some(&fg), Some(&bg), &refs);
+    term.set_color_bold(None);
+    if let Ok(cursor) = gtk::gdk::RGBA::parse(&theme.cursor) {
+        term.set_color_cursor(Some(&cursor));
+        term.set_color_cursor_foreground(Some(&bg));
+    }
+    if let Ok(sel) = gtk::gdk::RGBA::parse(&theme.selection) {
+        term.set_color_highlight(Some(&sel));
+        term.set_color_highlight_foreground(Some(&fg));
     }
 }
 

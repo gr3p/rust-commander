@@ -18,6 +18,7 @@ pub enum Msg {
     Cursor(usize, u32),
     Activate(usize),
     FilterChanged(usize, String),
+    PathGo(usize, String),
     CloseSearch,
     SearchEscape,
     SearchStart,
@@ -51,6 +52,7 @@ pub enum Msg {
     ToggleModeButtons,
     ToggleFileIcons,
     ToggleFlashFeedback,
+    ToggleBackgroundStretch,
     ToggleImageScale,
     ImageStep(i32),
     SetCharset(rust_commander::lister::Charset),
@@ -74,5 +76,7 @@ pub enum Msg {
     SetEditor(String),
     EditorPickCancelled,
     PickEditor,
+    ShellExited(u64),
+    SelectShell(u64),
     Smoke,
 }

@@ -41,6 +41,8 @@ pub struct Config {
     pub background_color: String,
     #[serde(default = "default_opaque")]
     pub background_alpha: u8,
+    #[serde(default = "default_true")]
+    pub background_stretch: bool,
     #[serde(default)]
     pub seven_zip: String,
     #[serde(default)]
@@ -83,6 +85,7 @@ impl Default for Config {
             background: String::new(),
             background_color: String::new(),
             background_alpha: default_opaque(),
+            background_stretch: true,
             seven_zip: String::new(),
             rar: String::new(),
             mode_buttons: true,
@@ -207,6 +210,15 @@ mod tests {
         assert!(old_config.flash_feedback);
         let disabled: Config = toml::from_str("flash_feedback = false").unwrap();
         assert!(!disabled.flash_feedback);
+    }
+
+    #[test]
+    fn background_stretch_defaults_to_enabled() {
+        assert!(Config::default().background_stretch);
+        let old_config: Config = toml::from_str("").unwrap();
+        assert!(old_config.background_stretch);
+        let off: Config = toml::from_str("background_stretch = false").unwrap();
+        assert!(!off.background_stretch);
     }
 
     #[test]

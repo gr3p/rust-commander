@@ -134,6 +134,7 @@ pub struct AppState {
     pub active: PaneId,
     pub show_hidden: bool,
     pub quick_view: bool,
+    pub panel_terminal: bool,
     pub preview_gen: u64,
     pub bookmarks: Vec<(String, PathBuf)>,
 }
@@ -145,6 +146,7 @@ impl AppState {
             active: PaneId::Left,
             show_hidden: false,
             quick_view: false,
+            panel_terminal: false,
             preview_gen: 0,
             bookmarks: Vec::new(),
         }

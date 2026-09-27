@@ -231,7 +231,7 @@ fn cursor_mark() -> relm4::gtk::DrawingArea {
     area.set_valign(relm4::gtk::Align::Center);
     area.set_visible(false);
     area.set_draw_func(|area, cr, w, h| {
-        let color = area.style_context().color();
+        let color = area.color();
         let (r, g, b, a) = (color.red() as f64, color.green() as f64, color.blue() as f64, color.alpha() as f64);
         cr.set_source_rgba(r, g, b, a);
         let w = w as f64;
@@ -353,7 +353,7 @@ fn folder_icon() -> relm4::gtk::DrawingArea {
     area.set_valign(relm4::gtk::Align::Center);
     area.set_visible(false);
     area.set_draw_func(|area, cr, w, h| {
-        let color = area.style_context().color();
+        let color = area.color();
         cr.set_source_rgba(color.red() as f64, color.green() as f64, color.blue() as f64, color.alpha() as f64);
         cr.scale(w as f64 / 14.0, h as f64 / 14.0);
         let (r, pi) = (1.5, std::f64::consts::PI);
@@ -377,7 +377,7 @@ fn up_arrow() -> relm4::gtk::DrawingArea {
     area.set_valign(relm4::gtk::Align::Center);
     area.set_visible(false);
     area.set_draw_func(|area, cr, w, h| {
-        let color = area.style_context().color();
+        let color = area.color();
         cr.set_source_rgba(color.red() as f64, color.green() as f64, color.blue() as f64, color.alpha() as f64);
         let w = w as f64;
         let h = h as f64;

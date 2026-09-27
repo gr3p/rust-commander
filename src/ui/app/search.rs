@@ -54,20 +54,17 @@ impl App {
         let window_choice = window.downgrade();
         crate::ui::shell::on_click(&choose, move || {
             let Some(window_choice) = window_choice.upgrade() else { return };
-            let chooser = gtk::FileChooserNative::new(
-                Some("Search in"), Some(&window_choice), gtk::FileChooserAction::SelectFolder,
-                Some("Select"), Some("Cancel"),
-            );
+            let dialog = gtk::FileDialog::new();
+            dialog.set_title("Search in");
+            dialog.set_modal(true);
             let root_choice = root_choice.clone();
-            chooser.connect_response(move |dialog, response| {
-                if response == gtk::ResponseType::Accept {
-                    if let Some(path) = dialog.file().and_then(|file| file.path()) {
+            dialog.select_folder(Some(&window_choice), None::<&gtk::gio::Cancellable>, move |result| {
+                if let Ok(file) = result {
+                    if let Some(path) = file.path() {
                         root_choice.set_text(&path.to_string_lossy());
                     }
                 }
-                dialog.destroy();
             });
-            chooser.show();
         });
         root_row.append(&choose);
         content.append(&labeled_row("Search for", &query));
