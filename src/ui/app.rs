@@ -21,7 +21,7 @@ use rust_commander::theme;
 use super::msg::{Msg, SYNCING};
 
 static SIZING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-use super::row::EntryObject;
+use super::row::{self, EntryObject};
 use super::shell::{self, Shell};
 
 mod jobs;
@@ -778,13 +778,12 @@ impl App {
     }
 
     fn on_listed(&mut self, pane: usize, tab: usize, token: u64, result: Result<Vec<Entry>, String>) {
-        self.loads.retain(|(live, _)| *live != token);
-        let ui = &self.shell.panes[pane];
-        ui.spinner.stop();
-        ui.spinner.set_visible(false);
+        // Timed out or replaced loads have left `loads`, so their late answer is dropped here.
+        let Some(at) = self.loads.iter().position(|(live, _)| *live == token) else { return };
+        self.loads.remove(at).1.store(true, Ordering::Relaxed);
+        let id = PaneId::from_index(pane);
         match result {
             Ok(entries) => {
-                let id = PaneId::from_index(pane);
                 if self.state.apply_listing(id, tab, token, entries) {
                     self.touch(id);
                     if let Some((target_id, target_tab, target_token, name)) = self.search_target.take() {
@@ -801,6 +800,7 @@ impl App {
                 }
             }
             Err(err) => {
+                self.state.cancel_load(id, token);
                 rust_commander::log::error(&format!("list pane={pane}: {err}"));
                 self.status = err;
             }
@@ -808,9 +808,6 @@ impl App {
     }
 
     fn spawn_load(&mut self, sender: &ComponentSender<Self>, id: PaneId, tab: usize, path: PathBuf, token: u64) {
-        let ui = &self.shell.panes[id.index()];
-        ui.spinner.set_visible(true);
-        ui.spinner.start();
         rust_commander::log::info(&format!("read {}", path.display()));
         let tx = sender.input_sender().clone();
         let pane = id.index();
@@ -827,12 +824,17 @@ impl App {
         });
         let stop = Arc::new(AtomicBool::new(false));
         self.loads.push((token, Arc::clone(&stop)));
+        let seen = Arc::new(AtomicU64::new(0));
+        watch_load(&tx, pane, tab, token, &path, &stop, &seen);
         std::thread::spawn(move || {
-            let result = rust_commander::listing::read_dir_while(&path, || stop.load(Ordering::Relaxed));
+            let result = rust_commander::listing::read_dir_while(&path, || {
+                seen.fetch_add(1, Ordering::Relaxed);
+                stop.load(Ordering::Relaxed)
+            });
             if result.as_ref().is_err_and(|err| err.kind() == std::io::ErrorKind::Interrupted) && stop.load(Ordering::Relaxed) {
                 return;
             }
-            tx.emit(Msg::Listed(pane, tab, token, result.map_err(|e| e.to_string())));
+            tx.emit(Msg::Listed(pane, tab, token, result.map_err(|e| format!("{}: {e}", path.display()))));
         });
     }
 
@@ -1056,10 +1058,6 @@ impl App {
         let target = mark.target.clone();
         let path = mark.path.clone();
         self.close_hot();
-        if !path.is_dir() {
-            self.status = format!("Not a directory: {}", path.display());
-            return;
-        }
         let token = self.state.navigate(source, path.clone(), true);
         let tab = self.state.pane(source).active;
         self.spawn_load(sender, source, tab, path, token);
@@ -1170,6 +1168,7 @@ impl App {
                 Vec::new()
             };
             let ui = &self.shell.panes[pane];
+            row::set_loading(&ui.list, self.loads.iter().any(|(live, _)| *live == self.state.tab(id).token));
             let class = if active { "pane-active" } else { "pane" };
             if !ui.frame.has_css_class(class) {
                 ui.frame.set_css_classes(&[class]);
@@ -1302,6 +1301,11 @@ impl App {
         }
         self.state.active = PaneId::Left;
         self.state.navigate(PaneId::Left, left.join("sub"), true);
+        self.sync();
+        if self.shell.panes[0].path.text().as_str() != left.display().to_string() {
+            errors.push("navigate before listing".into());
+        }
+        self.reload_pane(PaneId::Left);
         self.sync();
         if self.shell.panes[0].path.text().as_str() != left.join("sub").display().to_string()
             || self.shell.panes[1].path.text().as_str() != right.display().to_string()
@@ -1517,10 +1521,9 @@ impl App {
     }
 
     fn reload_pane(&mut self, id: PaneId) {
-        let path = self.state.tab(id).path.clone();
+        let (path, token) = self.state.refresh(id);
         let Ok(entries) = rust_commander::listing::read_dir(&path) else { return };
         let tab = self.state.pane(id).active;
-        let token = self.state.tab(id).token;
         self.state.apply_listing(id, tab, token, entries);
         self.touch(id);
     }
@@ -1658,6 +1661,29 @@ fn spawn_argv(argv: &[std::ffi::OsString]) -> Result<(), String> {
 }
 
 // Rows live in the inner list, which owns list.scroll-to-item.
+// Gives up when no new name arrived for this long. A slow read that still moves keeps going.
+const STALL: Duration = Duration::from_secs(20);
+
+// A read blocked in the kernel cannot be killed. The thread is left behind and its answer is dropped.
+fn watch_load(tx: &relm4::Sender<Msg>, pane: usize, tab: usize, token: u64, path: &Path, stop: &Arc<AtomicBool>, seen: &Arc<AtomicU64>) {
+    let (tx, stop, seen) = (tx.clone(), Arc::clone(stop), Arc::clone(seen));
+    let shown = path.display().to_string();
+    let mut last = 0;
+    gtk::glib::timeout_add_local(STALL, move || {
+        if stop.load(Ordering::Relaxed) {
+            return gtk::glib::ControlFlow::Break;
+        }
+        let now = seen.load(Ordering::Relaxed);
+        if now == last {
+            let err = format!("No answer from {shown} in {}s, gave up", STALL.as_secs());
+            tx.emit(Msg::Listed(pane, tab, token, Err(err)));
+            return gtk::glib::ControlFlow::Break;
+        }
+        last = now;
+        gtk::glib::ControlFlow::Continue
+    });
+}
+
 fn reveal_row(list: &gtk::ColumnView, pos: u32) {
     let arg = gtk::glib::Variant::from(pos);
     let mut child = list.first_child();

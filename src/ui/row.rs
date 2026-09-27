@@ -187,10 +187,7 @@ fn glyph_column() -> relm4::gtk::ColumnViewColumn {
     factory.connect_setup(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().unwrap();
         let row = gtk::CenterBox::new();
-        let cursor = gtk::Label::new(None);
-        cursor.add_css_class("glyph");
-        cursor.add_css_class("cursor");
-        cursor.set_visible(false);
+        let cursor = cursor_mark();
         let kind = gtk::Label::new(None);
         kind.add_css_class("glyph");
         kind.add_css_class("marked");
@@ -219,11 +216,90 @@ fn glyph_column() -> relm4::gtk::ColumnViewColumn {
 
 fn set_cursor_glyph(item: &relm4::gtk::ListItem) {
     let Some(row) = item.child().and_then(|child| child.downcast::<relm4::gtk::CenterBox>().ok()) else { return };
-    let Some(cursor) = row.center_widget().and_then(|child| child.downcast::<relm4::gtk::Label>().ok()) else { return };
-    let on = item.is_selected();
-    cursor.set_visible(on);
+    let Some(cursor) = row.center_widget().and_then(|child| child.downcast::<relm4::gtk::DrawingArea>().ok()) else { return };
+    cursor.set_visible(item.is_selected());
+}
+
+fn cursor_mark() -> relm4::gtk::DrawingArea {
+    let area = relm4::gtk::DrawingArea::new();
+    area.add_css_class("cursor-mark");
+    area.set_content_width(11);
+    area.set_content_height(11);
+    area.set_halign(relm4::gtk::Align::Center);
+    area.set_valign(relm4::gtk::Align::Center);
+    area.set_visible(false);
+    area.set_draw_func(|area, cr, w, h| {
+        let color = area.style_context().color();
+        let (r, g, b, a) = (color.red() as f64, color.green() as f64, color.blue() as f64, color.alpha() as f64);
+        cr.set_source_rgba(r, g, b, a);
+        let w = w as f64;
+        let h = h as f64;
+        let loading = area.ancestor(relm4::gtk::ColumnView::static_type()).is_some_and(|list| list.has_css_class("loading"));
+        if loading {
+            // Eight dots on a ring. The bright one walks round, the ones behind it fade out.
+            let head = (relm4::gtk::glib::monotonic_time() / SPIN_STEP_US) as usize % 8;
+            let ring = w.min(h) * 0.5 - 1.3;
+            for i in 0..8 {
+                let angle = i as f64 * std::f64::consts::TAU / 8.0 - std::f64::consts::FRAC_PI_2;
+                let age = (head + 8 - i) % 8;
+                cr.set_source_rgba(r, g, b, a * (1.0 - age as f64 * 0.11));
+                cr.arc(w * 0.5 + ring * angle.cos(), h * 0.5 + ring * angle.sin(), 1.1, 0.0, std::f64::consts::TAU);
+                let _ = cr.fill();
+            }
+            return;
+        }
+        // Chevron like ">", with round ends so it reads as an icon. Drawn in the middle 8 px.
+        let x = (w - 8.0) * 0.5;
+        cr.set_line_width(2.0);
+        cr.set_line_cap(relm4::gtk::cairo::LineCap::Round);
+        cr.set_line_join(relm4::gtk::cairo::LineJoin::Round);
+        cr.move_to(x + 1.4, 1.6);
+        cr.line_to(x + 6.7, h * 0.5);
+        cr.line_to(x + 1.4, h - 1.6);
+        let _ = cr.stroke();
+    });
+    area
+}
+
+const SPIN_STEP_US: i64 = 90_000;
+
+// The cursor mark turns into a dot spinner while the pane waits for a listing.
+pub fn set_loading(list: &relm4::gtk::ColumnView, on: bool) {
+    if list.has_css_class("loading") == on {
+        return;
+    }
     if on {
-        cursor.set_label(">");
+        list.add_css_class("loading");
+        spin(list);
+    } else {
+        list.remove_css_class("loading");
+    }
+    redraw_marks(list.upcast_ref());
+}
+
+// Ticks at half a step so no dot is skipped. Stops by itself when the list stops loading.
+fn spin(list: &relm4::gtk::ColumnView) {
+    use relm4::gtk::glib;
+    let list = list.downgrade();
+    glib::timeout_add_local(std::time::Duration::from_micros(SPIN_STEP_US as u64 / 2), move || {
+        let Some(list) = list.upgrade().filter(|list| list.has_css_class("loading")) else {
+            return glib::ControlFlow::Break;
+        };
+        redraw_marks(list.upcast_ref());
+        glib::ControlFlow::Continue
+    });
+}
+
+// A class change on the list does not redraw the drawing areas under it.
+fn redraw_marks(widget: &relm4::gtk::Widget) {
+    let mut child = widget.first_child();
+    while let Some(widget) = child {
+        if widget.has_css_class("cursor-mark") {
+            widget.queue_draw();
+        } else {
+            redraw_marks(&widget);
+        }
+        child = widget.next_sibling();
     }
 }
 
@@ -265,7 +341,7 @@ fn cell_label(item: &relm4::gtk::ListItem) -> relm4::gtk::Label {
 fn up_arrow() -> relm4::gtk::DrawingArea {
     let area = relm4::gtk::DrawingArea::new();
     area.set_content_width(12);
-    area.set_content_height(9);
+    area.set_content_height(12);
     area.set_valign(relm4::gtk::Align::Center);
     area.set_visible(false);
     area.set_draw_func(|area, cr, w, h| {

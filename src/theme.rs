@@ -206,9 +206,8 @@ label.glyph {{
   margin: 0;
   min-height: 0;
 }}
-label.glyph.cursor {{
+.cursor-mark {{
   color: #ffffff;
-  font-size: 13px;
 }}
 label.file-icon {{
   font-size: 13px;

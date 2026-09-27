@@ -108,6 +108,8 @@ const MEMORY: &[(&str, fn() -> Result<(), String>)] = &[
     ("refresh_bumps_token", refresh_bumps_token),
     ("empty_mark_uses_cursor", empty_mark_uses_cursor),
     ("history_back", history_back),
+    ("navigate_waits_for_listing", navigate_waits_for_listing),
+    ("failed_listing_keeps_folder", failed_listing_keeps_folder),
     ("new_tab_has_own_listing", new_tab_has_own_listing),
     ("theme_fallback_without_file", theme_fallback_without_file),
     ("places_include_home_and_root", places_include_home_and_root),
@@ -399,9 +401,47 @@ fn empty_mark_uses_cursor() -> Result<(), String> {
 
 fn history_back() -> Result<(), String> {
     let mut state = AppState::new(pb("/left"), pb("/right"));
-    state.navigate(PaneId::Left, pb("/left/child"), true);
-    let (path, _) = state.go_back(PaneId::Left).ok_or("no history")?;
-    eq(path, pb("/left"), "history")
+    let token = state.navigate(PaneId::Left, pb("/left/child"), true);
+    state.apply_listing(PaneId::Left, 0, token, Vec::new());
+    let (path, token) = state.go_back(PaneId::Left).ok_or("no history")?;
+    eq(path, pb("/left"), "history")?;
+    state.apply_listing(PaneId::Left, 0, token, Vec::new());
+    eq(state.tab(PaneId::Left).path.clone(), pb("/left"), "back committed")?;
+    eq(state.tab(PaneId::Left).forward.clone(), vec![pb("/left/child")], "forward")
+}
+
+fn navigate_waits_for_listing() -> Result<(), String> {
+    let mut state = AppState::new(pb("/left"), pb("/right"));
+    state.tab_mut(PaneId::Left).entries = vec![Entry::dotdot(), file("a.txt", 1), file("b.txt", 1)];
+    state.tab_mut(PaneId::Left).cursor = 2;
+    let token = state.navigate(PaneId::Left, pb("/left/sub"), true);
+    eq(state.tab(PaneId::Left).path.clone(), pb("/left"), "path while loading")?;
+    eq(state.tab(PaneId::Left).cursor, 2, "cursor while loading")?;
+    eq(state.tab(PaneId::Left).entries.len(), 3, "rows while loading")?;
+    if !state.apply_listing(PaneId::Left, 0, token, vec![Entry::dotdot()]) {
+        return Err("listing ignored".into());
+    }
+    eq(state.tab(PaneId::Left).path.clone(), pb("/left/sub"), "path after listing")?;
+    eq(state.tab(PaneId::Left).cursor, 0, "cursor after listing")?;
+    eq(state.tab(PaneId::Left).back.clone(), vec![pb("/left")], "history after listing")
+}
+
+fn failed_listing_keeps_folder() -> Result<(), String> {
+    let mut state = AppState::new(pb("/left"), pb("/right"));
+    state.tab_mut(PaneId::Left).entries = vec![Entry::dotdot(), file("a.txt", 1)];
+    state.tab_mut(PaneId::Left).cursor = 1;
+    let token = state.navigate(PaneId::Left, pb("/net/dead"), true);
+    if !state.cancel_load(PaneId::Left, token) {
+        return Err("cancel missed".into());
+    }
+    if state.apply_listing(PaneId::Left, 0, token, Vec::new()) {
+        return Err("late listing applied".into());
+    }
+    eq(state.tab(PaneId::Left).path.clone(), pb("/left"), "path")?;
+    eq(state.tab(PaneId::Left).cursor, 1, "cursor")?;
+    eq(state.tab(PaneId::Left).back.len(), 0, "history")?;
+    let (path, _) = state.refresh(PaneId::Left);
+    eq(path, pb("/left"), "refresh after cancel")
 }
 
 fn new_tab_has_own_listing() -> Result<(), String> {
@@ -490,11 +530,12 @@ systemd-1 /mnt/seagate12tb autofs rw 0 0
 fn ctrl_arrow_shows_active_dir_on_other_pane() -> Result<(), String> {
     let mut state = AppState::new(pb("/left"), pb("/right"));
     state.tab_mut(PaneId::Left).cursor = 2;
-    let (dest, path, _) = state.mirror_to_other();
+    let (dest, path, token) = state.mirror_to_other();
     if dest != PaneId::Right || state.tab(PaneId::Left).cursor != 2 {
         return Err("source moved".into());
     }
     eq(path, pb("/left"), "mirrored")?;
+    state.apply_listing(dest, 0, token, Vec::new());
     eq(state.tab(PaneId::Right).path.clone(), pb("/left"), "other pane")
 }
 

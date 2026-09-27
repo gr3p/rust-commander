@@ -35,6 +35,14 @@ impl PaneId {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum Step {
+    Record,
+    Replace,
+    Back,
+    Forward,
+}
+
 #[derive(Clone, Debug)]
 pub struct Tab {
     pub path: PathBuf,
@@ -44,6 +52,8 @@ pub struct Tab {
     pub back: Vec<PathBuf>,
     pub forward: Vec<PathBuf>,
     pub token: u64,
+    // The tab stays in the old folder until the listing for `token` arrives.
+    pending: Option<(PathBuf, Step)>,
 }
 
 impl Tab {
@@ -56,7 +66,35 @@ impl Tab {
             back: Vec::new(),
             forward: Vec::new(),
             token: fresh_token(),
+            pending: None,
         }
+    }
+
+    fn wait_for(&mut self, path: PathBuf, step: Step) -> u64 {
+        self.pending = Some((path, step));
+        self.token = fresh_token();
+        self.token
+    }
+
+    fn commit(&mut self, path: PathBuf, step: Step) {
+        match step {
+            Step::Record if self.path != path => {
+                self.back.push(self.path.clone());
+                self.forward.clear();
+            }
+            Step::Record | Step::Replace => {}
+            Step::Back => {
+                self.back.pop();
+                self.forward.push(self.path.clone());
+            }
+            Step::Forward => {
+                self.forward.pop();
+                self.back.push(self.path.clone());
+            }
+        }
+        self.path = path;
+        self.cursor = 0;
+        self.marked.clear();
     }
 }
 
@@ -212,17 +250,7 @@ impl AppState {
     }
 
     pub fn navigate(&mut self, id: PaneId, path: PathBuf, record: bool) -> u64 {
-        let tab = self.tab_mut(id);
-        if record && tab.path != path {
-            tab.back.push(tab.path.clone());
-            tab.forward.clear();
-        }
-        tab.path = path;
-        tab.entries.clear();
-        tab.cursor = 0;
-        tab.marked.clear();
-        tab.token = fresh_token();
-        tab.token
+        self.tab_mut(id).wait_for(path, if record { Step::Record } else { Step::Replace })
     }
 
     pub fn enter(&mut self) -> Option<(PaneId, PathBuf, u64)> {
@@ -245,34 +273,24 @@ impl AppState {
         Some((id, parent, token))
     }
 
+    // A refresh during a pending move reloads the target, not the folder on screen.
     pub fn refresh(&mut self, id: PaneId) -> (PathBuf, u64) {
         let tab = self.tab_mut(id);
         tab.token = fresh_token();
-        (tab.path.clone(), tab.token)
+        let path = tab.pending.as_ref().map_or(&tab.path, |(path, _)| path).clone();
+        (path, tab.token)
     }
 
     pub fn go_back(&mut self, id: PaneId) -> Option<(PathBuf, u64)> {
-        let prev = self.tab_mut(id).back.pop()?;
         let tab = self.tab_mut(id);
-        tab.forward.push(tab.path.clone());
-        tab.path = prev.clone();
-        tab.entries.clear();
-        tab.cursor = 0;
-        tab.marked.clear();
-        tab.token = fresh_token();
-        Some((prev, tab.token))
+        let prev = tab.back.last()?.clone();
+        Some((prev.clone(), tab.wait_for(prev, Step::Back)))
     }
 
     pub fn go_forward(&mut self, id: PaneId) -> Option<(PathBuf, u64)> {
-        let next = self.tab_mut(id).forward.pop()?;
         let tab = self.tab_mut(id);
-        tab.back.push(tab.path.clone());
-        tab.path = next.clone();
-        tab.entries.clear();
-        tab.cursor = 0;
-        tab.marked.clear();
-        tab.token = fresh_token();
-        Some((next, tab.token))
+        let next = tab.forward.last()?.clone();
+        Some((next.clone(), tab.wait_for(next, Step::Forward)))
     }
 
     pub fn apply_listing(&mut self, id: PaneId, tab_index: usize, token: u64, entries: Vec<Entry>) -> bool {
@@ -285,6 +303,9 @@ impl AppState {
             return false;
         };
         let _ = tab_index;
+        if let Some((path, step)) = tab.pending.take() {
+            tab.commit(path, step);
+        }
         tab.entries = entries;
         let vis_len = listing::visible_indices(&tab.entries, sort, ascending, show_hidden, &filter).len();
         if vis_len == 0 {
@@ -292,6 +313,16 @@ impl AppState {
         } else if tab.cursor >= vis_len {
             tab.cursor = vis_len - 1;
         }
+        true
+    }
+
+    // Failed or timed out: stay in the old folder. A fresh token makes a late answer miss.
+    pub fn cancel_load(&mut self, id: PaneId, token: u64) -> bool {
+        let Some(tab) = self.pane_mut(id).tabs.iter_mut().find(|tab| tab.token == token) else {
+            return false;
+        };
+        tab.pending = None;
+        tab.token = fresh_token();
         true
     }
 

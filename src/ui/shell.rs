@@ -28,7 +28,6 @@ pub struct PaneUi {
     pub picture: gtk::Picture,
     pub picture_scroll: gtk::ScrolledWindow,
     pub preview_kind: gtk::Stack,
-    pub spinner: gtk::Spinner,
 }
 
 pub struct Shell {
@@ -625,17 +624,10 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     stack.add_named(&scroll, Some("list"));
     stack.add_named(&preview_kind, Some("preview"));
     stack.set_vexpand(true);
-    let spinner = gtk::Spinner::new();
-    let overlay = gtk::Overlay::new();
-    overlay.set_child(Some(&stack));
-    spinner.set_halign(gtk::Align::Center);
-    spinner.set_valign(gtk::Align::Center);
-    spinner.set_can_target(false);
-    overlay.add_overlay(&spinner);
     column.append(&tabs);
     column.append(&path);
     column.append(&filter);
-    column.append(&overlay);
+    column.append(&stack);
     frame.set_child(Some(&column));
     frame.add_css_class("pane");
     PaneUi {
@@ -651,7 +643,6 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
         picture,
         picture_scroll,
         preview_kind,
-        spinner,
     }
 }
 
