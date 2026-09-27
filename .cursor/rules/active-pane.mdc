@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Aktiv panel
 
-Comarchy har två filpaneler. Den panel som har fokus är källan. Den andra är målet för kopiera och flytta.
+Rust Commander har två filpaneler. Den panel som har fokus är källan. Den andra är målet för kopiera och flytta.
 
 - Sätt `state.active` när en fillista får fokus, inte bara när markören flyttar sig.
 - Diskrad, genvägar, Enter, Backspace och övriga navigering byter katalog i den aktiva panelen.

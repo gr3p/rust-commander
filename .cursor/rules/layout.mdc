@@ -1,5 +1,5 @@
 ---
-description: Filkarta för Comarchy. Läs den innan du söker i trädet efter vilken modul som äger ett kommando eller en vy.
+description: Filkarta för Rust Commander. Läs den innan du söker i trädet efter vilken modul som äger ett kommando eller en vy.
 alwaysApply: false
 ---
 
@@ -25,10 +25,10 @@ Bibliotek i `src/lib.rs`. Fönstret startar i `src/main.rs` via `ui::run`.
 | Textvisare | `src/lister.rs` |
 | Bilder | `src/imageview.rs` |
 | SFV | `src/sfv.rs` |
-| Config | `src/config.rs`, fil `~/.config/comarchy/config.toml` |
+| Config | `src/config.rs`, fil `~/.config/rust-commander/config.toml` |
 | Bokmärken | `src/hotlist.rs` |
 | Diskar | `src/places.rs` |
 | Tema | `src/theme.rs` |
 | Rad i listan | `src/entry.rs` |
-| Logg | `src/log.rs`, fil `~/.local/state/comarchy/comarchy.log` |
+| Logg | `src/log.rs`, fil `~/.local/state/rust-commander/rust-commander.log` |
 | Tester | `tests/acceptance.rs` |
