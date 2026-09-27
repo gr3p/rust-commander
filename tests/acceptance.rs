@@ -144,6 +144,12 @@ const FS: &[&str] = &[
     "lister_text_hex_binary_window",
     "lister_large_file_reads_window_only",
     "bookmark_roundtrip_config",
+    "copy_onto_itself_keeps_source",
+    "rename_refuses_existing",
+    "file_never_replaces_folder",
+    "bad_config_value_keeps_bookmarks",
+    "copy_keeps_mode_and_time",
+    "non_utf8_name_is_kept",
 ];
 
 fn dispatch(name: &str, dir: &Path) -> Result<(), String> {
@@ -167,6 +173,12 @@ fn dispatch(name: &str, dir: &Path) -> Result<(), String> {
         "lister_text_hex_binary_window" => lister_text_hex_binary_window(dir),
         "lister_large_file_reads_window_only" => lister_large_file_reads_window_only(dir),
         "bookmark_roundtrip_config" => bookmark_roundtrip_config(dir),
+        "copy_onto_itself_keeps_source" => copy_onto_itself_keeps_source(dir),
+        "rename_refuses_existing" => rename_refuses_existing(dir),
+        "file_never_replaces_folder" => file_never_replaces_folder(dir),
+        "bad_config_value_keeps_bookmarks" => bad_config_value_keeps_bookmarks(dir),
+        "copy_keeps_mode_and_time" => copy_keeps_mode_and_time(dir),
+        "non_utf8_name_is_kept" => non_utf8_name_is_kept(dir),
         other => Err(format!("unknown case {other}")),
     }
 }
@@ -193,8 +205,8 @@ fn hidden_files_follow_toggle() -> Result<(), String> {
 
 fn sort_keys_order_entries() -> Result<(), String> {
     let entries = vec![
-        Entry { name: "b.txt".into(), size: 2, mtime: 20, mode: 0, flags: 0 },
-        Entry { name: "a.md".into(), size: 9, mtime: 10, mode: 0, flags: 0 },
+        Entry { name: "b.txt".into(), raw: None, size: 2, mtime: 20, mode: 0, flags: 0 },
+        Entry { name: "a.md".into(), raw: None, size: 9, mtime: 10, mode: 0, flags: 0 },
     ];
     let name = listing::visible_indices(&entries, SortKey::Name, true, true, "");
     eq(entries[name[0]].name.as_ref(), "a.md", "name")?;
@@ -212,8 +224,8 @@ fn columns_ext_date_attr() -> Result<(), String> {
     eq(listing::format_attr(0o100644), "-rw-r--r--".into(), "file attr")?;
     eq(listing::format_attr(0o040755), "drwxr-xr-x".into(), "dir attr")?;
     let entries = vec![
-        Entry { name: "a".into(), size: 1, mtime: 1, mode: 0o100644, flags: 0 },
-        Entry { name: "b".into(), size: 1, mtime: 1, mode: 0o100755, flags: 0 },
+        Entry { name: "a".into(), raw: None, size: 1, mtime: 1, mode: 0o100644, flags: 0 },
+        Entry { name: "b".into(), raw: None, size: 1, mtime: 1, mode: 0o100755, flags: 0 },
     ];
     let vis = listing::visible_indices(&entries, SortKey::Attr, true, true, "");
     eq(entries[vis[0]].name.as_ref(), "a", "attr sort")
@@ -227,8 +239,8 @@ fn file_icons_by_kind() -> Result<(), String> {
 }
 
 fn column_widths_follow_text() -> Result<(), String> {
-    let short = Entry { name: "a.md".into(), size: 12, mtime: 1_700_000_000, mode: 0o100644, flags: 0 };
-    let long = Entry { name: "readme.markdown".into(), size: 12, mtime: 1_700_000_000, mode: 0o100644, flags: 0 };
+    let short = Entry { name: "a.md".into(), raw: None, size: 12, mtime: 1_700_000_000, mode: 0o100644, flags: 0 };
+    let long = Entry { name: "readme.markdown".into(), raw: None, size: 12, mtime: 1_700_000_000, mode: 0o100644, flags: 0 };
     let a = listing::column_pixels(listing::column_chars(&[short]), 8);
     let b = listing::column_pixels(listing::column_chars(&[long]), 8);
     if b[0] <= a[0] {
@@ -504,10 +516,10 @@ fn terminal_argv_without_starting() -> Result<(), String> {
 
 fn external_argv() -> Result<(), String> {
     let editor = external::editor_argv("", Some("nvim"), Path::new("/tmp/a"));
-    eq(editor, vec!["nvim".to_string(), "/tmp/a".to_string()], "editor")?;
+    eq(editor, vec!["nvim".into(), "/tmp/a".into()], "editor")?;
     let viewer = external::viewer_argv("less -N", Path::new("/tmp/a"));
-    eq(viewer[0].as_str(), "less", "viewer")?;
-    eq(viewer[1].as_str(), "-N", "viewer arg")?;
+    eq(viewer[0].to_str(), Some("less"), "viewer")?;
+    eq(viewer[1].to_str(), Some("-N"), "viewer arg")?;
     let has = |name: &str| matches!(name, "gnome-text-editor" | "code" | "gnome-terminal" | "nvim");
     let auto = external::editor_argv_with("", None, has, Path::new("/tmp/a"));
     eq(
@@ -543,7 +555,7 @@ fn external_argv() -> Result<(), String> {
     if argv.iter().any(|arg| arg == "--started-from-file") {
         return Err("started-from-file kept".into());
     }
-    eq(argv.last().map(String::as_str), Some("@@"), "flatpak end")?;
+    eq(argv.last().and_then(|arg| arg.to_str()), Some("@@"), "flatpak end")?;
     if !argv.iter().any(|arg| arg == "file:///tmp/a%20b.mkv") {
         return Err(format!("uri {argv:?}"));
     }
@@ -1020,6 +1032,108 @@ fn bookmark_roundtrip_config(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn copy_onto_itself_keeps_source(dir: &Path) -> Result<(), String> {
+    let file = dir.join("a.txt");
+    fs::write(&file, b"keep").map_err(s)?;
+    let folder = dir.join("tree");
+    fs::create_dir(&folder).map_err(s)?;
+    fs::write(folder.join("b.txt"), b"keep").map_err(s)?;
+    if copy(&[(file.clone(), file.clone())]).is_ok() || copy(&[(folder.clone(), folder.clone())]).is_ok() {
+        return Err("self copy accepted".into());
+    }
+    if transfer(&[(file.clone(), file.clone())], Kind::Move).is_ok() {
+        return Err("self move accepted".into());
+    }
+    eq(fs::read(&file).map_err(s)?, b"keep".to_vec(), "file")?;
+    eq(fs::read(folder.join("b.txt")).map_err(s)?, b"keep".to_vec(), "folder file")
+}
+
+fn rename_refuses_existing(dir: &Path) -> Result<(), String> {
+    let old = dir.join("old.txt");
+    let other = dir.join("existing");
+    fs::write(&old, b"old").map_err(s)?;
+    fs::write(&other, b"other").map_err(s)?;
+    if ops::rename_in_place(&old, "existing").is_ok() || ops::rename_in_place(&old, "../x").is_ok() {
+        return Err("rename accepted".into());
+    }
+    eq(fs::read(&old).map_err(s)?, b"old".to_vec(), "old")?;
+    eq(fs::read(&other).map_err(s)?, b"other".to_vec(), "existing")?;
+    ops::rename_in_place(&old, "new.txt").map_err(s)?;
+    eq(fs::read(dir.join("new.txt")).map_err(s)?, b"old".to_vec(), "renamed")
+}
+
+fn file_never_replaces_folder(dir: &Path) -> Result<(), String> {
+    let src = dir.join("src");
+    let dest = dir.join("dest");
+    fs::create_dir_all(&dest).map_err(s)?;
+    fs::write(&src, b"file").map_err(s)?;
+    fs::create_dir_all(dest.join("src")).map_err(s)?;
+    fs::write(dest.join("src/inner.txt"), b"inner").map_err(s)?;
+    if copy(&[(src.clone(), dest.join("src"))]).is_ok() {
+        return Err("folder replaced".into());
+    }
+    eq(fs::read(dest.join("src/inner.txt")).map_err(s)?, b"inner".to_vec(), "inner")
+}
+
+fn bad_config_value_keeps_bookmarks(dir: &Path) -> Result<(), String> {
+    let path = dir.join("config.toml");
+    let mut cfg = Config::default();
+    cfg.bookmarks.push(Bookmark { name: "Work".into(), path: dir.join("work"), target: PathBuf::new(), kind: String::new() });
+    config::save_to(&path, &cfg).map_err(s)?;
+    let text = fs::read_to_string(&path).map_err(s)?;
+    if !text.contains("show_hidden = false") {
+        return Err("unexpected config text".into());
+    }
+    fs::write(&path, text.replace("show_hidden = false", "show_hidden = \"x\"")).map_err(s)?;
+    let loaded = config::load_from(&path);
+    eq(loaded.bookmarks.len(), 1, "bookmarks")?;
+    if !dir.join("config.toml.bad").is_file() {
+        return Err("no backup".into());
+    }
+    Ok(())
+}
+
+fn copy_keeps_mode_and_time(dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+    let tree = dir.join("tree");
+    fs::create_dir(&tree).map_err(s)?;
+    let script = tree.join("run.sh");
+    fs::write(&script, b"#!/bin/sh\n").map_err(s)?;
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o4750)).map_err(s)?;
+    File::options().write(true).open(&script).and_then(|f| f.set_modified(when)).map_err(s)?;
+    fs::set_permissions(&tree, fs::Permissions::from_mode(0o700)).map_err(s)?;
+    File::open(&tree).and_then(|f| f.set_modified(when)).map_err(s)?;
+    let dest = dir.join("copy");
+    copy(&[(tree, dest.clone())])?;
+    let copied = fs::metadata(dest.join("run.sh")).map_err(s)?;
+    eq(copied.permissions().mode() & 0o7777, 0o750, "file mode without setuid")?;
+    eq(copied.modified().map_err(s)?, when, "file time")?;
+    let folder = fs::metadata(&dest).map_err(s)?;
+    eq(folder.permissions().mode() & 0o7777, 0o700, "folder mode")?;
+    eq(folder.modified().map_err(s)?, when, "folder time")
+}
+
+fn non_utf8_name_is_kept(dir: &Path) -> Result<(), String> {
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::OsStr::from_bytes(b"caf\xe9.txt");
+    fs::write(dir.join(name), b"latin1").map_err(s)?;
+    let entries = listing::read_dir(dir).map_err(s)?;
+    let entry = entries.iter().find(|e| e.raw.is_some()).ok_or("raw name missing")?;
+    eq(entry.name.as_ref(), "caf\u{fffd}.txt", "shown name")?;
+    let path = listing::entry_path(dir, entry);
+    eq(path.clone(), dir.join(name), "path")?;
+    let argv = external::desktop_argv("app %f %u", &path);
+    eq(argv[1].as_os_str(), path.as_os_str(), "argv path")?;
+    if !argv[2].to_string_lossy().ends_with("/caf%E9.txt") {
+        return Err(format!("uri {argv:?}"));
+    }
+    let dest = dir.join("out");
+    fs::create_dir(&dest).map_err(s)?;
+    copy(&[(path, dest.join(name))])?;
+    eq(fs::read(dest.join(name)).map_err(s)?, b"latin1".to_vec(), "copied")
+}
+
 fn copy(items: &[(PathBuf, PathBuf)]) -> Result<(), String> {
     transfer(items, Kind::Copy)
 }
@@ -1030,7 +1144,7 @@ fn transfer(items: &[(PathBuf, PathBuf)], kind: Kind) -> Result<(), String> {
 }
 
 fn file(name: &str, size: u64) -> Entry {
-    Entry { name: name.into(), size, mtime: 1, mode: 0, flags: 0 }
+    Entry { name: name.into(), raw: None, size, mtime: 1, mode: 0, flags: 0 }
 }
 
 fn pb(path: &str) -> PathBuf {
