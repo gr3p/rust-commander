@@ -175,26 +175,26 @@ pub fn extension(name: &str) -> &str {
     }
 }
 
-// Font Awesome glyphs in JetBrainsMono Nerd Font. One em, same height as the name.
+// GTK symbolic icon names, resolved by the active icon theme.
 pub fn file_icon(name: &str, is_dir: bool, is_link: bool) -> &'static str {
     if name == ".." {
         return "";
     }
     if is_link {
-        return "\u{f0c1}";
+        return "insert-link-symbolic";
     }
     if is_dir {
-        return "\u{f07b}";
+        return "folder-symbolic";
     }
     match extension(name).to_ascii_lowercase().as_str() {
-        "txt" | "md" | "log" => "\u{f15c}",
-        "mp3" | "flac" | "wav" | "ogg" => "\u{f001}",
-        "jpg" | "png" | "gif" | "webp" => "\u{f1c5}",
-        "mp4" | "mkv" | "webm" => "\u{f1c8}",
-        "zip" | "7z" | "rar" | "tar" | "gz" => "\u{f1c6}",
-        "pdf" => "\u{f1c1}",
-        "rs" | "py" | "js" | "ts" | "go" | "c" | "h" => "\u{f1c9}",
-        _ => "\u{f15b}",
+        "txt" | "md" | "log" => "text-x-generic-symbolic",
+        "mp3" | "flac" | "wav" | "ogg" => "audio-x-generic-symbolic",
+        "jpg" | "png" | "gif" | "webp" => "image-x-generic-symbolic",
+        "mp4" | "mkv" | "webm" => "video-x-generic-symbolic",
+        "zip" | "7z" | "rar" | "tar" | "gz" => "package-x-generic-symbolic",
+        "pdf" => "text-x-generic-symbolic",
+        "rs" | "py" | "js" | "ts" | "go" | "c" | "h" => "text-x-generic-symbolic",
+        _ => "text-x-generic-symbolic",
     }
 }
 

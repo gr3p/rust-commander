@@ -122,10 +122,12 @@ fn column(
         if id == "name" {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
             row.set_hexpand(true);
-            let icon = gtk::Label::new(None);
+            let icon = gtk::Image::new();
             icon.add_css_class("file-icon");
+            icon.set_pixel_size(14);
             icon.set_visible(false);
             row.append(&up_arrow());
+            row.append(&folder_icon());
             row.append(&icon);
             row.append(&label);
             item.set_child(Some(&row));
@@ -318,10 +320,14 @@ fn apply_marked(label: &relm4::gtk::Label, on: bool) {
 
 fn paint_file_icon(item: &relm4::gtk::ListItem, obj: &EntryObject) {
     let Some(row) = item.child().and_then(|child| child.downcast::<relm4::gtk::Box>().ok()) else { return };
-    let Some(icon) = row.first_child().and_then(|arrow| arrow.next_sibling()).and_then(|widget| widget.downcast::<relm4::gtk::Label>().ok()) else { return };
-    let text = obj.icon();
-    icon.set_visible(!text.is_empty());
-    icon.set_label(&text);
+    let Some(folder) = row.first_child().and_then(|arrow| arrow.next_sibling()) else { return };
+    let Some(icon) = folder.next_sibling().and_then(|widget| widget.downcast::<relm4::gtk::Image>().ok()) else { return };
+    let name = obj.icon();
+    // Themes draw folder-symbolic as an outline, so directories get the filled folder instead.
+    let filled = name == "folder-symbolic";
+    folder.set_visible(filled);
+    icon.set_visible(!filled && !name.is_empty());
+    icon.set_icon_name(Some(&name));
     if obj.is_dir() {
         icon.add_css_class("dir");
     } else {
@@ -336,6 +342,32 @@ fn cell_label(item: &relm4::gtk::ListItem) -> relm4::gtk::Label {
     } else {
         child.downcast().unwrap()
     }
+}
+
+fn folder_icon() -> relm4::gtk::DrawingArea {
+    let area = relm4::gtk::DrawingArea::new();
+    area.add_css_class("file-icon");
+    area.add_css_class("dir");
+    area.set_content_width(14);
+    area.set_content_height(14);
+    area.set_valign(relm4::gtk::Align::Center);
+    area.set_visible(false);
+    area.set_draw_func(|area, cr, w, h| {
+        let color = area.style_context().color();
+        cr.set_source_rgba(color.red() as f64, color.green() as f64, color.blue() as f64, color.alpha() as f64);
+        cr.scale(w as f64 / 14.0, h as f64 / 14.0);
+        let (r, pi) = (1.5, std::f64::consts::PI);
+        // Tab on the upper left, then the body. Straight edges sit on whole pixels at 14 px.
+        cr.arc(r, 1.0 + r, r, pi, 1.5 * pi);
+        cr.line_to(5.0, 1.0);
+        cr.line_to(7.0, 3.0);
+        cr.arc(14.0 - r, 3.0 + r, r, 1.5 * pi, 2.0 * pi);
+        cr.arc(14.0 - r, 13.0 - r, r, 0.0, 0.5 * pi);
+        cr.arc(r, 13.0 - r, r, 0.5 * pi, pi);
+        cr.close_path();
+        let _ = cr.fill();
+    });
+    area
 }
 
 fn up_arrow() -> relm4::gtk::DrawingArea {

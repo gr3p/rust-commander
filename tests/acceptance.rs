@@ -234,10 +234,10 @@ fn columns_ext_date_attr() -> Result<(), String> {
 }
 
 fn file_icons_by_kind() -> Result<(), String> {
-    eq(listing::file_icon("docs", true, false), "\u{f07b}", "dir")?;
-    eq(listing::file_icon("note.txt", false, false), "\u{f15c}", "txt")?;
-    eq(listing::file_icon("song.mp3", false, false), "\u{f001}", "mp3")?;
-    eq(listing::file_icon("data.bin", false, false), "\u{f15b}", "other")
+    eq(listing::file_icon("docs", true, false), "folder-symbolic", "dir")?;
+    eq(listing::file_icon("note.txt", false, false), "text-x-generic-symbolic", "txt")?;
+    eq(listing::file_icon("song.mp3", false, false), "audio-x-generic-symbolic", "mp3")?;
+    eq(listing::file_icon("data.bin", false, false), "text-x-generic-symbolic", "other")
 }
 
 fn column_widths_follow_text() -> Result<(), String> {

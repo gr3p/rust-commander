@@ -209,14 +209,13 @@ label.glyph {{
 .cursor-mark {{
   color: #ffffff;
 }}
-label.file-icon {{
-  font-size: 13px;
+.file-icon {{
   min-height: 0;
   min-width: 0;
   padding: 0;
-  margin: 0;
+  margin: 0 2px 0 -2px;
 }}
-label.file-icon.dir {{
+.file-icon.dir {{
   color: {accent};
 }}
 columnview > listview > row > cell:first-child {{
