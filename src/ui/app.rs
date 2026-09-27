@@ -177,7 +177,11 @@ pub struct App {
 }
 
 pub fn run(smoke: bool) {
-    rust_commander::log::info(&format!("start log={}", rust_commander::log::path().display()));
+    rust_commander::log::info(&format!(
+        "start version={} log={}",
+        rust_commander::version(),
+        rust_commander::log::path().display()
+    ));
     let args: Vec<String> = std::env::args().filter(|arg| arg != "--smoke").collect();
     let app = RelmApp::new("se.rustcommander.RustCommander").with_args(args);
     app.allow_multiple_instances(true);
@@ -192,7 +196,7 @@ impl SimpleComponent for App {
 
     view! {
         gtk::Window {
-            set_title: Some("Rust Commander"),
+            set_title: Some(rust_commander::app_title()),
             set_default_width: 1200,
             set_default_height: 760,
         }

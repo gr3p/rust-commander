@@ -270,7 +270,7 @@ impl App {
             pane.preview.set_editable(false);
         }
         paint_edit(&self.shell.edit_button, false);
-        self.shell.window.set_title(Some("Rust Commander"));
+        self.shell.window.set_title(Some(rust_commander::app_title()));
         if reload {
             self.note_preview_target();
             self.kick_preview(sender);

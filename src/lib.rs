@@ -1,3 +1,11 @@
+pub fn version() -> &'static str {
+    env!("RC_VERSION")
+}
+
+pub fn app_title() -> &'static str {
+    env!("RC_TITLE")
+}
+
 pub mod archive;
 pub mod config;
 pub mod log;
