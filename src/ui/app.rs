@@ -170,6 +170,7 @@ pub struct App {
     edit_changes: Rc<Cell<u64>>,
     quick_edit: Option<QuickEdit>,
     preview_live: Arc<AtomicU64>,
+    copy_gen: u64,
     loads: Vec<(u64, Arc<AtomicBool>)>,
     search: Option<search::SearchUi>,
     search_gen: u64,
@@ -313,6 +314,7 @@ impl SimpleComponent for App {
             edit_changes,
             quick_edit: None,
             preview_live: Arc::new(AtomicU64::new(0)),
+            copy_gen: 0,
             loads: Vec::new(),
             search: None,
             search_gen: 0,
@@ -458,6 +460,10 @@ impl App {
             Msg::SetCharset(charset) => self.set_charset(charset, sender),
             Msg::ToggleQuickEdit => self.toggle_quick_edit(sender),
             Msg::SaveQuick => self.save_quick(),
+            Msg::DiscardQuick => self.discard_quick(sender),
+            Msg::CopyPreviewPath => self.copy_preview_path(),
+            Msg::CopyPreviewImage => self.copy_preview_image(sender),
+            Msg::PreviewImageCopied { generation, image } => self.finish_image_copy(generation, image),
             Msg::ShellExited(id) => self.on_shell_exited(id),
             Msg::SelectShell(id) => self.select_shell(id),
             Msg::CloseWindow => {
@@ -565,6 +571,7 @@ impl App {
                 return;
             }
             match key {
+                Key::c | Key::C if self.preview_image_focused() => self.copy_preview_image(sender),
                 Key::F3 => self.set_sort(rust_commander::listing::SortKey::Name),
                 Key::F4 => self.set_sort(rust_commander::listing::SortKey::Ext),
                 Key::F5 if shift => self.start_pack(true, sender),
@@ -592,6 +599,7 @@ impl App {
                         self.touch(id);
                     }
                 }
+                Key::d | Key::D if self.shell.editing.get() => self.discard_quick(sender),
                 Key::d | Key::D => self.toggle_hotlist(sender),
                 Key::e | Key::E if self.state.quick_view && !self.shell.editing.get() => {
                     self.toggle_quick_edit(sender);
@@ -1206,6 +1214,8 @@ impl App {
         }
         self.restamp_shells();
         let mut pending: [Option<Vec<Entry>>; 2] = [None, None];
+        // First sync only paints the accent. A later focus change blinks that border, then it stays.
+        let focused_before = self.shell.panes.iter().any(|ui| ui.frame.has_css_class("pane-active"));
         for pane in 0..2 {
             let id = PaneId::from_index(pane);
             let active = self.state.active == id;
@@ -1236,6 +1246,9 @@ impl App {
             let class = if active { "pane-active" } else { "pane" };
             if !ui.frame.has_css_class(class) {
                 ui.frame.set_css_classes(&[class]);
+                if active && focused_before {
+                    shell::blink_frame(&ui.frame, pane);
+                }
             }
             if !ui.path.has_focus() && ui.path.text().as_str() != path {
                 ui.path.set_text(&path);

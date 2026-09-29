@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use relm4::gtk;
@@ -16,6 +16,7 @@ use rust_commander::listing::SortKey;
 use super::row::{self, EntryObject};
 
 static FLASH_ENABLED: AtomicBool = AtomicBool::new(true);
+static PANE_BLINK: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 
 pub struct PaneUi {
     pub frame: gtk::Frame,
@@ -51,6 +52,7 @@ pub struct Shell {
     pub drives: Vec<(PathBuf, gtk::Button)>,
     pub edit_button: gtk::Button,
     pub save_button: gtk::Button,
+    pub discard_button: gtk::Button,
     pub editing: Rc<Cell<bool>>,
     pub shell_key: gtk::Label,
     pub shell_bar: gtk::Box,
@@ -178,8 +180,10 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
     let text_modes = charset_bar(sender);
     let edit_button = bar_button("Ctrl+E Edit", || super::msg::Msg::ToggleQuickEdit, sender);
     let save_button = bar_button("Ctrl+S Save", || super::msg::Msg::SaveQuick, sender);
+    let discard_button = bar_button("Ctrl+D Discard", || super::msg::Msg::DiscardQuick, sender);
     text_modes.bar.append(&edit_button);
     text_modes.bar.append(&save_button);
+    text_modes.bar.append(&discard_button);
     let editing = Rc::new(Cell::new(false));
     let mode_bar = gtk::Stack::new();
     mode_bar.set_vhomogeneous(false);
@@ -251,6 +255,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
         drives,
         edit_button,
         save_button,
+        discard_button,
         editing,
         shell_key,
         shell_bar,
@@ -412,6 +417,34 @@ pub fn blink_widget(widget: &gtk::Widget) {
     });
 }
 
+pub fn blink_frame(frame: &gtk::Frame, pane: usize) {
+    if !FLASH_ENABLED.load(Ordering::Relaxed) || pane > 1 {
+        return;
+    }
+    let token = PANE_BLINK[pane].fetch_add(1, Ordering::Relaxed) + 1;
+    let frame = frame.clone();
+    frame.add_css_class("pane-blink");
+    let step = Cell::new(0u8);
+    gtk::glib::timeout_add_local(Duration::from_millis(80), move || {
+        if PANE_BLINK[pane].load(Ordering::Relaxed) != token {
+            return gtk::glib::ControlFlow::Break;
+        }
+        let n = step.get() + 1;
+        step.set(n);
+        if n % 2 == 0 && frame.has_css_class("pane-active") {
+            frame.add_css_class("pane-blink");
+        } else {
+            frame.remove_css_class("pane-blink");
+        }
+        if n >= 3 {
+            frame.remove_css_class("pane-blink");
+            gtk::glib::ControlFlow::Break
+        } else {
+            gtk::glib::ControlFlow::Continue
+        }
+    });
+}
+
 pub fn set_flash_enabled(enabled: bool) {
     FLASH_ENABLED.store(enabled, Ordering::Relaxed);
 }
@@ -534,9 +567,9 @@ fn edit_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
     use gtk::gdk::Key;
     let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
     let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
-    // Ctrl+V leaves for view; Ctrl+E is reserved so typing stays free.
+    // Escape and Ctrl+V leave. Ctrl+D discards. Ctrl+S saves. Ctrl+E stays out of the text.
     key == Key::Escape
-        || (ctrl && !alt && matches!(key, Key::s | Key::S | Key::v | Key::V | Key::e | Key::E))
+        || (ctrl && !alt && matches!(key, Key::s | Key::S | Key::v | Key::V | Key::e | Key::E | Key::d | Key::D))
 }
 
 fn terminal_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
@@ -602,6 +635,45 @@ fn is_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
             | Key::KP_End
     ) || ctrl
         || alt
+}
+
+fn image_menu(sender: &relm4::Sender<super::msg::Msg>) -> gtk::Popover {
+    let menu = gtk::Popover::new();
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    column.set_margin_all(4);
+    let copy_path = gtk::Button::with_label("Copy path");
+    let copy_image = gtk::Button::with_label("Copy image");
+    copy_path.add_css_class("fkey");
+    copy_image.add_css_class("fkey");
+    copy_path.set_focus_on_click(false);
+    copy_image.set_focus_on_click(false);
+    let path_menu = menu.clone();
+    let tx = sender.clone();
+    copy_path.connect_clicked(move |_| {
+        path_menu.popdown();
+        tx.emit(super::msg::Msg::CopyPreviewPath);
+    });
+    let image_menu = menu.clone();
+    let tx = sender.clone();
+    copy_image.connect_clicked(move |_| {
+        image_menu.popdown();
+        tx.emit(super::msg::Msg::CopyPreviewImage);
+    });
+    column.append(&copy_path);
+    column.append(&copy_image);
+    menu.set_child(Some(&column));
+    menu
+}
+
+fn under(widget: &gtk::Widget, ancestor: &gtk::Widget) -> bool {
+    let mut current = Some(widget.clone());
+    while let Some(widget) = current {
+        if &widget == ancestor {
+            return true;
+        }
+        current = widget.parent();
+    }
+    false
 }
 
 fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<Cell<usize>>) -> PaneUi {
@@ -683,18 +755,6 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
         tx.emit(super::msg::Msg::FocusPane(index));
     });
     list.add_controller(focus);
-    let watch = gtk::EventControllerLegacy::new();
-    watch.set_propagation_phase(gtk::PropagationPhase::Capture);
-    let tx = sender.clone();
-    let active_pane = active_pane.clone();
-    watch.connect_event(move |_, event| {
-        if event.event_type() == gtk::gdk::EventType::ButtonPress {
-            active_pane.set(index);
-            tx.emit(super::msg::Msg::FocusPane(index));
-        }
-        gtk::glib::Propagation::Proceed
-    });
-    frame.add_controller(watch);
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_child(Some(&list));
     scroll.set_vexpand(true);
@@ -714,6 +774,7 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     picture.set_content_fit(gtk::ContentFit::Contain);
     picture.set_hexpand(true);
     picture.set_vexpand(true);
+    picture.set_focusable(true);
     let picture_scroll = gtk::ScrolledWindow::new();
     picture_scroll.set_child(Some(&picture));
     picture_scroll.set_hexpand(true);
@@ -723,6 +784,44 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     preview_kind.add_named(&preview_scroll, Some("text"));
     preview_kind.add_named(&picture_scroll, Some("image"));
     preview_kind.set_vexpand(true);
+    let menu = image_menu(sender);
+    menu.set_parent(&frame);
+    let watch = gtk::EventControllerLegacy::new();
+    watch.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let tx = sender.clone();
+    let active_pane = active_pane.clone();
+    let frame_hit = frame.clone();
+    let preview_root: gtk::Widget = preview_kind.clone().upcast();
+    let picture_focus = picture.clone();
+    let preview_page = preview_kind.clone();
+    watch.connect_event(move |_, event| {
+        if event.event_type() != gtk::gdk::EventType::ButtonPress {
+            return gtk::glib::Propagation::Proceed;
+        }
+        // The preview is not a file pane. A click there must not hide it.
+        let in_preview = event.position().is_some_and(|(x, y)| {
+            frame_hit.pick(x, y, gtk::PickFlags::DEFAULT).is_some_and(|hit| under(&hit, &preview_root))
+        });
+        if !in_preview {
+            active_pane.set(index);
+            tx.emit(super::msg::Msg::FocusPane(index));
+            return gtk::glib::Propagation::Proceed;
+        }
+        let image = preview_page.visible_child_name().as_deref() == Some("image");
+        let button = event.downcast_ref::<gtk::gdk::ButtonEvent>().map(|event| event.button()).unwrap_or(1);
+        if image && (button == 1 || button == 3) {
+            picture_focus.grab_focus();
+        }
+        if image && button == 3 {
+            if let Some((x, y)) = event.position() {
+                menu.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+                menu.popup();
+            }
+            return gtk::glib::Propagation::Stop;
+        }
+        gtk::glib::Propagation::Proceed
+    });
+    frame.add_controller(watch);
     let terminal_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
     terminal_slot.set_hexpand(true);
     terminal_slot.set_vexpand(true);
@@ -776,7 +875,7 @@ pub fn paint_terminal(term: &Terminal, theme: &rust_commander::theme::TerminalTh
 
 #[cfg(test)]
 mod tests {
-    use super::entry_input;
+    use super::{edit_command, entry_input};
     use relm4::gtk::gdk::{Key, ModifierType};
 
     #[test]
@@ -789,5 +888,13 @@ mod tests {
         assert!(!entry_input(Key::s, ModifierType::CONTROL_MASK));
         assert!(!entry_input(Key::S, ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK));
         assert!(!entry_input(Key::Escape, ModifierType::empty()));
+    }
+
+    #[test]
+    fn editor_keeps_escape_and_discard() {
+        assert!(edit_command(Key::Escape, ModifierType::empty()));
+        assert!(edit_command(Key::d, ModifierType::CONTROL_MASK));
+        assert!(edit_command(Key::s, ModifierType::CONTROL_MASK));
+        assert!(!edit_command(Key::d, ModifierType::empty()));
     }
 }

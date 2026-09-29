@@ -252,7 +252,7 @@ impl App {
         if let Some(edit) = self.quick_edit.as_mut() {
             if edit.saved != changes && edit.armed != Some(changes) {
                 edit.armed = Some(changes);
-                self.status = "Unsaved changes: Ctrl+S saves, press again to discard".into();
+                self.status = "Unsaved changes: Ctrl+S saves, Ctrl+D discards, or press again".into();
                 return false;
             }
         }
@@ -276,6 +276,17 @@ impl App {
             self.kick_preview(sender);
         }
         self.focus_list();
+    }
+
+    pub(in crate::ui::app) fn discard_quick(&mut self, sender: &ComponentSender<Self>) {
+        if !self.shell.editing.get() {
+            return;
+        }
+        let dirty = self.quick_edit.as_ref().is_some_and(|edit| edit.saved != self.edit_changes.get());
+        self.stop_quick_edit(true, sender);
+        if dirty {
+            self.status = "Discarded".into();
+        }
     }
 
     pub(in crate::ui::app) fn save_quick(&mut self) {
@@ -430,6 +441,58 @@ impl App {
         Some(rust_commander::listing::entry_path(&self.state.tab(self.state.active).path, entry))
     }
 
+    pub(in crate::ui::app) fn preview_image_focused(&self) -> bool {
+        if !self.state.quick_view || self.shell.editing.get() {
+            return false;
+        }
+        let ui = &self.shell.panes[self.state.active.other().index()];
+        ui.preview_kind.visible_child_name().as_deref() == Some("image") && ui.picture.has_focus()
+    }
+
+    pub(in crate::ui::app) fn copy_preview_path(&mut self) {
+        let Some(path) = self.file_under_cursor() else { return };
+        let Some(display) = gtk::gdk::Display::default() else { return };
+        display.clipboard().set_text(&path.display().to_string());
+        self.status = "Path copied".into();
+    }
+
+    pub(in crate::ui::app) fn copy_preview_image(&mut self, sender: &ComponentSender<Self>) {
+        let Some(path) = self.file_under_cursor() else { return };
+        if !path.file_name().and_then(|name| name.to_str()).is_some_and(imageview::is_image) {
+            return;
+        }
+        self.copy_gen = self.copy_gen.wrapping_add(1);
+        let generation = self.copy_gen;
+        let tx = sender.input_sender().clone();
+        std::thread::spawn(move || {
+            let image = imageview::decode(&path, u32::MAX).map(|rgba| (rgba.width, rgba.height, rgba.pixels));
+            tx.emit(Msg::PreviewImageCopied { generation, image });
+        });
+    }
+
+    pub(in crate::ui::app) fn finish_image_copy(&mut self, generation: u64, image: Result<(u32, u32, Vec<u8>), String>) {
+        if generation != self.copy_gen {
+            return;
+        }
+        let (width, height, pixels) = match image {
+            Ok(image) => image,
+            Err(err) => {
+                self.status = err;
+                return;
+            }
+        };
+        let stride = width as usize * 4;
+        if height == 0 || stride == 0 || pixels.len() < stride * height as usize {
+            self.status = "Could not copy image".into();
+            return;
+        }
+        let Some(display) = gtk::gdk::Display::default() else { return };
+        let bytes = gtk::glib::Bytes::from(&pixels);
+        let texture = gtk::gdk::MemoryTexture::new(width as i32, height as i32, gtk::gdk::MemoryFormat::R8g8b8a8, &bytes, stride);
+        display.clipboard().set_texture(&texture);
+        self.status = "Image copied".into();
+    }
+
     pub(in crate::ui::app) fn toggle_image_scale(&mut self, sender: &ComponentSender<Self>) {
         let Some(ui) = self.image.as_mut() else { return };
         ui.fit = !ui.fit;
@@ -487,6 +550,7 @@ impl App {
             && !self.cursor_is_image();
         self.shell.edit_button.set_visible(quick_text);
         self.shell.save_button.set_visible(quick_text);
+        self.shell.discard_button.set_visible(quick_text && self.shell.editing.get());
     }
 
     pub(in crate::ui::app) fn cursor_is_file(&self) -> bool {

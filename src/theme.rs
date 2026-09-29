@@ -244,6 +244,10 @@ window {{
 .pane-active {{
   border: 1px solid {accent};
 }}
+.pane-blink {{
+  border-color: {bright};
+  box-shadow: inset 0 0 0 1px {bright};
+}}
 .marked {{
   color: #9ece6a;
 }}
