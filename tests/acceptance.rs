@@ -131,6 +131,7 @@ const FS: &[&str] = &[
     "list_dir_reads_names",
     "search_nested_names",
     "search_cancelled",
+    "search_stops_at_limit",
     "f5_copies_tree_to_other_pane",
     "shift_f5_copies_with_new_name",
     "f6_moves_file",
@@ -160,6 +161,7 @@ fn dispatch(name: &str, dir: &Path) -> Result<(), String> {
         "list_dir_reads_names" => list_dir_reads_names(dir),
         "search_nested_names" => search_nested_names(dir),
         "search_cancelled" => search_cancelled(dir),
+        "search_stops_at_limit" => search_stops_at_limit(dir),
         "f5_copies_tree_to_other_pane" => f5_copies_tree_to_other_pane(dir),
         "shift_f5_copies_with_new_name" => shift_f5_copies_with_new_name(dir),
         "f6_moves_file" => f6_moves_file(dir),
@@ -806,6 +808,23 @@ fn search_cancelled(dir: &Path) -> Result<(), String> {
     eq(finished, Some((0, true)), "cancelled status")
 }
 
+fn search_stops_at_limit(dir: &Path) -> Result<(), String> {
+    for index in 0..search::MAX_RESULTS + 5 {
+        fs::write(dir.join(format!("hit-{index}")), "").map_err(s)?;
+    }
+    let mut found = 0;
+    let mut finished = None;
+    search::run(Options {
+        root: dir.to_path_buf(), query: "hit".into(), recursive: true,
+        hidden: false, files_only: true, case_sensitive: false,
+    }, || false, |event| match event {
+        Event::Matches(paths) => found += paths.len(),
+        Event::Finished { errors, cancelled } => finished = Some((errors, cancelled)),
+    });
+    eq(found, search::MAX_RESULTS, "results past the limit")?;
+    eq(finished, Some((0, false)), "search finished")
+}
+
 fn f5_copies_tree_to_other_pane(dir: &Path) -> Result<(), String> {
     let src = dir.join("src");
     let dst = dir.join("dst");
@@ -976,6 +995,18 @@ fn copy_into_itself_aborts(dir: &Path) -> Result<(), String> {
     }
     if !src.join("a").is_file() {
         return Err("source damaged".into());
+    }
+    // The same copy through a symlinked folder, as when a pane was entered via a link.
+    std::os::unix::fs::symlink(&src, dir.join("alias")).map_err(s)?;
+    let err = ops::transfer(
+        &[(src.clone(), dir.join("alias/nested/tree"))],
+        Kind::Copy,
+        &AtomicBool::new(false),
+        &mut |_| {},
+        &mut |_, _| Choice::Overwrite,
+    );
+    if err.is_ok() || src.join("nested/tree").exists() {
+        return Err("inside copy through a symlink allowed".into());
     }
     Ok(())
 }

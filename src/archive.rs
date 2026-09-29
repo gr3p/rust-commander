@@ -111,6 +111,9 @@ pub fn extract(
     progress: &mut dyn FnMut(&Progress),
     conflict: &mut dyn FnMut(&Path, &Path) -> Choice,
 ) -> Result<Report, Fail> {
+    // The chosen folder may be reached through a link (a pane entered via one); links below it stay refused.
+    let real = fs::canonicalize(dest).ok();
+    let dest = real.as_deref().unwrap_or(dest);
     match extension(path) {
         Some("zip") => extract_zip(path, dest, names, password, cancel, progress, conflict),
         Some("rar") => extract_rar(path, dest, names, password, cancel, progress, conflict),
@@ -217,29 +220,17 @@ fn extract_zip(
             update.note = note.clone();
             progress(&update);
         };
-        match write_reader(&mut file, &target, mode, size, &mut written, total, &rel, cancel, &mut step) {
-            Ok(out) => {
-                if let Some(time) = time {
-                    let _ = out.set_modified(time);
-                }
-                files += 1;
-            }
-            Err(Fail::Cancelled) => {
-                let _ = fs::remove_file(&target);
-                return Ok(Report { cancelled: true, files });
-            }
+        match write_reader(&mut file, &target, mode, time, size, &mut written, total, &rel, cancel, &mut step) {
+            Ok(()) => files += 1,
+            Err(Fail::Cancelled) => return Ok(Report { cancelled: true, files }),
             Err(Fail::Damaged(why)) => {
-                let _ = fs::remove_file(&target);
                 // ZipCrypto lets 1 in 256 wrong passwords through to the CRC check.
                 if encrypted {
                     return Err(Fail::BadPassword);
                 }
                 damaged.push(format!("{name}  ({why})"));
             }
-            Err(err) => {
-                let _ = fs::remove_file(&target);
-                return Err(err);
-            }
+            Err(err) => return Err(err),
         }
     }
     finish(files, damaged)
@@ -433,21 +424,10 @@ fn extract_tar(
             update.note = note.clone();
             progress(&update);
         };
-        match write_reader(&mut entry, &target, mode, size, &mut written, total, &rel, cancel, &mut step) {
-            Ok(out) => {
-                if let Some(time) = time {
-                    let _ = out.set_modified(time);
-                }
-                files += 1;
-            }
-            Err(Fail::Cancelled) => {
-                let _ = fs::remove_file(&target);
-                return Ok(Report { cancelled: true, files });
-            }
-            Err(err) => {
-                let _ = fs::remove_file(&target);
-                return Err(err);
-            }
+        match write_reader(&mut entry, &target, mode, time, size, &mut written, total, &rel, cancel, &mut step) {
+            Ok(()) => files += 1,
+            Err(Fail::Cancelled) => return Ok(Report { cancelled: true, files }),
+            Err(err) => return Err(err),
         }
     }
     skipped_report(files, skipped)
@@ -769,10 +749,13 @@ fn extract_rar(
         file_index += 1;
         job.start(written, size, file_line(file_index, file_total, &name));
         job.report(written, rel.clone());
-        let dest_name = c_path(&target)?;
+        // As in write_reader: the old file stays until the new one is complete.
+        let part = crate::ops::partial_path(&target);
+        let _ = fs::remove_file(&part);
+        let dest_name = c_path(&part)?;
         let code = unsafe { unrar_ng_sys::RARProcessFile(handle.0, unrar_ng_sys::RAR_EXTRACT, ptr::null(), dest_name.as_ptr()) };
         if code != unrar_ng_sys::ERAR_SUCCESS {
-            let _ = fs::remove_file(&target);
+            let _ = fs::remove_file(&part);
             if cancel.load(Ordering::Relaxed) {
                 return Ok(Report { cancelled: true, files });
             }
@@ -789,19 +772,27 @@ fn extract_rar(
             }
             return Err(fail(code, unrar_ng::error::When::Process));
         }
-        if fs::symlink_metadata(&target).is_ok_and(|meta| meta.file_type().is_symlink()) {
-            let _ = fs::remove_file(&target);
-            return Err(Fail::Message(format!("refusing symlink {}", rel.display())));
-        }
-        let meta = fs::metadata(&target)?;
-        let len = meta.len();
-        if len > size {
-            let _ = fs::remove_file(&target);
-            return Err(oversized(&rel));
-        }
-        // unrar restores the archived mode. Keep only its exec bits, as for zip.
-        let mode = if meta.permissions().mode() & 0o111 != 0 { 0o755 } else { 0o644 };
-        fs::set_permissions(&target, fs::Permissions::from_mode(mode))?;
+        let placed = (|| {
+            let meta = fs::symlink_metadata(&part)?;
+            if meta.file_type().is_symlink() {
+                return Err(Fail::Message(format!("refusing symlink {}", rel.display())));
+            }
+            if meta.len() > size {
+                return Err(oversized(&rel));
+            }
+            // unrar restores the archived mode. Keep only its exec bits, as for zip.
+            let mode = if meta.permissions().mode() & 0o111 != 0 { 0o755 } else { 0o644 };
+            fs::set_permissions(&part, fs::Permissions::from_mode(mode))?;
+            fs::rename(&part, &target)?;
+            Ok(meta.len())
+        })();
+        let len = match placed {
+            Ok(len) => len,
+            Err(err) => {
+                let _ = fs::remove_file(&part);
+                return Err(err);
+            }
+        };
         written += len;
         files += 1;
         job.report(written, rel);
@@ -941,19 +932,10 @@ fn keep(
         }
         Choice::OverwriteAll => {
             *policy = Policy::Overwrite;
-            clear_dest(dest)?;
             Ok(Keep::Write)
         }
-        Choice::Overwrite => {
-            clear_dest(dest)?;
-            Ok(Keep::Write)
-        }
+        Choice::Overwrite => Ok(Keep::Write),
     }
-}
-
-fn clear_dest(dest: &Path) -> Result<(), Fail> {
-    fs::remove_file(dest)?;
-    Ok(())
 }
 
 fn oversized(rel: &Path) -> Fail {
@@ -986,56 +968,70 @@ fn ensure_room(dest: &Path, need: u64) -> Result<(), Fail> {
     }
 }
 
+// Written beside the target and renamed over it last, so a failed or cancelled member keeps the file it replaces.
 fn write_reader(
     input: &mut impl Read,
     dest: &Path,
     mode: u32,
+    time: Option<std::time::SystemTime>,
     declared: u64,
     written: &mut u64,
     total: u64,
     current: &Path,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(&Progress),
-) -> Result<File, Fail> {
+) -> Result<(), Fail> {
     use std::os::unix::fs::OpenOptionsExt;
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(mode)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(dest)?;
-    // Sized to the member so small files don't each zero a 1 MiB buffer.
-    let mut buf = vec![0u8; declared.saturating_add(1).min(1024 * 1024) as usize];
-    let mut got = 0u64;
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(Fail::Cancelled);
-        }
-        // Decoders hand out a few KiB per read; fill the buffer so writes and progress updates stay large.
-        let mut n = 0;
-        while n < buf.len() {
-            let count = input.read(&mut buf[n..]).map_err(|err| match err.kind() {
-                io::ErrorKind::InvalidData => Fail::Damaged(err.to_string()),
-                _ => err.into(),
-            })?;
-            if count == 0 {
+    let part = crate::ops::partial_path(dest);
+    let _ = fs::remove_file(&part);
+    let result = (|| {
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&part)?;
+        // Sized to the member so small files don't each zero a 1 MiB buffer.
+        let mut buf = vec![0u8; declared.saturating_add(1).min(1024 * 1024) as usize];
+        let mut got = 0u64;
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(Fail::Cancelled);
+            }
+            // Decoders hand out a few KiB per read; fill the buffer so writes and progress updates stay large.
+            let mut n = 0;
+            while n < buf.len() {
+                let count = input.read(&mut buf[n..]).map_err(|err| match err.kind() {
+                    io::ErrorKind::InvalidData => Fail::Damaged(err.to_string()),
+                    _ => err.into(),
+                })?;
+                if count == 0 {
+                    break;
+                }
+                n += count;
+            }
+            if n == 0 {
                 break;
             }
-            n += count;
+            got += n as u64;
+            if got > declared {
+                return Err(oversized(current));
+            }
+            output.write_all(&buf[..n])?;
+            *written += n as u64;
+            progress(&Progress { done: *written, total, current: current.to_path_buf(), note: String::new() });
         }
-        if n == 0 {
-            break;
+        if let Some(time) = time {
+            let _ = output.set_modified(time);
         }
-        got += n as u64;
-        if got > declared {
-            return Err(oversized(current));
-        }
-        output.write_all(&buf[..n])?;
-        *written += n as u64;
-        progress(&Progress { done: *written, total, current: current.to_path_buf(), note: String::new() });
+        drop(output);
+        fs::rename(&part, dest)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&part);
     }
-    Ok(output)
+    result
 }
 
 #[cfg(test)]
@@ -1154,6 +1150,65 @@ mod tests {
         assert!(err.contains("a.txt"), "{err}");
         assert!(!dest.join("a.txt").exists());
         assert_eq!(fs::read_to_string(dest.join("b.txt")).unwrap(), "second payload");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unpacks_into_symlinked_folder() {
+        let dir = tmp("link-dest");
+        let zip_path = dir.join("a.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&zip_path).unwrap());
+        zip.start_file("sub/a.txt", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(b"alpha").unwrap();
+        zip.finish().unwrap();
+        let real = dir.join("real");
+        fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, dir.join("link")).unwrap();
+        let rar = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/version.rar");
+        let cancel = AtomicBool::new(false);
+        for archive in [zip_path, rar] {
+            extract(&archive, &dir.join("link"), None, None, &cancel, &mut |_| {}, &mut |_, _| Choice::Cancel).unwrap();
+        }
+        assert_eq!(fs::read_to_string(real.join("sub/a.txt")).unwrap(), "alpha");
+        assert!(real.join("VERSION").is_file());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_overwrite_keeps_old_file() {
+        let dir = tmp("keep-old");
+        let good = dir.join("good.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&good).unwrap());
+        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("a.txt", opts).unwrap();
+        zip.write_all(b"first payload").unwrap();
+        zip.finish().unwrap();
+        let mut bytes = fs::read(&good).unwrap();
+        let at = bytes.windows(13).position(|w| w == b"first payload").unwrap();
+        bytes[at] ^= 0x20;
+        let bad = dir.join("bad.zip");
+        fs::write(&bad, bytes).unwrap();
+        let mut rar = fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/version.rar")).unwrap();
+        rar[0x48] ^= 0xff;
+        let bad_rar = dir.join("bad.rar");
+        fs::write(&bad_rar, rar).unwrap();
+        let dest = dir.join("out");
+        fs::create_dir(&dest).unwrap();
+        fs::write(dest.join("a.txt"), "old").unwrap();
+        fs::write(dest.join("VERSION"), "old").unwrap();
+        let cancel = AtomicBool::new(false);
+        let overwrite = &mut |_: &Path, _: &Path| Choice::Overwrite;
+        assert!(extract(&bad, &dest, None, None, &cancel, &mut |_| {}, overwrite).is_err());
+        assert!(extract(&bad_rar, &dest, None, None, &cancel, &mut |_| {}, overwrite).is_err());
+        let report = extract(&good, &dest, None, None, &cancel, &mut |_| cancel.store(true, Ordering::Relaxed), overwrite).unwrap();
+        assert!(report.cancelled);
+        assert_eq!(fs::read_to_string(dest.join("a.txt")).unwrap(), "old");
+        assert_eq!(fs::read_to_string(dest.join("VERSION")).unwrap(), "old");
+        assert_eq!(fs::read_dir(&dest).unwrap().count(), 2);
+        cancel.store(false, Ordering::Relaxed);
+        extract(&good, &dest, None, None, &cancel, &mut |_| {}, overwrite).unwrap();
+        assert_eq!(fs::read_to_string(dest.join("a.txt")).unwrap(), "first payload");
+        assert_eq!(fs::read_dir(&dest).unwrap().count(), 2);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1315,8 +1370,9 @@ mod tests {
         let target = dir.join("out.bin");
         let cancel = AtomicBool::new(false);
         let mut written = 0;
-        let err = write_reader(&mut &b"too long"[..], &target, 0o644, 3, &mut written, 3, Path::new("out.bin"), &cancel, &mut |_| {});
+        let err = write_reader(&mut &b"too long"[..], &target, 0o644, None, 3, &mut written, 3, Path::new("out.bin"), &cancel, &mut |_| {});
         assert!(matches!(err, Err(Fail::Message(msg)) if msg.contains("larger than the archive declares")));
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -17,10 +17,14 @@ pub enum Event {
     Finished { errors: usize, cancelled: bool },
 }
 
+// Each result is a row of widgets, about 10 KB; a one-letter search from / would take gigabytes.
+pub const MAX_RESULTS: usize = 10_000;
+
 pub fn run(options: Options, cancelled: impl Fn() -> bool, mut emit: impl FnMut(Event)) {
     let needle = if options.case_sensitive { options.query.clone() } else { options.query.to_lowercase() };
     let mut stack = vec![options.root];
     let mut errors = 0;
+    let mut found = 0;
     let mut matches = Vec::with_capacity(64);
     while let Some(dir) = stack.pop() {
         if cancelled() {
@@ -72,9 +76,16 @@ pub fn run(options: Options, cancelled: impl Fn() -> bool, mut emit: impl FnMut(
             if matches.len() == 64 {
                 emit(Event::Matches(std::mem::take(&mut matches)));
             }
+            found += 1;
+            if found == MAX_RESULTS {
+                break;
+            }
         }
         if !matches.is_empty() {
             emit(Event::Matches(std::mem::take(&mut matches)));
+        }
+        if found == MAX_RESULTS {
+            break;
         }
     }
     emit(Event::Finished { errors, cancelled: cancelled() });

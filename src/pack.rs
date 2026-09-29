@@ -112,7 +112,9 @@ pub fn pack(
     if !parent.is_dir() {
         return Err(Fail::Message(format!("folder does not exist: {}", parent.display())));
     }
-    let part = part_path(dest);
+    let part = crate::ops::partial_path(dest);
+    // Only we use this name, so a leftover from a crash can go; 7z and rar would add to it.
+    let _ = fs::remove_file(&part);
     let packed = match format {
         Format::Zip => create_zip(sources, cwd, &part, level, password, cancel, progress),
         Format::SevenZ | Format::Rar => {
@@ -124,7 +126,10 @@ pub fn pack(
     };
     match packed {
         Ok(files) => {
-            fs::rename(&part, dest)?;
+            if let Err(err) = fs::rename(&part, dest) {
+                let _ = fs::remove_file(&part);
+                return Err(err.into());
+            }
             Ok(Report { cancelled: false, files })
         }
         Err(Fail::Cancelled) => {
@@ -136,12 +141,6 @@ pub fn pack(
             Err(err)
         }
     }
-}
-
-fn part_path(dest: &Path) -> PathBuf {
-    let mut name = dest.file_name().unwrap_or_default().to_os_string();
-    name.push(".part");
-    dest.with_file_name(name)
 }
 
 fn create_zip(
@@ -529,6 +528,34 @@ mod tests {
         assert!(wrong.is_err());
         archive::extract(&dest, &out, None, Some("hemligt"), &cancel, &mut |_| {}, &mut |_, _| crate::ops::Choice::Cancel).unwrap();
         assert_eq!(fs::read(out.join("a.txt")).unwrap(), b"alpha alpha alpha");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn leaves_other_part_files_alone() {
+        let dir = tmp("part");
+        fs::write(dir.join("a.txt"), b"alpha").unwrap();
+        // Browsers name unfinished downloads like this.
+        fs::write(dir.join("out.zip.part"), b"download").unwrap();
+        let opts = Options { level: 5, password: None };
+        let report = pack(Format::Zip, None, &[dir.join("a.txt")], &dir, &dir.join("out.zip"), &opts, &AtomicBool::new(true), &mut |_| {}).unwrap();
+        assert!(report.cancelled);
+        assert_eq!(fs::read(dir.join("out.zip.part")).unwrap(), b"download");
+        assert!(fs::symlink_metadata(crate::ops::partial_path(&dir.join("out.zip"))).is_err());
+        if let Some(bin) = find_program("", names(Format::SevenZ)) {
+            let cancel = AtomicBool::new(false);
+            fs::write(dir.join("stale.txt"), b"old").unwrap();
+            let old = dir.join("old.7z");
+            pack(Format::SevenZ, Some(&bin), &[dir.join("stale.txt")], &dir, &old, &opts, &cancel, &mut |_| {}).unwrap();
+            let dest = dir.join("out.7z");
+            fs::copy(&old, dir.join("out.7z.part")).unwrap();
+            fs::copy(&old, crate::ops::partial_path(&dest)).unwrap();
+            pack(Format::SevenZ, Some(&bin), &[dir.join("a.txt")], &dir, &dest, &opts, &cancel, &mut |_| {}).unwrap();
+            let listed = Command::new(&bin).args(["l", dest.to_str().unwrap()]).output().unwrap();
+            let text = String::from_utf8_lossy(&listed.stdout);
+            assert!(text.contains("a.txt") && !text.contains("stale.txt"), "{text}");
+            assert_eq!(fs::read(dir.join("out.7z.part")).unwrap(), fs::read(&old).unwrap());
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 

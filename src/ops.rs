@@ -366,7 +366,7 @@ fn try_reflink(src: &File, dst: &File) -> bool {
     unsafe { libc::ioctl(dst.as_raw_fd(), libc::FICLONE, src.as_raw_fd()) == 0 }
 }
 
-fn partial_path(dest: &Path) -> PathBuf {
+pub(crate) fn partial_path(dest: &Path) -> PathBuf {
     let mut name = std::ffi::OsString::from(".rust-commander-partial-");
     name.push(dest.file_name().unwrap_or(std::ffi::OsStr::new("file")));
     dest.with_file_name(name)
@@ -453,7 +453,34 @@ fn count_entries(path: &Path) -> u64 {
 pub fn inside(src: &Path, dest: &Path) -> bool {
     let src = normalize(src);
     let dest = normalize(dest);
-    dest.starts_with(&src) && dest != src
+    if dest.starts_with(&src) && dest != src {
+        return true;
+    }
+    // A pane entered through a symlinked folder hides the nesting from the text.
+    // Only the parent of src is resolved: a symlink src is copied as a link.
+    let (Some(parent), Some(name)) = (src.parent(), src.file_name()) else {
+        return false;
+    };
+    match (fs::canonicalize(parent), real_path(&dest)) {
+        (Ok(parent), Some(dest)) => {
+            let src = parent.join(name);
+            dest.starts_with(&src) && dest != src
+        }
+        _ => false,
+    }
+}
+
+// The real path of the deepest part that exists, with the rest appended as written.
+fn real_path(path: &Path) -> Option<PathBuf> {
+    let mut rest = Vec::new();
+    let mut cur = path;
+    loop {
+        if let Ok(real) = fs::canonicalize(cur) {
+            return Some(rest.into_iter().rev().fold(real, |acc: PathBuf, name| acc.join(name)));
+        }
+        rest.push(cur.file_name()?);
+        cur = cur.parent()?;
+    }
 }
 
 fn normalize(path: &Path) -> PathBuf {

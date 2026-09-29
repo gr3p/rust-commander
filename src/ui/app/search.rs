@@ -249,7 +249,13 @@ impl App {
                 ui.stop = None;
                 ui.start.set_sensitive(true);
                 ui.cancel.set_sensitive(false);
-                let status = if cancelled { "Cancelled" } else { "Done" };
+                let status = if cancelled {
+                    "Cancelled"
+                } else if ui.results.len() >= search::MAX_RESULTS {
+                    "Stopped at the limit"
+                } else {
+                    "Done"
+                };
                 let skipped = if errors == 0 { String::new() } else { format!(", {errors} unreadable") };
                 ui.status.set_text(&format!("{status}: {} results{skipped}", ui.results.len()));
             }

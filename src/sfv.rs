@@ -37,13 +37,7 @@ pub fn create(
         out.push_str(&format!("{rel} {crc:08X}\n"));
         progress(&Progress { done: index as u64 + 1, total, current: path.clone(), note: String::new() });
     }
-    let part = {
-        let mut name = dest.file_name().unwrap_or_default().to_os_string();
-        name.push(".part");
-        dest.with_file_name(name)
-    };
-    fs::write(&part, out)?;
-    fs::rename(&part, dest)?;
+    crate::ops::write_atomic(dest, out.as_bytes())?;
     Ok(Report { cancelled: false, files: total })
 }
 
@@ -271,6 +265,16 @@ mod tests {
         let err = verify(&dest, &cancel, &mut |_| {}).unwrap_err().to_string();
         assert!(err.contains("CRC mismatch"), "{err}");
         assert!(err.contains("bad path"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn leaves_other_part_file_alone() {
+        let dir = tmp("part");
+        fs::write(dir.join("a.txt"), b"alpha").unwrap();
+        fs::write(dir.join("a.sfv.part"), b"download").unwrap();
+        create(&dir, &[dir.join("a.txt")], &dir.join("a.sfv"), &AtomicBool::new(false), &mut |_| {}).unwrap();
+        assert_eq!(fs::read(dir.join("a.sfv.part")).unwrap(), b"download");
         let _ = fs::remove_dir_all(&dir);
     }
 }
