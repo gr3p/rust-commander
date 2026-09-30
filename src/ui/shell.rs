@@ -143,7 +143,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
     }
     let unpack_list = hint_button("Alt+F9 Unpack to right panel", || super::msg::Msg::UnpackList, sender);
     let unpack_here = hint_button("Shift+Alt+F9 Extract here", || super::msg::Msg::UnpackHere, sender);
-    let verify_sfv = hint_button("Enter Verify", || super::msg::Msg::VerifySfv, sender);
+    let verify_sfv = hint_button("Ctrl+Shift+F9 Verify", || super::msg::Msg::VerifySfv, sender);
     let pack = hint_button("Alt+F5 Pack", || super::msg::Msg::Key(gtk::gdk::Key::F5, gtk::gdk::ModifierType::ALT_MASK), sender);
     let pack_here = hint_button(
         "Ctrl+Shift+F5 Pack here",

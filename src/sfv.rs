@@ -33,7 +33,11 @@ pub fn create(
         if rel.contains('\n') {
             return Err(Fail::Message(format!("name has a newline: {rel}")));
         }
-        let crc = hash_file(path)?;
+        let crc = match hash_file(path, cancel) {
+            Ok(crc) => crc,
+            Err(Fail::Cancelled) => return Ok(Report { cancelled: true, files: index as u64 }),
+            Err(err) => return Err(err),
+        };
         out.push_str(&format!("{rel} {crc:08X}\n"));
         progress(&Progress { done: index as u64 + 1, total, current: path.clone(), note: String::new() });
     }
@@ -55,7 +59,10 @@ pub fn verify(sfv: &Path, cancel: &AtomicBool, progress: &mut dyn FnMut(&Progres
             return Ok(Report { cancelled: true, files: ok });
         }
         let current = PathBuf::from(name);
-        match check_one(root, name, *crc) {
+        let done = index as u64;
+        progress(&Progress { done, total, current: current.clone(), note: check_note(done, total, name, &issues) });
+        match check_one(root, name, *crc, cancel) {
+            Check::Cancelled => return Ok(Report { cancelled: true, files: ok }),
             Check::Ok => ok += 1,
             Check::Missing => {
                 missing += 1;
@@ -78,17 +85,36 @@ pub fn verify(sfv: &Path, cancel: &AtomicBool, progress: &mut dyn FnMut(&Progres
                 issues.push(format!("{err}  {name}"));
             }
         }
-        progress(&Progress { done: index as u64 + 1, total, current, note: String::new() });
+        let done = done + 1;
+        progress(&Progress { done, total, current, note: check_note(done, total, name, &issues) });
     }
     if issues.is_empty() {
         return Ok(Report { cancelled: false, files: ok });
     }
     let mut text = format!("OK {ok}, failed {failed}, missing {missing}");
-    if !issues.is_empty() {
-        text.push('\n');
-        text.push_str(&issues.join("\n"));
+    let shown = issues.len().min(ISSUE_LIMIT);
+    text.push('\n');
+    text.push_str(&issues[..shown].join("\n"));
+    if issues.len() > ISSUE_LIMIT {
+        text.push_str(&format!("\n… {} more", issues.len() - ISSUE_LIMIT));
     }
     Err(Fail::Message(text))
+}
+
+const ISSUE_LIMIT: usize = 400;
+
+fn check_note(done: u64, total: u64, name: &str, issues: &[String]) -> String {
+    let mut text = format!("Checking {done}/{total}\n{name}\n\n{}", issues.len());
+    if issues.is_empty() {
+        return text;
+    }
+    text.push('\n');
+    let skip = issues.len().saturating_sub(8);
+    if skip > 0 {
+        text.push_str(&format!("… {skip} earlier\n"));
+    }
+    text.push_str(&issues[skip..].join("\n"));
+    text
 }
 
 fn collect(path: &Path, root: &Path, dest: &Path, out: &mut Vec<(PathBuf, String)>) -> Result<(), Fail> {
@@ -123,24 +149,23 @@ fn collect(path: &Path, root: &Path, dest: &Path, out: &mut Vec<(PathBuf, String
     Ok(())
 }
 
-fn check_one(root: &Path, name: &str, expect: u32) -> Check {
+fn check_one(root: &Path, name: &str, expect: u32, cancel: &AtomicBool) -> Check {
     let Some(rel) = safe_rel(name) else { return Check::Bad };
     let path = root.join(&rel);
     if let Err(kind) = stays_inside(root, &path) {
         return kind;
     }
-    match hash_file(&path) {
+    match hash_file(&path, cancel) {
         Ok(crc) if crc == expect => Check::Ok,
         Ok(_) => Check::Mismatch,
-        Err(Fail::Message(err)) if err.contains("No such file") || err.contains("not found") => Check::Missing,
-        Err(err) => {
-            if err.to_string().contains("os error 2") {
-                Check::Missing
-            } else {
-                Check::Error(err.to_string())
-            }
-        }
+        Err(Fail::Cancelled) => Check::Cancelled,
+        Err(Fail::Message(err)) if missing_file(&err) => Check::Missing,
+        Err(err) => Check::Error(err.to_string()),
     }
+}
+
+fn missing_file(err: &str) -> bool {
+    err.contains("No such file") || err.contains("not found") || err.contains("os error 2")
 }
 
 enum Check {
@@ -149,6 +174,7 @@ enum Check {
     Mismatch,
     Outside,
     Bad,
+    Cancelled,
     Error(String),
 }
 
@@ -170,11 +196,15 @@ fn stays_inside(root: &Path, path: &Path) -> Result<(), Check> {
     Ok(())
 }
 
-fn hash_file(path: &Path) -> Result<u32, Fail> {
+fn hash_file(path: &Path, cancel: &AtomicBool) -> Result<u32, Fail> {
     let mut file = File::open(path)?;
     let mut hasher = crc32fast::Hasher::new();
     let mut buf = vec![0u8; 1024 * 1024];
     loop {
+        // Stop between reads so cancel does not wait out a large file.
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Fail::Cancelled);
+        }
         let n = file.read(&mut buf)?;
         if n == 0 {
             break;
@@ -275,6 +305,26 @@ mod tests {
         fs::write(dir.join("a.sfv.part"), b"download").unwrap();
         create(&dir, &[dir.join("a.txt")], &dir.join("a.sfv"), &AtomicBool::new(false), &mut |_| {}).unwrap();
         assert_eq!(fs::read(dir.join("a.sfv.part")).unwrap(), b"download");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_names_a_missing_file_and_stops_when_cancelled() {
+        let dir = tmp("miss");
+        fs::write(dir.join("a.txt"), b"alpha").unwrap();
+        let dest = dir.join("a.sfv");
+        let cancel = AtomicBool::new(false);
+        create(&dir, &[dir.join("a.txt")], &dest, &cancel, &mut |_| {}).unwrap();
+        fs::write(&dest, "gone.bin AAAAAAAA\n").unwrap();
+        let err = verify(&dest, &cancel, &mut |_| {}).unwrap_err().to_string();
+        assert!(err.contains("missing  gone.bin"), "{err}");
+        fs::write(dir.join("a.txt"), b"alpha").unwrap();
+        create(&dir, &[dir.join("a.txt")], &dest, &cancel, &mut |_| {}).unwrap();
+        let report = verify(&dest, &cancel, &mut |_| {
+            cancel.store(true, Ordering::Relaxed);
+        })
+        .unwrap();
+        assert!(report.cancelled);
         let _ = fs::remove_dir_all(&dir);
     }
 }

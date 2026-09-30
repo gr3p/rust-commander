@@ -148,7 +148,7 @@ pub struct App {
     job: Option<Job>,
     ask: Option<Ask>,
     dialog: Option<gtk::Window>,
-    progress: Option<(gtk::Window, gtk::Label, gtk::ProgressBar)>,
+    progress: Option<(gtk::Window, gtk::Label, gtk::ProgressBar, Option<(gtk::Label, gtk::TextView)>)>,
     meter: Option<f64>,
     pending: Option<PendingUnpack>,
     queued: Option<Queued>,
@@ -578,6 +578,7 @@ impl App {
                 Key::F5 => self.set_sort(rust_commander::listing::SortKey::Time),
                 Key::F6 => self.set_sort(rust_commander::listing::SortKey::Size),
                 Key::F7 => self.set_sort(rust_commander::listing::SortKey::Attr),
+                Key::F9 if shift => self.start_verify(sender),
                 Key::F9 => self.new_shell(sender),
                 Key::s | Key::S => {
                     if shift {

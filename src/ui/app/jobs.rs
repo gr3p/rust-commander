@@ -75,15 +75,28 @@ impl App {
         let polled = {
             let Some(job) = self.job.as_mut() else { return };
             let mut line = None;
+            let mut broken: Option<(u64, String)> = None;
             let mut show = false;
             let mut fraction: Option<Option<f64>> = None;
             let mut amount = None;
             while let Ok(progress) = job.progress_rx.try_recv() {
-                line = Some(if progress.note.is_empty() {
-                    format!("{}/{}  {}", progress.done, progress.total, progress.current.display())
+                if matches!(job.work, Work::Verify) {
+                    let (status, issues) = split_check(&progress.note);
+                    line = Some(if status.is_empty() {
+                        format!("{}/{}  {}", progress.done, progress.total, progress.current.display())
+                    } else {
+                        status
+                    });
+                    if let Some(issues) = issues {
+                        broken = Some(issues);
+                    }
                 } else {
-                    progress.note.clone()
-                });
+                    line = Some(if progress.note.is_empty() {
+                        format!("{}/{}  {}", progress.done, progress.total, progress.current.display())
+                    } else {
+                        progress.note.clone()
+                    });
+                }
                 fraction = Some(if progress.total == 0 {
                     None
                 } else {
@@ -96,6 +109,8 @@ impl App {
                         rust_commander::listing::format_size(progress.done),
                         rust_commander::listing::format_size(progress.total)
                     ));
+                } else if matches!(job.work, Work::Verify) && progress.total > 0 {
+                    amount = Some(format!("{} / {}", progress.done, progress.total));
                 }
                 show = job.started.elapsed() > Duration::from_millis(200);
             }
@@ -103,10 +118,14 @@ impl App {
             if conflict.is_some() {
                 job.conflict_open = true;
             }
-            let done = job.done_rx.try_recv().ok();
-            (line, show, fraction, amount, conflict, done)
+            let done = match job.done_rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err("stopped".into())),
+                Err(mpsc::TryRecvError::Empty) => None,
+            };
+            (line, broken, show, fraction, amount, conflict, done)
         };
-        let (line, show, fraction, amount, conflict, done) = polled;
+        let (line, broken, show, fraction, amount, conflict, done) = polled;
         if let Some(line) = &line {
             self.status = line.replace('\n', "   ");
         }
@@ -116,9 +135,23 @@ impl App {
         if show {
             self.ensure_progress();
         }
-        if let Some((_, label, bar)) = &self.progress {
+        if let Some((_, label, bar, log)) = &self.progress {
             if let Some(line) = &line {
                 label.set_text(line);
+            }
+            if let Some((count, text)) = &broken {
+                if let Some((heading, view)) = log {
+                    heading.set_text(&format!("Broken {count}"));
+                    let buffer = view.buffer();
+                    let now = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+                    if now.as_str() != text {
+                        buffer.set_text(text);
+                        if !text.is_empty() {
+                            let mut end = buffer.end_iter();
+                            view.scroll_to_iter(&mut end, 0.0, true, 0.0, 1.0);
+                        }
+                    }
+                }
             }
             if let Some(amount) = &amount {
                 bar.set_text(Some(amount));
@@ -140,8 +173,14 @@ impl App {
     pub(in crate::ui::app) fn finish_job(&mut self, result: Result<Report, String>, sender: &ComponentSender<Self>) {
         let work = self.job.as_ref().map(|job| job.work).unwrap_or(Work::Transfer);
         self.job = None;
-        if let Some((win, _, _)) = self.progress.take() {
-            win.close();
+        if let Some((win, label, bar, log)) = self.progress.take() {
+            if matches!(work, Work::Verify) && win.is_visible() {
+                self.settle_sfv(&win, &label, &bar, log.as_ref(), &result);
+                self.close_dialog();
+                self.dialog = Some(win);
+            } else {
+                win.close();
+            }
         }
         if let Err(err) = &result {
             if err.eq_ignore_ascii_case("cancelled") {
@@ -154,14 +193,14 @@ impl App {
                 return;
             }
             self.pending = None;
-            if !matches!(work, Work::Transfer | Work::Delete) {
+            if !matches!(work, Work::Verify | Work::Transfer | Work::Delete) {
                 let title = match work {
                     Work::Unpack if err.starts_with("Archive is damaged") => "Damaged archive",
                     Work::Unpack if err.starts_with("Skipped ") => "Unpack",
                     Work::Unpack => "Unpack failed",
                     Work::Pack => "Pack failed",
-                    Work::Sfv | Work::Verify => "SFV failed",
-                    Work::Transfer | Work::Delete => "Failed",
+                    Work::Sfv => "SFV failed",
+                    Work::Verify | Work::Transfer | Work::Delete => "Failed",
                 };
                 self.show_error(title, err);
             }
@@ -657,11 +696,17 @@ impl App {
     }
 
     pub(in crate::ui::app) fn start_verify(&mut self, sender: &ComponentSender<Self>) {
-        let Some(path) = self.file_under_cursor().filter(|path| rust_commander::sfv::is_sfv(path)) else {
-            self.status = "Not an SFV file".into();
-            return;
+        let path = match self.sfv_to_check() {
+            Ok(path) => path,
+            Err(status) => {
+                self.status = status.into();
+                return;
+            }
         };
         let Some(pipes) = self.open_job(Work::Verify) else { return };
+        self.status = "Checking SFV".into();
+        rust_commander::log::info(&format!("sfv {}", path.display()));
+        self.ensure_progress();
         let _ = sender;
         std::thread::spawn(move || {
             let result = rust_commander::sfv::verify(&path, &pipes.cancel, &mut |progress| {
@@ -669,6 +714,75 @@ impl App {
             });
             let _ = pipes.done_tx.send(result.map_err(|err| err.to_string()));
         });
+    }
+
+    fn sfv_to_check(&self) -> Result<PathBuf, &'static str> {
+        if let Some(path) = self.file_under_cursor().filter(|path| rust_commander::sfv::is_sfv(path)) {
+            return Ok(path);
+        }
+        let tab = self.state.tab(self.state.active);
+        let mut found = None;
+        for entry in &tab.entries {
+            if entry.is_dir() || !rust_commander::sfv::is_sfv(Path::new(entry.name.as_ref())) {
+                continue;
+            }
+            if found.is_some() {
+                return Err("Select an SFV file");
+            }
+            found = Some(rust_commander::listing::entry_path(&tab.path, entry));
+        }
+        found.ok_or("No SFV file")
+    }
+
+    fn settle_sfv(
+        &self,
+        win: &gtk::Window,
+        label: &gtk::Label,
+        bar: &gtk::ProgressBar,
+        log: Option<&(gtk::Label, gtk::TextView)>,
+        result: &Result<Report, String>,
+    ) {
+        win.set_title(Some("SFV"));
+        label.set_ellipsize(gtk::pango::EllipsizeMode::None);
+        label.set_lines(-1);
+        let cancelled = match result {
+            Ok(report) => report.cancelled,
+            Err(err) => err.eq_ignore_ascii_case("cancelled"),
+        };
+        if !cancelled {
+            bar.set_fraction(1.0);
+            bar.set_show_text(false);
+        }
+        match result {
+            Ok(report) if report.cancelled => label.set_text("Cancelled"),
+            Ok(report) => {
+                label.set_markup(&format!(
+                    "<span foreground=\"#2e7d32\" size=\"x-large\">✔</span>  All files OK, {} files",
+                    report.files
+                ));
+                if let Some((heading, _)) = log {
+                    heading.set_text("Broken 0");
+                }
+            }
+            Err(err) if err.eq_ignore_ascii_case("cancelled") => label.set_text("Cancelled"),
+            Err(err) => {
+                let (head, body) = err.split_once('\n').unwrap_or((err.as_str(), ""));
+                label.set_text(head);
+                if let Some((heading, view)) = log {
+                    heading.set_text(&format!("Broken {}", broken_total(head)));
+                    view.buffer().set_text(body);
+                }
+            }
+        }
+        if let Some(button) = window_button(win) {
+            button.set_label("Close");
+            let weak = win.downgrade();
+            button.connect_clicked(move |_| {
+                if let Some(win) = weak.upgrade() {
+                    win.close();
+                }
+            });
+        }
     }
 
     pub(in crate::ui::app) fn confirm_overwrite(&mut self, sender: &ComponentSender<Self>) {
@@ -714,7 +828,9 @@ impl App {
     pub(in crate::ui::app) fn sync_hints(&self) {
         let entry = self.state.cursor_entry(self.state.active);
         let archive = entry.is_some_and(|entry| !entry.is_dir() && rust_commander::archive::is_archive(Path::new(entry.name.as_ref())));
-        let sfv = entry.is_some_and(|entry| entry.name.to_ascii_lowercase().ends_with(".sfv"));
+        let sfv = self.state.tab(self.state.active).entries.iter().any(|entry| {
+            !entry.is_dir() && rust_commander::sfv::is_sfv(Path::new(entry.name.as_ref()))
+        });
         if archive {
             let side = if self.state.active == PaneId::Left { "right" } else { "left" };
             let label = format!("Alt+F9 Unpack to {side} panel");
@@ -861,12 +977,36 @@ impl App {
             }
             gtk::glib::Propagation::Proceed
         });
+        let broken = if matches!(self.job.as_ref().map(|job| job.work), Some(Work::Verify)) {
+            let heading = gtk::Label::new(Some("Broken 0"));
+            heading.set_xalign(0.0);
+            let view = gtk::TextView::new();
+            view.set_editable(false);
+            view.set_cursor_visible(false);
+            view.set_monospace(true);
+            view.set_wrap_mode(gtk::WrapMode::WordChar);
+            let scroll = gtk::ScrolledWindow::new();
+            scroll.set_min_content_height(96);
+            scroll.set_propagate_natural_height(true);
+            scroll.set_max_content_height(220);
+            scroll.set_child(Some(&view));
+            Some((heading, scroll, view))
+        } else {
+            None
+        };
         column.append(&label);
         column.append(&bar);
+        let log = if let Some((heading, scroll, view)) = broken {
+            column.append(&heading);
+            column.append(&scroll);
+            Some((heading, view))
+        } else {
+            None
+        };
         column.append(&cancel);
         win.set_child(Some(&column));
         win.present();
-        self.progress = Some((win, label, bar));
+        self.progress = Some((win, label, bar, log));
     }
 
     pub(in crate::ui::app) fn close_dialog(&mut self) {
@@ -874,6 +1014,40 @@ impl App {
             win.close();
         }
     }
+}
+
+fn split_check(note: &str) -> (String, Option<(u64, String)>) {
+    let Some((status, rest)) = note.split_once("\n\n") else {
+        return (note.to_string(), None);
+    };
+    let mut lines = rest.lines();
+    let count = lines.next().unwrap_or("0").parse().unwrap_or(0);
+    (status.to_string(), Some((count, lines.collect::<Vec<_>>().join("\n"))))
+}
+
+fn broken_total(summary: &str) -> u64 {
+    let mut count = 0u64;
+    for part in summary.split(',') {
+        let part = part.trim();
+        let rest = part.strip_prefix("failed ").or_else(|| part.strip_prefix("missing "));
+        if let Some(rest) = rest {
+            if let Ok(value) = rest.parse::<u64>() {
+                count += value;
+            }
+        }
+    }
+    count
+}
+
+fn window_button(win: &gtk::Window) -> Option<gtk::Button> {
+    let mut child = win.child().and_then(|column| column.last_child());
+    while let Some(widget) = child {
+        if let Ok(button) = widget.clone().downcast::<gtk::Button>() {
+            return Some(button);
+        }
+        child = widget.prev_sibling();
+    }
+    None
 }
 
 pub(in crate::ui::app) fn first_line(text: &str) -> String {

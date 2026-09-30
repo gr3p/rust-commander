@@ -689,6 +689,7 @@ pub(in crate::ui::app) fn show_commands(parent: &gtk::Window) {
             ("Alt+F9", "Unpack to other panel"),
             ("Shift+Alt+F9", "Extract here"),
             ("Shift+F9", "Create SFV"),
+            ("Ctrl+Shift+F9", "Verify SFV"),
             ("Enter", "Verify SFV"),
         ]),
         ("View", &[
