@@ -12,6 +12,7 @@ pub mod log;
 pub mod entry;
 pub mod hotlist;
 pub mod external;
+pub mod icons;
 pub mod imageview;
 pub mod listing;
 pub mod lister;

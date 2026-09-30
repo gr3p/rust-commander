@@ -137,6 +137,12 @@ struct SettingsUi {
     editor: gtk::DropDown,
     editor_ids: Rc<RefCell<Vec<String>>>,
     editor_guard: Rc<Cell<bool>>,
+    theme: gtk::DropDown,
+    theme_ids: Rc<RefCell<Vec<String>>>,
+    theme_guard: Rc<Cell<bool>>,
+    icon_pack: gtk::DropDown,
+    icon_pack_ids: Rc<RefCell<Vec<String>>>,
+    icon_pack_guard: Rc<Cell<bool>>,
 }
 
 pub struct App {
@@ -235,8 +241,8 @@ impl SimpleComponent for App {
 
     fn init(smoke: bool, root: Self::Root, sender: ComponentSender<Self>) -> ComponentParts<Self> {
         let widgets = view_output!();
-        let shell = shell::build(&root, sender.input_sender());
         let cfg = config::load();
+        let shell = shell::build(&root, sender.input_sender(), &cfg.icon_pack);
         shell::set_flash_enabled(cfg.flash_feedback);
         let (left, right) = if smoke {
             smoke_dirs()
@@ -440,6 +446,7 @@ impl App {
             Msg::ReloadTheme => {
                 let name = theme::active_name(&self.cfg.theme, &config::active_theme_path());
                 self.apply_css(&theme::load_named(&name));
+                self.paint_theme();
                 self.status = format!("Theme {name}");
             }
             Msg::PickPlace(pane, path) => {
@@ -492,6 +499,8 @@ impl App {
             Msg::SetEditor(id) => self.set_editor(id),
             Msg::EditorPickCancelled => self.paint_editor(),
             Msg::PickEditor => self.pick_editor(sender),
+            Msg::SetTheme(name) => self.set_theme(name),
+            Msg::SetIconPack(id) => self.set_icon_pack(id),
             Msg::Hotlist => self.toggle_hotlist(sender),
             Msg::HotlistPick(index) => self.hot_go(index, sender),
             Msg::HotlistMenu(index) => self.hot_menu(index, sender),
@@ -1287,7 +1296,12 @@ impl App {
                 rust_commander::log::info(&format!("list reload pane={pane} rows={}", rows.len()));
                 ui.store.remove_all();
                 for (entry, marked) in &rows {
-                    ui.store.append(&EntryObject::from_entry(entry, *marked, self.cfg.file_icons));
+                    ui.store.append(&EntryObject::from_entry(
+                        entry,
+                        *marked,
+                        self.cfg.file_icons,
+                        crate::ui::iconpack::active(&self.cfg.icon_pack),
+                    ));
                 }
                 self.dirty[pane] = false;
                 pending[pane] = Some(rows.iter().map(|(entry, _)| entry.clone()).collect());

@@ -11,7 +11,10 @@ use relm4::RelmWidgetExt;
 use vte4::prelude::{TerminalExt, TerminalExtManual};
 use vte4::Terminal;
 
+use rust_commander::icons;
 use rust_commander::listing::SortKey;
+
+use super::iconpack;
 
 use super::row::{self, EntryObject};
 
@@ -70,7 +73,7 @@ pub struct PanelShell {
     pub pid: std::rc::Rc<std::cell::Cell<Option<i32>>>,
 }
 
-pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> Shell {
+pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon_pack: &str) -> Shell {
     window.add_css_class("rust-commander");
     set_logo(window);
     let css = gtk::CssProvider::new();
@@ -83,7 +86,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>) -> S
     }
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let active = Rc::new(Cell::new(0));
-    let (shell_bar, shell_buttons, drives) = drive_bar(sender, &active);
+    let (shell_bar, shell_buttons, drives) = drive_bar(sender, &active, iconpack::active(icon_pack));
     root.append(&shell_bar);
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
     paned.add_css_class("panes");
@@ -316,6 +319,7 @@ fn hint_button(
 fn drive_bar(
     sender: &relm4::Sender<super::msg::Msg>,
     active: &Rc<Cell<usize>>,
+    icon_pack: &str,
 ) -> (gtk::Box, gtk::Box, Vec<(PathBuf, gtk::Button)>) {
     let mounts = rust_commander::places::mounts();
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
@@ -329,7 +333,10 @@ fn drive_bar(
         let number = gtk::Label::new(Some(&(index + 1).to_string()));
         number.add_css_class("drive-num");
         row.append(&number);
-        row.append(&drive_icon(mount.removable, mount.network));
+        row.append(&iconpack::icon_widget(
+            &icons::drive_token(icon_pack, mount.removable, mount.network),
+            16,
+        ));
         let caption = gtk::Label::new(Some(&mount.label));
         caption.set_ellipsize(gtk::pango::EllipsizeMode::End);
         caption.set_max_width_chars(10);
@@ -459,21 +466,18 @@ fn set_logo(window: &gtk::Window) {
     });
 }
 
-fn drive_icon(removable: bool, network: bool) -> gtk::Widget {
-    let (name, fallback) = if network {
-        ("network-server-symbolic", "⇄")
-    } else if removable {
-        ("drive-removable-media-symbolic", "⏏")
-    } else {
-        ("drive-harddisk-symbolic", "▮")
-    };
-    let theme = gtk::gdk::Display::default().map(|display| gtk::IconTheme::for_display(&display));
-    if theme.is_some_and(|theme| theme.has_icon(name)) {
-        let icon = gtk::Image::from_icon_name(name);
-        icon.set_pixel_size(12);
-        icon.upcast()
-    } else {
-        gtk::Label::new(Some(fallback)).upcast()
+pub fn repaint_drives(drives: &[(PathBuf, gtk::Button)], icon_pack: &str) {
+    let icon_pack = iconpack::active(icon_pack);
+    let mounts = rust_commander::places::mounts();
+    for (path, button) in drives {
+        let Some(row) = button.child().and_then(|child| child.downcast::<gtk::Box>().ok()) else { continue };
+        let Some(number) = row.first_child() else { continue };
+        let Some(old) = number.next_sibling() else { continue };
+        let mount = mounts.iter().find(|mount| &mount.path == path);
+        let (removable, network) = mount.map(|mount| (mount.removable, mount.network)).unwrap_or((false, false));
+        let next = iconpack::icon_widget(&icons::drive_token(icon_pack, removable, network), 16);
+        row.insert_child_after(&next, Some(&number));
+        row.remove(&old);
     }
 }
 
@@ -758,6 +762,8 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_child(Some(&list));
     scroll.set_vexpand(true);
+    // Scrollbars get their own space instead of covering the rows.
+    scroll.set_overlay_scrolling(false);
     let preview = gtk::TextView::new();
     preview.set_editable(false);
     preview.set_monospace(true);

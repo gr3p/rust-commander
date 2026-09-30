@@ -1,6 +1,6 @@
 # Rust Commander
 
-Standalone dual-pane file manager for Linux. Tokyo Night is used until an Omarchy theme is found on a verified path.
+Standalone dual-pane file manager for Linux. Ships with a few built-in themes (Tokyo Night, Catppuccin Mocha, Gruvbox Dark, Nord); an Omarchy theme on a verified path is used instead when active.
 
 ## Build on Linux
 
@@ -66,8 +66,12 @@ Later, one at a time: multi-select rename (Ctrl+M), search in file contents and 
 
 Left out: Windows builds, network neighborhood, parallel port, USB cable, UAC, Windows context menu, WLX/WCX/WDX/WFX, and IrfanView/XnView.
 
+## Themes
+
+Settings (F12) has a Theme dropdown listing the built-in themes plus any theme found under the Omarchy theme dirs. Picking one saves it to `config.toml` and to `~/.config/rust-commander/active-theme`, so it survives a restart and stays in sync with the Omarchy hook below. Adding a built-in theme is one entry in `src/theme.rs`.
+
 ## Omarchy
 
-Omarchy is Arch-based, so use the pacman build packages above. `omarchy/theme-set` takes the theme name as the first argument, writes `~/.config/rust-commander/active-theme`, and sends SIGUSR1 to Rust Commander. Themes are read from `/usr/share/omarchy/themes/<name>/colors.toml` or `~/.config/omarchy/themes/<name>/colors.toml`. If the file is missing, Tokyo Night is used.
+Omarchy is Arch-based, so use the pacman build packages above. `omarchy/theme-set` takes the theme name as the first argument, writes `~/.config/rust-commander/active-theme`, and sends SIGUSR1 to Rust Commander. Non-built-in themes are read from `/usr/share/omarchy/themes/<name>/colors.toml` or `~/.config/omarchy/themes/<name>/colors.toml`. If the name matches neither a built-in theme nor a file on disk, Tokyo Night is used.
 
 The `.desktop` file is in `data/rust-commander.desktop`.

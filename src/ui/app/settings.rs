@@ -150,6 +150,11 @@ impl App {
         scroll.set_max_content_height(640);
         let (editor_row, editor, editor_ids, editor_guard) = editor_picker(&self.cfg.editor, tx.clone());
         column.append(&editor_row);
+        let active_theme = theme::active_name(&self.cfg.theme, &config::active_theme_path());
+        let (theme_row, theme, theme_ids, theme_guard) = theme_picker(&active_theme, tx.clone());
+        column.append(&theme_row);
+        let (icon_row, icon_pack, icon_pack_ids, icon_pack_guard) = icon_picker(&self.cfg.icon_pack, tx.clone());
+        column.append(&icon_row);
         let (columns_row, columns) = settings_row("Auto column size", self.cfg.auto_columns);
         let tx_columns = tx.clone();
         let flash = columns_row.clone();
@@ -311,6 +316,12 @@ impl App {
             editor,
             editor_ids,
             editor_guard,
+            theme,
+            theme_ids,
+            theme_guard,
+            icon_pack,
+            icon_pack_ids,
+            icon_pack_guard,
         });
     }
 
@@ -328,6 +339,38 @@ impl App {
     pub(in crate::ui::app) fn paint_editor(&self) {
         let Some(ui) = &self.settings else { return };
         fill_editor(&ui.editor, &ui.editor_ids, &ui.editor_guard, &self.cfg.editor);
+    }
+
+    // Written next to the config so an external `omarchy/theme-set` and this picker agree on the last choice.
+    pub(in crate::ui::app) fn set_theme(&mut self, name: String) {
+        if self.cfg.theme != name {
+            self.cfg.theme = name.clone();
+            let _ = config::save(&self.cfg);
+        }
+        let _ = std::fs::write(config::active_theme_path(), format!("{name}\n"));
+        self.restyle();
+        self.paint_theme();
+    }
+
+    pub(in crate::ui::app) fn paint_theme(&self) {
+        let Some(ui) = &self.settings else { return };
+        let active = theme::active_name(&self.cfg.theme, &config::active_theme_path());
+        fill_theme(&ui.theme, &ui.theme_ids, &ui.theme_guard, &active);
+    }
+
+    pub(in crate::ui::app) fn set_icon_pack(&mut self, id: String) {
+        if self.cfg.icon_pack != id {
+            self.cfg.icon_pack = id;
+            let _ = config::save(&self.cfg);
+        }
+        crate::ui::shell::repaint_drives(&self.shell.drives, &self.cfg.icon_pack);
+        self.touch_both();
+        self.paint_icon_pack();
+    }
+
+    pub(in crate::ui::app) fn paint_icon_pack(&self) {
+        let Some(ui) = &self.settings else { return };
+        fill_icon_pack(&ui.icon_pack, &ui.icon_pack_ids, &ui.icon_pack_guard, &self.cfg.icon_pack);
     }
 
     pub(in crate::ui::app) fn pick_editor(&mut self, sender: &ComponentSender<Self>) {
@@ -587,6 +630,84 @@ pub(in crate::ui::app) fn fill_editor(drop: &gtk::DropDown, ids: &Rc<RefCell<Vec
     drop.set_model(Some(&gtk::StringList::new(&labels)));
     drop.set_selected(selected);
     *ids.borrow_mut() = choices.into_iter().map(|choice| choice.id).collect();
+    guard.set(false);
+}
+
+pub(in crate::ui::app) fn theme_picker(active: &str, tx: relm4::Sender<Msg>) -> (gtk::Box, gtk::DropDown, Rc<RefCell<Vec<String>>>, Rc<Cell<bool>>) {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    row.add_css_class("settings-row");
+    let name = gtk::Label::new(Some("Theme"));
+    name.set_xalign(0.0);
+    let names = theme::available_themes();
+    let labels: Vec<&str> = names.iter().map(String::as_str).collect();
+    let drop = gtk::DropDown::from_strings(&labels);
+    drop.add_css_class("editor-pick");
+    drop.set_hexpand(true);
+    let ids = Rc::new(RefCell::new(names.clone()));
+    let guard = Rc::new(Cell::new(false));
+    let selected = names.iter().position(|n| n == active).unwrap_or(0) as u32;
+    drop.set_selected(selected);
+    let ids_notify = ids.clone();
+    let guard_notify = guard.clone();
+    drop.connect_selected_notify(move |drop| {
+        if guard_notify.get() {
+            return;
+        }
+        let Some(name) = ids_notify.borrow().get(drop.selected() as usize).cloned() else { return };
+        tx.emit(Msg::SetTheme(name));
+    });
+    row.append(&name);
+    row.append(&drop);
+    (row, drop, ids, guard)
+}
+
+pub(in crate::ui::app) fn icon_picker(active: &str, tx: relm4::Sender<Msg>) -> (gtk::Box, gtk::DropDown, Rc<RefCell<Vec<String>>>, Rc<Cell<bool>>) {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    row.add_css_class("settings-row");
+    let name = gtk::Label::new(Some("Icons"));
+    name.set_xalign(0.0);
+    let choices = crate::ui::iconpack::choices();
+    let labels: Vec<&str> = choices.iter().map(|(_, label)| label.as_str()).collect();
+    let drop = gtk::DropDown::from_strings(&labels);
+    drop.add_css_class("editor-pick");
+    drop.set_hexpand(true);
+    let ids = Rc::new(RefCell::new(choices.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>()));
+    let guard = Rc::new(Cell::new(false));
+    let selected = choices.iter().position(|(id, _)| id == active).unwrap_or(0) as u32;
+    drop.set_selected(selected);
+    let ids_notify = ids.clone();
+    let guard_notify = guard.clone();
+    drop.connect_selected_notify(move |drop| {
+        if guard_notify.get() {
+            return;
+        }
+        let Some(id) = ids_notify.borrow().get(drop.selected() as usize).cloned() else { return };
+        tx.emit(Msg::SetIconPack(id));
+    });
+    row.append(&name);
+    row.append(&drop);
+    (row, drop, ids, guard)
+}
+
+pub(in crate::ui::app) fn fill_icon_pack(drop: &gtk::DropDown, ids: &Rc<RefCell<Vec<String>>>, guard: &Rc<Cell<bool>>, active: &str) {
+    let choices = crate::ui::iconpack::choices();
+    let labels: Vec<&str> = choices.iter().map(|(_, label)| label.as_str()).collect();
+    let selected = choices.iter().position(|(id, _)| id == active).unwrap_or(0) as u32;
+    guard.set(true);
+    drop.set_model(Some(&gtk::StringList::new(&labels)));
+    drop.set_selected(selected);
+    *ids.borrow_mut() = choices.into_iter().map(|(id, _)| id).collect();
+    guard.set(false);
+}
+
+pub(in crate::ui::app) fn fill_theme(drop: &gtk::DropDown, ids: &Rc<RefCell<Vec<String>>>, guard: &Rc<Cell<bool>>, active: &str) {
+    let names = theme::available_themes();
+    let labels: Vec<&str> = names.iter().map(String::as_str).collect();
+    let selected = names.iter().position(|n| n == active).unwrap_or(0) as u32;
+    guard.set(true);
+    drop.set_model(Some(&gtk::StringList::new(&labels)));
+    drop.set_selected(selected);
+    *ids.borrow_mut() = names;
     guard.set(false);
 }
 

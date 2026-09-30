@@ -51,12 +51,18 @@ pub struct Config {
     pub mode_buttons: bool,
     #[serde(default)]
     pub file_icons: bool,
+    #[serde(default = "default_icon_pack")]
+    pub icon_pack: String,
     #[serde(default = "default_true")]
     pub flash_feedback: bool,
 }
 
 fn default_theme() -> String {
     "tokyo-night".into()
+}
+
+fn default_icon_pack() -> String {
+    crate::icons::AWESOME.into()
 }
 
 fn default_true() -> bool {
@@ -90,6 +96,7 @@ impl Default for Config {
             rar: String::new(),
             mode_buttons: true,
             file_icons: false,
+            icon_pack: default_icon_pack(),
             flash_feedback: true,
         }
     }

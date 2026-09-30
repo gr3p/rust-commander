@@ -48,7 +48,7 @@ glib::wrapper! {
 }
 
 impl EntryObject {
-    pub fn from_entry(entry: &Entry, marked: bool, icons: bool) -> Self {
+    pub fn from_entry(entry: &Entry, marked: bool, icons: bool, pack: &str) -> Self {
         let skip = entry.name.as_ref() == "..";
         let name = if skip {
             "↑ [..]".into()
@@ -60,7 +60,11 @@ impl EntryObject {
             entry.name.to_string()
         };
         let glyph = if skip || entry.is_dir() { "" } else { rust_commander::archive::unpack_mark(&entry.name) };
-        let icon = if icons { listing::file_icon(&entry.name, entry.is_dir(), entry.is_symlink()) } else { "" };
+        let icon = if icons {
+            rust_commander::icons::file_token(pack, &entry.name, entry.is_dir(), entry.is_symlink())
+        } else {
+            String::new()
+        };
         glib::Object::builder()
             .property("name", name)
             .property("ext", if skip { String::new() } else { listing::extension(&entry.name).to_string() })
@@ -126,8 +130,14 @@ fn column(
             icon.add_css_class("file-icon");
             icon.set_pixel_size(14);
             icon.set_visible(false);
+            let glyph = gtk::Label::new(None);
+            glyph.add_css_class("icon-glyph");
+            glyph.add_css_class("file-icon");
+            glyph.set_valign(gtk::Align::Center);
+            glyph.set_visible(false);
             row.append(&up_arrow());
             row.append(&folder_icon());
+            row.append(&glyph);
             row.append(&icon);
             row.append(&label);
             item.set_child(Some(&row));
@@ -321,16 +331,25 @@ fn apply_marked(label: &relm4::gtk::Label, on: bool) {
 fn paint_file_icon(item: &relm4::gtk::ListItem, obj: &EntryObject) {
     let Some(row) = item.child().and_then(|child| child.downcast::<relm4::gtk::Box>().ok()) else { return };
     let Some(folder) = row.first_child().and_then(|arrow| arrow.next_sibling()) else { return };
-    let Some(icon) = folder.next_sibling().and_then(|widget| widget.downcast::<relm4::gtk::Image>().ok()) else { return };
+    let Some(glyph) = folder.next_sibling().and_then(|widget| widget.downcast::<relm4::gtk::Label>().ok()) else { return };
+    let Some(icon) = glyph.next_sibling().and_then(|widget| widget.downcast::<relm4::gtk::Image>().ok()) else { return };
     let name = obj.icon();
+    let glyph_icon = crate::ui::iconpack::is_glyph(&name);
     // Themes draw folder-symbolic as an outline, so directories get the filled folder instead.
     let filled = name == "folder-symbolic";
     folder.set_visible(filled);
-    icon.set_visible(!filled && !name.is_empty());
-    icon.set_icon_name(Some(&name));
+    glyph.set_visible(glyph_icon);
+    icon.set_visible(!filled && !glyph_icon && !name.is_empty());
+    if glyph_icon {
+        glyph.set_label(&name);
+    } else if !name.is_empty() && !filled {
+        crate::ui::iconpack::apply_image(&icon, &name);
+    }
     if obj.is_dir() {
+        glyph.add_css_class("dir");
         icon.add_css_class("dir");
     } else {
+        glyph.remove_css_class("dir");
         icon.remove_css_class("dir");
     }
 }

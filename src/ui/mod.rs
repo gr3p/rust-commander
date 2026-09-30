@@ -1,5 +1,6 @@
 mod app;
 mod hotlist;
+mod iconpack;
 mod msg;
 mod row;
 mod shell;

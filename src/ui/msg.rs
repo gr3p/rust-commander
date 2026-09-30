@@ -80,6 +80,8 @@ pub enum Msg {
     SetEditor(String),
     EditorPickCancelled,
     PickEditor,
+    SetTheme(String),
+    SetIconPack(String),
     ShellExited(u64),
     SelectShell(u64),
     Smoke,

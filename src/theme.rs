@@ -11,15 +11,65 @@ pub struct Palette {
     pub bright: String,
 }
 
-pub fn builtin() -> Palette {
+// A theme bundled with the binary, so several themes work with no Omarchy install.
+// Adding a theme later is one entry here; the rest of the app (picker, CSS, terminal) follows.
+struct BuiltinTheme {
+    name: &'static str,
+    // background, foreground, accent, selection, muted, bright
+    colors: [&'static str; 6],
+    ansi: [&'static str; 16],
+}
+
+const BUILTIN_THEMES: &[BuiltinTheme] = &[
+    BuiltinTheme {
+        name: "tokyo-night",
+        colors: ["#1a1b26", "#a9b1d6", "#7aa2f7", "#292e42", "#414868", "#c0caf5"],
+        ansi: TOKYO_ANSI,
+    },
+    BuiltinTheme {
+        name: "catppuccin-mocha",
+        colors: ["#1e1e2e", "#cdd6f4", "#89b4fa", "#313244", "#45475a", "#b4befe"],
+        ansi: [
+            "#45475a", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#bac2de",
+            "#585b70", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#a6adc8",
+        ],
+    },
+    BuiltinTheme {
+        name: "gruvbox-dark",
+        colors: ["#282828", "#ebdbb2", "#83a598", "#3c3836", "#504945", "#fbf1c7"],
+        ansi: [
+            "#282828", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a", "#a89984",
+            "#928374", "#fb4934", "#b8bb26", "#fabd2f", "#83a598", "#d3869b", "#8ec07c", "#ebdbb2",
+        ],
+    },
+    BuiltinTheme {
+        name: "nord",
+        colors: ["#2e3440", "#d8dee9", "#88c0d0", "#3b4252", "#434c5e", "#eceff4"],
+        ansi: [
+            "#3b4252", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#88c0d0", "#e5e9f0",
+            "#4c566a", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#8fbcbb", "#eceff4",
+        ],
+    },
+];
+
+fn builtin_theme(name: &str) -> Option<&'static BuiltinTheme> {
+    BUILTIN_THEMES.iter().find(|t| t.name == name)
+}
+
+fn palette_of(t: &BuiltinTheme) -> Palette {
+    let [background, foreground, accent, selection, muted, bright] = t.colors;
     Palette {
-        background: "#1a1b26".into(),
-        foreground: "#a9b1d6".into(),
-        accent: "#7aa2f7".into(),
-        selection: "#292e42".into(),
-        muted: "#414868".into(),
-        bright: "#c0caf5".into(),
+        background: background.into(),
+        foreground: foreground.into(),
+        accent: accent.into(),
+        selection: selection.into(),
+        muted: muted.into(),
+        bright: bright.into(),
     }
+}
+
+pub fn builtin() -> Palette {
+    palette_of(&BUILTIN_THEMES[0])
 }
 
 pub fn palette_from_optional(text: Option<&str>) -> Palette {
@@ -55,7 +105,7 @@ pub fn active_name(config_theme: &str, active_file: &Path) -> String {
         }
     }
     if config_theme.is_empty() {
-        "tokyo-night".into()
+        BUILTIN_THEMES[0].name.into()
     } else {
         config_theme.to_string()
     }
@@ -69,8 +119,44 @@ pub fn omarchy_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+// Theme names found on disk under the Omarchy theme dirs (each needs a colors.toml).
+fn omarchy_theme_names() -> Vec<String> {
+    let mut names = Vec::new();
+    for dir in omarchy_dirs() {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.join("colors.toml").is_file() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    names.push(name.to_string());
+                }
+            }
+        }
+    }
+    names
+}
+
+// Every theme this build can show: built in first, then anything found on disk, no duplicates.
+pub fn available_themes() -> Vec<String> {
+    let mut names: Vec<String> = BUILTIN_THEMES.iter().map(|t| t.name.to_string()).collect();
+    let mut disk = omarchy_theme_names();
+    disk.sort();
+    disk.dedup();
+    for name in disk {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+// A theme file on disk wins over the built-in one with the same name, so Omarchy's own
+// tokyo-night or nord (and any edits to them) are what the app shows.
 pub fn load_named(name: &str) -> Palette {
-    read_theme(name).and_then(|text| from_colors_toml(&text)).unwrap_or_else(builtin)
+    read_theme(name)
+        .and_then(|text| from_colors_toml(&text))
+        .or_else(|| builtin_theme(name).map(palette_of))
+        .unwrap_or_else(builtin)
 }
 
 pub struct TerminalTheme {
@@ -108,8 +194,9 @@ const ANSI_KEYS: [[&str; 2]; 16] = [
 
 pub fn load_terminal(name: &str, bg_override: &str) -> TerminalTheme {
     let palette = load_named(name);
+    // Same order as the palette: the file on disk, then the built-in theme, then Tokyo Night.
+    let mut ansi = builtin_theme(name).map_or(TOKYO_ANSI, |t| t.ansi).map(String::from);
     let table = read_theme(name).and_then(|text| toml::from_str::<toml::Table>(&text).ok());
-    let mut ansi = TOKYO_ANSI.map(str::to_string);
     if let Some(table) = &table {
         for (i, keys) in ANSI_KEYS.iter().enumerate() {
             if let Some(hex) = keys.iter().find_map(|key| color(table, key)) {
@@ -130,6 +217,7 @@ pub fn load_terminal(name: &str, bg_override: &str) -> TerminalTheme {
 fn read_theme(name: &str) -> Option<String> {
     omarchy_dirs().into_iter().find_map(|dir| fs::read_to_string(dir.join(name).join("colors.toml")).ok())
 }
+
 
 pub fn css_file_url(path: &str) -> String {
     let mut out = String::from("file://");
@@ -273,6 +361,15 @@ label.glyph {{
 .file-icon.dir {{
   color: {accent};
 }}
+label.icon-glyph {{
+  /* PUA glyphs: Nerd Font if present, otherwise Font Awesome. */
+  font-family: "JetBrainsMono Nerd Font", "Symbols Nerd Font Mono", FontAwesome, sans-serif;
+  font-size: 14px;
+  min-height: 0;
+  min-width: 0;
+  padding: 0;
+  margin: 0 2px 0 0;
+}}
 columnview > listview > row > cell:first-child {{
   padding: 0;
 }}
@@ -333,7 +430,11 @@ button.drive {{
   min-height: 0;
 }}
 button.drive label {{
-  font-size: 11px;
+  font-size: 13px;
+}}
+button.drive label.icon-glyph {{
+  font-size: 16px;
+  margin: 0;
 }}
 button.drive label.drive-num {{
   color: {accent};

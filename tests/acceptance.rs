@@ -97,6 +97,7 @@ const MEMORY: &[(&str, fn() -> Result<(), String>)] = &[
     ("pane_sort_is_independent", pane_sort_is_independent),
     ("columns_ext_date_attr", columns_ext_date_attr),
     ("file_icons_by_kind", file_icons_by_kind),
+    ("icon_packs_cover_roles", icon_packs_cover_roles),
     ("column_widths_follow_text", column_widths_follow_text),
     ("filter_keeps_substring", filter_keeps_substring),
     ("insert_mark_is_used", insert_mark_is_used),
@@ -240,6 +241,24 @@ fn file_icons_by_kind() -> Result<(), String> {
     eq(listing::file_icon("note.txt", false, false), "text-x-generic-symbolic", "txt")?;
     eq(listing::file_icon("song.mp3", false, false), "audio-x-generic-symbolic", "mp3")?;
     eq(listing::file_icon("data.bin", false, false), "text-x-generic-symbolic", "other")
+}
+
+fn icon_packs_cover_roles() -> Result<(), String> {
+    use rust_commander::icons::{self, AWESOME, SYSTEM};
+    eq(icons::file_token(SYSTEM, "docs", true, false), "folder-symbolic".into(), "sys dir")?;
+    eq(icons::file_token(SYSTEM, "note.txt", false, false), "text-x-generic-symbolic".into(), "sys txt")?;
+    eq(icons::file_token(AWESOME, "docs", true, false), "\u{f07b}".into(), "aw dir")?;
+    eq(icons::file_token(AWESOME, "song.mp3", false, false), "\u{f1c7}".into(), "aw audio")?;
+    eq(icons::file_token(AWESOME, "shot.png", false, false), "\u{f1c5}".into(), "aw image")?;
+    eq(icons::file_token(AWESOME, "a.rs", false, false), "\u{f1c9}".into(), "aw code")?;
+    eq(icons::file_token(AWESOME, "a.pdf", false, false), "\u{f1c1}".into(), "aw pdf")?;
+    eq(icons::file_token(AWESOME, "..", true, false), String::new(), "up")?;
+    eq(icons::drive_token(AWESOME, false, false), "\u{f0a0}".into(), "aw disk")?;
+    eq(icons::drive_token(AWESOME, true, false), "\u{f287}".into(), "aw usb")?;
+    eq(icons::drive_token(AWESOME, false, true), "\u{f233}".into(), "aw net")?;
+    eq(icons::drive_token(SYSTEM, false, false), "drive-harddisk-symbolic".into(), "sys disk")?;
+    eq(icons::file_token("Yaru", "pic.png", false, false), "@Yaru/image-x-generic".into(), "theme file")?;
+    eq(icons::drive_token("Adwaita", false, false), "@Adwaita/drive-harddisk".into(), "theme disk")
 }
 
 fn column_widths_follow_text() -> Result<(), String> {
@@ -1086,6 +1105,7 @@ fn bookmark_roundtrip_config(dir: &Path) -> Result<(), String> {
     });
     cfg.auto_columns = false;
     cfg.column_widths = vec![10, 20, 30, 40, 50];
+    cfg.icon_pack = "Yaru".into();
     config::save_to(&path, &cfg).map_err(s)?;
     let loaded = config::load_from(&path);
     if loaded.bookmarks.len() != 1 || loaded.bookmarks[0].name != "Work" || loaded.bookmarks[0].target != pb("/other") {
@@ -1097,6 +1117,9 @@ fn bookmark_roundtrip_config(dir: &Path) -> Result<(), String> {
     if !loaded.mode_buttons {
         return Err("mode buttons".into());
     }
+    if loaded.icon_pack != "Yaru" {
+        return Err("icon pack".into());
+    }
     fs::write(&path, "show_hidden = true\n").map_err(s)?;
     let loaded = config::load_from(&path);
     if !loaded.mode_buttons {
@@ -1104,6 +1127,9 @@ fn bookmark_roundtrip_config(dir: &Path) -> Result<(), String> {
     }
     if loaded.file_icons {
         return Err("file icons default".into());
+    }
+    if loaded.icon_pack != "awesome" {
+        return Err("icon pack default".into());
     }
     Ok(())
 }
