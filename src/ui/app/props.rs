@@ -39,7 +39,7 @@ impl App {
         let notebook = gtk::Notebook::new();
         notebook.set_vexpand(true);
         notebook.append_page(&facts_page(&path, &facts, mime.as_str()), Some(&gtk::Label::new(Some("Properties"))));
-        let (attr_page, mode_of, owner, group, uids, gids) = attr_page(&facts);
+        let (attr_page, octal, owner, group, uids, gids) = attr_page(&facts);
         notebook.append_page(&attr_page, Some(&gtk::Label::new(Some("Attributes"))));
         notebook.append_page(&details_page(&path, &name, mime.as_str()), Some(&gtk::Label::new(Some("Details"))));
         let error = gtk::Label::new(None);
@@ -65,36 +65,30 @@ impl App {
         win.set_default_widget(Some(&ok));
         let win_cancel = win.clone();
         crate::ui::shell::on_click(&cancel, move || win_cancel.close());
-        let path_ok = path.clone();
-        let original_mode = facts.mode;
-        let original_uid = facts.uid;
-        let original_gid = facts.gid;
-        let symlink = facts.symlink;
         let error_ok = error.clone();
         let tx_ok = tx.clone();
         let win_ok = win.clone();
         crate::ui::shell::on_click(&ok, move || {
-            if symlink {
+            if facts.symlink {
                 win_ok.close();
                 return;
             }
-            let mode = mode_of();
-            let uid = uids.get(owner.selected() as usize).copied().unwrap_or(original_uid);
-            let gid = gids.get(group.selected() as usize).copied().unwrap_or(original_gid);
-            if mode != original_mode {
-                if let Err(err) = props::apply_mode(&path_ok, mode) {
-                    error_ok.set_text(&err.to_string());
-                    error_ok.set_visible(true);
-                    return;
-                }
+            let Some(mode) = props::parse_mode(&octal.text()) else {
+                error_ok.set_text("Octal needs 3 or 4 digits from 0 to 7");
+                error_ok.set_visible(true);
+                return;
+            };
+            let uid = uids.get(owner.selected() as usize).copied().unwrap_or(facts.uid);
+            let gid = gids.get(group.selected() as usize).copied().unwrap_or(facts.gid);
+            if mode == facts.mode && uid == facts.uid && gid == facts.gid {
+                win_ok.close();
+                return;
             }
-            if uid != original_uid || gid != original_gid {
-                if let Err(err) = props::apply_owner(&path_ok, uid, gid) {
-                    error_ok.set_text(&err.to_string());
-                    error_ok.set_visible(true);
-                    tx_ok.emit(Msg::RefreshActive);
-                    return;
-                }
+            if let Err(err) = props::apply(&path, &facts, mode, uid, gid) {
+                error_ok.set_text(&err.to_string());
+                error_ok.set_visible(true);
+                tx_ok.emit(Msg::RefreshActive);
+                return;
             }
             tx_ok.emit(Msg::PropsSaved);
         });
@@ -171,7 +165,7 @@ fn details_page(path: &std::path::Path, name: &str, mime: &str) -> gtk::Grid {
     grid
 }
 
-fn attr_page(facts: &Facts) -> (gtk::Box, Rc<dyn Fn() -> u32>, gtk::DropDown, gtk::DropDown, Vec<u32>, Vec<u32>) {
+fn attr_page(facts: &Facts) -> (gtk::Box, gtk::Entry, gtk::DropDown, gtk::DropDown, Vec<u32>, Vec<u32>) {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 8);
     page.set_margin_top(12);
     let grid = gtk::Grid::new();
@@ -247,12 +241,7 @@ fn attr_page(facts: &Facts) -> (gtk::Box, Rc<dyn Fn() -> u32>, gtk::DropDown, gt
         if guard_octal.get() {
             return;
         }
-        let text = entry.text();
-        let text = text.trim();
-        if text.len() < 3 || text.len() > 4 {
-            return;
-        }
-        let Some(mode) = props::parse_mode(text) else { return };
+        let Some(mode) = props::parse_mode(&entry.text()) else { return };
         guard_octal.set(true);
         for (i, bit) in props::BITS.iter().enumerate() {
             boxes_octal[i].set_active(mode & bit != 0);
@@ -285,9 +274,7 @@ fn attr_page(facts: &Facts) -> (gtk::Box, Rc<dyn Fn() -> u32>, gtk::DropDown, gt
     page.append(&octal_row);
     page.append(&owner_row);
     page.append(&group_row);
-    let read = Rc::clone(&boxes);
-    let mode_of: Rc<dyn Fn() -> u32> = Rc::new(move || mode_of(&read));
-    (page, mode_of, owner, group, uids, gids)
+    (page, octal, owner, group, uids, gids)
 }
 
 fn mode_of(boxes: &[gtk::CheckButton]) -> u32 {

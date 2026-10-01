@@ -23,6 +23,8 @@ pub struct Facts {
     pub changed: i64,
     pub created: Option<i64>,
     pub symlink: bool,
+    pub dev: u64,
+    pub ino: u64,
 }
 
 pub fn read(path: &Path) -> io::Result<Facts> {
@@ -50,24 +52,52 @@ pub fn read(path: &Path) -> io::Result<Facts> {
         changed: meta.ctime(),
         created: meta.created().ok().and_then(|time| unix_opt(time)),
         symlink,
+        dev: meta.dev(),
+        ino: meta.ino(),
     })
 }
 
-pub fn apply_mode(path: &Path, mode: u32) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o7777))
-}
-
-pub fn apply_owner(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
+// Touches only this one inode, never children. It must still be the inode
+// that `facts` was read from, and not a link, or nothing is written.
+pub fn apply(path: &Path, facts: &Facts, mode: u32, uid: u32, gid: u32) -> io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
-    let c = std::ffi::CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad path"))?;
-    let rc = unsafe { libc::chown(c.as_ptr(), uid as libc::uid_t, gid as libc::gid_t) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
+    if facts.symlink {
+        return Err(io::Error::other("A link has no permissions of its own"));
     }
+    let owner = uid != facts.uid || gid != facts.gid;
+    if !owner && mode == facts.mode {
+        return Ok(());
+    }
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| io::Error::other("Bad path"))?;
+    // O_PATH|O_NOFOLLOW pins the inode without following a link swapped in after the dialog opened.
+    let raw = unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if st.st_mode & libc::S_IFMT == libc::S_IFLNK || st.st_dev as u64 != facts.dev || st.st_ino as u64 != facts.ino {
+        return Err(io::Error::other("The file changed since the dialog opened"));
+    }
+    if owner {
+        // -1 leaves that id as it is.
+        let uid = if uid == facts.uid { libc::uid_t::MAX } else { uid };
+        let gid = if gid == facts.gid { libc::gid_t::MAX } else { gid };
+        if unsafe { libc::fchownat(fd.as_raw_fd(), c"".as_ptr(), uid, gid, libc::AT_EMPTY_PATH) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    // chown clears SUID/SGID, so the mode the dialog shows goes on last.
+    // /proc/self/fd/N resolves to the pinned inode, not to a path that can be swapped.
+    let proc = std::ffi::CString::new(format!("/proc/self/fd/{}", fd.as_raw_fd())).map_err(|_| io::Error::other("Bad path"))?;
+    if unsafe { libc::chmod(proc.as_ptr(), (mode & 0o7777) as libc::mode_t) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 pub fn dimensions(path: &Path) -> Option<(u32, u32)> {
@@ -78,16 +108,13 @@ pub fn mode_text(mode: u32) -> String {
     format!("{:o}", mode & 0o7777)
 }
 
+// Three or four octal digits, so a half typed "64" is never taken as 0o064.
 pub fn parse_mode(text: &str) -> Option<u32> {
     let text = text.trim();
-    if text.is_empty() {
+    if !(3..=4).contains(&text.len()) || !text.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
         return None;
     }
-    let mode = u32::from_str_radix(text, 8).ok()?;
-    if mode > 0o7777 {
-        return None;
-    }
-    Some(mode)
+    u32::from_str_radix(text, 8).ok()
 }
 
 pub fn grouped(n: u64) -> String {
@@ -162,6 +189,11 @@ mod tests {
         assert_eq!(parse_mode("0644"), Some(0o644));
         assert_eq!(parse_mode("4755"), Some(0o4755));
         assert_eq!(parse_mode("8"), None);
+        assert_eq!(parse_mode("64"), None);
+        assert_eq!(parse_mode("1"), None);
+        assert_eq!(parse_mode("648"), None);
+        assert_eq!(parse_mode("+644"), None);
+        assert_eq!(parse_mode("07777"), None);
         assert_eq!(mode_text(0o644), "644");
         assert_eq!(mode_text(0o4755), "4755");
     }
@@ -172,19 +204,111 @@ mod tests {
         assert_eq!(grouped(12), "12");
     }
 
-    #[test]
-    fn mode_lands_on_the_file() {
-        let dir = std::env::temp_dir().join(format!("rc-props-{}", std::process::id()));
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rc-props-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn mode(path: &Path) -> u32 {
+        fs::symlink_metadata(path).unwrap().mode() & 0o7777
+    }
+
+    #[test]
+    fn mode_lands_on_the_file() {
+        let dir = scratch("mode");
         let path = dir.join("a.txt");
         fs::write(&path, b"hi").unwrap();
-        apply_mode(&path, 0o600).unwrap();
         let facts = read(&path).unwrap();
-        assert_eq!(facts.mode & 0o777, 0o600);
+        apply(&path, &facts, 0o600, facts.uid, facts.gid).unwrap();
+        assert_eq!(mode(&path), 0o600);
         assert_eq!(facts.len, 2);
         assert_eq!(facts.kind, "File");
         assert!(!format_stamp(facts.modified).is_empty());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn folder_mode_leaves_children_alone() {
+        let dir = scratch("tree");
+        let sub = dir.join("sub");
+        fs::create_dir(&sub).unwrap();
+        let child = sub.join("child.txt");
+        fs::write(&child, b"x").unwrap();
+        apply_test_mode(&child, 0o644);
+        let facts = read(&sub).unwrap();
+        apply(&sub, &facts, 0o700, facts.uid, facts.gid).unwrap();
+        assert_eq!(mode(&sub), 0o700);
+        assert_eq!(mode(&child), 0o644);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn swapped_for_a_link_is_refused() {
+        let dir = scratch("swap");
+        let path = dir.join("a.txt");
+        let secret = dir.join("secret");
+        fs::write(&path, b"x").unwrap();
+        fs::write(&secret, b"s").unwrap();
+        apply_test_mode(&secret, 0o600);
+        let facts = read(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&secret, &path).unwrap();
+        assert!(apply(&path, &facts, 0o666, facts.uid, facts.gid).is_err());
+        assert_eq!(mode(&secret), 0o600);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn replaced_file_is_refused() {
+        let dir = scratch("replace");
+        let path = dir.join("a.txt");
+        fs::write(&path, b"x").unwrap();
+        let facts = read(&path).unwrap();
+        let other = dir.join("b.txt");
+        fs::write(&other, b"y").unwrap();
+        apply_test_mode(&other, 0o600);
+        fs::rename(&other, &path).unwrap();
+        assert!(apply(&path, &facts, 0o666, facts.uid, facts.gid).is_err());
+        assert_eq!(mode(&path), 0o600);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn link_itself_is_never_written() {
+        let dir = scratch("link");
+        let target = dir.join("target");
+        fs::write(&target, b"t").unwrap();
+        apply_test_mode(&target, 0o600);
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let facts = read(&link).unwrap();
+        assert!(apply(&link, &facts, 0o666, facts.uid, facts.gid).is_err());
+        assert_eq!(mode(&target), 0o600);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn setuid_survives_a_group_change() {
+        let dir = scratch("suid");
+        let path = dir.join("run");
+        fs::write(&path, b"x").unwrap();
+        let facts = read(&path).unwrap();
+        let mut ids = [0 as libc::gid_t; 64];
+        let n = unsafe { libc::getgroups(ids.len() as i32, ids.as_mut_ptr()) };
+        let Some(&gid) = ids[..n.max(0) as usize].iter().find(|&&gid| gid != facts.gid) else {
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        };
+        apply(&path, &facts, 0o4755, facts.uid, gid).unwrap();
+        assert_eq!(mode(&path), 0o4755);
+        assert_eq!(fs::metadata(&path).unwrap().gid(), gid);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn apply_test_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
     }
 }
