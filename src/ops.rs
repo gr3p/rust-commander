@@ -1,8 +1,11 @@
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 pub const CHUNK: usize = 1024 * 1024;
 
@@ -42,10 +45,12 @@ enum Policy {
     Skip,
 }
 
+/// `pause` stops between chunks with both files closed. Clearing it continues at the same byte.
 pub fn transfer(
     items: &[(PathBuf, PathBuf)],
     kind: Kind,
     cancel: &AtomicBool,
+    pause: &AtomicBool,
     progress: &mut dyn FnMut(&Progress),
     conflict: &mut dyn FnMut(&Path, &Path) -> Choice,
 ) -> io::Result<Report> {
@@ -65,7 +70,7 @@ pub fn transfer(
                 "target is inside the source",
             ));
         }
-        match one(src, dest, kind, &mut policy, cancel, &mut done, total, progress, conflict) {
+        match one(src, dest, kind, &mut policy, cancel, pause, &mut done, total, progress, conflict) {
             Ok(Stop::Continue) => {}
             Ok(Stop::Cancel) => {
                 return Ok(Report {
@@ -99,11 +104,13 @@ fn one(
     kind: Kind,
     policy: &mut Policy,
     cancel: &AtomicBool,
+    pause: &AtomicBool,
     done: &mut u64,
     total: u64,
     progress: &mut dyn FnMut(&Progress),
     conflict: &mut dyn FnMut(&Path, &Path) -> Choice,
 ) -> io::Result<Stop> {
+    hold(pause, cancel)?;
     if cancel.load(Ordering::Relaxed) {
         return Ok(Stop::Cancel);
     }
@@ -184,6 +191,7 @@ fn one(
                 kind,
                 policy,
                 cancel,
+                pause,
                 done,
                 total,
                 progress,
@@ -219,7 +227,7 @@ fn one(
     if !meta.is_file() {
         return bump(done, total, src, progress);
     }
-    copy_file(src, dest, cancel, |n| {
+    copy_file(src, dest, cancel, pause, |n| {
         progress(&Progress {
             done: *done,
             total,
@@ -260,15 +268,24 @@ fn bump_n(
     Ok(Stop::Continue)
 }
 
-fn copy_file(src: &Path, dest: &Path, cancel: &AtomicBool, mut on_chunk: impl FnMut(u64)) -> io::Result<()> {
+fn copy_file(
+    src: &Path,
+    dest: &Path,
+    cancel: &AtomicBool,
+    pause: &AtomicBool,
+    mut on_chunk: impl FnMut(u64),
+) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
+    let _claim = claim(dest)?;
     let partial = partial_path(dest);
+    let mut mine = None;
     let result = (|| {
         use std::os::unix::fs::PermissionsExt;
         let mut input = File::open(src)?;
-        let meta = input.metadata()?;
+        let mut meta = input.metadata()?;
         // Private until done. A reader that opens it early must not keep a handle to the data.
         let _ = fs::remove_file(&partial);
         let mut output = fs::OpenOptions::new()
@@ -277,10 +294,33 @@ fn copy_file(src: &Path, dest: &Path, cancel: &AtomicBool, mut on_chunk: impl Fn
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&partial)?;
+        let ino = output.metadata()?.ino();
+        mine = Some(ino);
         if try_reflink(&input, &output) {
             on_chunk(meta.len());
         } else {
-            copy_loop(&mut input, &mut output, cancel, &mut on_chunk)?;
+            let mut at = 0;
+            while let Some(stop) = copy_loop(&mut input, &mut output, at, cancel, pause, &mut on_chunk)? {
+                // Paused: both files are closed so the disk can be unmounted. On resume the partial must
+                // still be our inode, and a source that changed meanwhile is copied again from the start.
+                drop((input, output));
+                hold(pause, cancel)?;
+                input = File::open(src)?;
+                output = fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(&partial)?;
+                let written = output.metadata()?;
+                if written.ino() != ino {
+                    return Err(replaced(&partial));
+                }
+                let now = input.metadata()?;
+                let same = (now.len(), now.mtime(), now.mtime_nsec()) == (meta.len(), meta.mtime(), meta.mtime_nsec());
+                at = if same && written.len() == stop {
+                    stop
+                } else {
+                    output.set_len(0)?;
+                    meta = now;
+                    0
+                };
+            }
         }
         // Mode and time follow the file. Setuid and setgid do not, since the copy gets a new owner.
         // Some file systems (vfat) refuse both, which must not fail the copy.
@@ -290,27 +330,73 @@ fn copy_file(src: &Path, dest: &Path, cancel: &AtomicBool, mut on_chunk: impl Fn
         }
         output.sync_all()?;
         drop(output);
+        // Another program may have taken the partial name. Only our own data is published.
+        if fs::symlink_metadata(&partial)?.ino() != ino {
+            return Err(replaced(&partial));
+        }
         fs::rename(&partial, dest)?;
         Ok(())
     })();
-    if result.is_err() {
+    if result.is_err() && mine.is_some_and(|ino| fs::symlink_metadata(&partial).is_ok_and(|m| m.ino() == ino)) {
         let _ = fs::remove_file(&partial);
     }
     result
 }
 
+fn replaced(partial: &Path) -> io::Error {
+    io::Error::other(format!("{} was replaced by another program", partial.display()))
+}
+
+static WRITING: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+struct Claim(PathBuf);
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        WRITING.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+    }
+}
+
+// The queue runs beside a foreground copy. Two writers on one name would publish each other's half file.
+fn claim(dest: &Path) -> io::Result<Claim> {
+    let key = match (dest.parent().map(fs::canonicalize), dest.file_name()) {
+        (Some(Ok(dir)), Some(name)) => dir.join(name),
+        _ => dest.to_path_buf(),
+    };
+    if !WRITING.lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone()) {
+        return Err(io::Error::other(format!("{} is already being written", dest.display())));
+    }
+    Ok(Claim(key))
+}
+
+fn hold(pause: &AtomicBool, cancel: &AtomicBool) -> io::Result<()> {
+    while pause.load(Ordering::Relaxed) {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(())
+}
+
+// Some(offset) means paused there. Both offsets move together, so one number resumes both files.
 fn copy_loop(
     input: &mut File,
     output: &mut File,
+    start: u64,
     cancel: &AtomicBool,
+    pause: &AtomicBool,
     on_chunk: &mut dyn FnMut(u64),
-) -> io::Result<()> {
+) -> io::Result<Option<u64>> {
     use std::os::fd::AsRawFd;
-    let mut off_in: libc::loff_t = 0;
-    let mut off_out: libc::loff_t = 0;
+    let mut off_in = start as libc::loff_t;
+    let mut off_out = off_in;
     loop {
         if cancel.load(Ordering::Relaxed) {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        if pause.load(Ordering::Relaxed) {
+            return Ok(Some(off_in as u64));
         }
         let n = unsafe {
             libc::copy_file_range(
@@ -326,12 +412,12 @@ fn copy_loop(
             let err = io::Error::last_os_error();
             let code = err.raw_os_error();
             if matches!(code, Some(libc::EXDEV | libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP)) {
-                return copy_read_write(input, output, off_in as u64, cancel, on_chunk);
+                return copy_read_write(input, output, off_in as u64, cancel, pause, on_chunk);
             }
             return Err(err);
         }
         if n == 0 {
-            return Ok(());
+            return Ok(None);
         }
         on_chunk(n as u64);
     }
@@ -340,23 +426,28 @@ fn copy_loop(
 fn copy_read_write(
     input: &mut File,
     output: &mut File,
-    offset: u64,
+    mut at: u64,
     cancel: &AtomicBool,
+    pause: &AtomicBool,
     on_chunk: &mut dyn FnMut(u64),
-) -> io::Result<()> {
+) -> io::Result<Option<u64>> {
     use std::io::{Seek, SeekFrom};
-    input.seek(SeekFrom::Start(offset))?;
-    output.seek(SeekFrom::Start(offset))?;
+    input.seek(SeekFrom::Start(at))?;
+    output.seek(SeekFrom::Start(at))?;
     let mut buf = vec![0u8; CHUNK];
     loop {
         if cancel.load(Ordering::Relaxed) {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
         }
+        if pause.load(Ordering::Relaxed) {
+            return Ok(Some(at));
+        }
         let n = input.read(&mut buf)?;
         if n == 0 {
-            return Ok(());
+            return Ok(None);
         }
         output.write_all(&buf[..n])?;
+        at += n as u64;
         on_chunk(n as u64);
     }
 }

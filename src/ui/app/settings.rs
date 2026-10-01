@@ -797,6 +797,7 @@ pub(in crate::ui::app) fn show_commands(parent: &gtk::Window) {
             ("Shift+F4", "New file"),
             ("F5", "Copy"),
             ("F6", "Move"),
+            ("F2 in F5/F6", "Add to queue"),
             ("F7", "New folder"),
             ("F8 / Delete", "Trash"),
             ("Shift+F5", "Copy as"),

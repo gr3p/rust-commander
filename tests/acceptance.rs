@@ -143,6 +143,7 @@ const FS: &[&str] = &[
     "shift_f8_deletes",
     "conflict_overwrite_rest",
     "cancel_removes_partial",
+    "pause_closes_files_and_keeps_one_writer",
     "symlink_copied_as_link",
     "copy_into_itself_aborts",
     "lister_text_hex_binary_window",
@@ -173,6 +174,7 @@ fn dispatch(name: &str, dir: &Path) -> Result<(), String> {
         "shift_f8_deletes" => shift_f8_deletes(dir),
         "conflict_overwrite_rest" => conflict_overwrite_rest(dir),
         "cancel_removes_partial" => cancel_removes_partial(dir),
+        "pause_closes_files_and_keeps_one_writer" => pause_closes_files_and_keeps_one_writer(dir),
         "symlink_copied_as_link" => symlink_copied_as_link(dir),
         "copy_into_itself_aborts" => copy_into_itself_aborts(dir),
         "lister_text_hex_binary_window" => lister_text_hex_binary_window(dir),
@@ -940,6 +942,7 @@ fn conflict_overwrite_rest(dir: &Path) -> Result<(), String> {
         &[(src.join("a"), dst.join("a")), (src.join("b"), dst.join("b"))],
         Kind::Copy,
         &AtomicBool::new(false),
+        &AtomicBool::new(false),
         &mut |_| {},
         &mut |_, _| {
             asks.fetch_add(1, Ordering::Relaxed);
@@ -969,6 +972,7 @@ fn cancel_removes_partial(dir: &Path) -> Result<(), String> {
         &[(src, dest.clone())],
         Kind::Copy,
         &cancel,
+        &AtomicBool::new(false),
         &mut |_| {
             seen += 1;
             if seen == 1 {
@@ -982,6 +986,65 @@ fn cancel_removes_partial(dir: &Path) -> Result<(), String> {
         return Err("partial left behind".into());
     }
     Ok(())
+}
+
+fn pause_closes_files_and_keeps_one_writer(dir: &Path) -> Result<(), String> {
+    let src = dir.join("big");
+    let dest = dir.join("big-out");
+    let data: Vec<u8> = (0..ops::CHUNK * 3 + 7).map(|i| (i % 251) as u8).collect();
+    fs::write(&src, &data).map_err(s)?;
+    let partial = fs::canonicalize(dir).map_err(s)?.join(".rust-commander-partial-big-out");
+    let real_src = fs::canonicalize(&src).map_err(s)?;
+    let (cancel, pause, armed) = (AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false));
+    std::thread::scope(|scope| {
+        let job = scope.spawn(|| {
+            ops::transfer(
+                &[(src.clone(), dest.clone())],
+                Kind::Copy,
+                &cancel,
+                &pause,
+                &mut |_| {
+                    if !armed.swap(true, Ordering::Relaxed) {
+                        pause.store(true, Ordering::Relaxed);
+                    }
+                },
+                &mut |_, _| Choice::Overwrite,
+            )
+        });
+        for _ in 0..50 {
+            if armed.load(Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        // A reflink copies the whole file in one step, so there is no pause inside it.
+        let held = if dest.exists() {
+            Ok(())
+        } else if !partial.exists() {
+            Err("partial missing while paused".to_string())
+        } else if open_fds().iter().any(|path| *path == partial || *path == real_src) {
+            Err("file still open while paused".to_string())
+        } else if copy(&[(src.clone(), dest.clone())]).is_ok() || dest.exists() {
+            Err("second writer allowed on the same target".to_string())
+        } else {
+            Ok(())
+        };
+        pause.store(false, Ordering::Relaxed);
+        let done = job.join().map_err(|_| "worker panicked".to_string())?;
+        held?;
+        done.map_err(s)?;
+        if partial.exists() {
+            return Err("partial left behind".into());
+        }
+        eq(fs::read(&dest).map_err(s)?, data, "resumed content")
+    })
+}
+
+fn open_fds() -> Vec<PathBuf> {
+    fs::read_dir("/proc/self/fd")
+        .map(|dir| dir.flatten().filter_map(|fd| fs::read_link(fd.path()).ok()).collect())
+        .unwrap_or_default()
 }
 
 fn symlink_copied_as_link(dir: &Path) -> Result<(), String> {
@@ -1006,6 +1069,7 @@ fn copy_into_itself_aborts(dir: &Path) -> Result<(), String> {
         &[(src.clone(), src.join("nested/tree"))],
         Kind::Copy,
         &AtomicBool::new(false),
+        &AtomicBool::new(false),
         &mut |_| {},
         &mut |_, _| Choice::Overwrite,
     );
@@ -1020,6 +1084,7 @@ fn copy_into_itself_aborts(dir: &Path) -> Result<(), String> {
     let err = ops::transfer(
         &[(src.clone(), dir.join("alias/nested/tree"))],
         Kind::Copy,
+        &AtomicBool::new(false),
         &AtomicBool::new(false),
         &mut |_| {},
         &mut |_, _| Choice::Overwrite,
@@ -1241,7 +1306,8 @@ fn copy(items: &[(PathBuf, PathBuf)]) -> Result<(), String> {
 }
 
 fn transfer(items: &[(PathBuf, PathBuf)], kind: Kind) -> Result<(), String> {
-    ops::transfer(items, kind, &AtomicBool::new(false), &mut |_| {}, &mut |_, _| Choice::Overwrite).map_err(s)?;
+    ops::transfer(items, kind, &AtomicBool::new(false), &AtomicBool::new(false), &mut |_| {}, &mut |_, _| Choice::Overwrite)
+        .map_err(s)?;
     Ok(())
 }
 

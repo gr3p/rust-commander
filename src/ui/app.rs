@@ -25,6 +25,7 @@ use super::row::{self, EntryObject};
 use super::shell::{self, Shell};
 
 mod jobs;
+mod queue;
 mod search;
 mod settings;
 mod term;
@@ -158,6 +159,7 @@ pub struct App {
     meter: Option<f64>,
     pending: Option<PendingUnpack>,
     queued: Option<Queued>,
+    queue: Option<queue::QueueUi>,
     lister: Option<ListerUi>,
     image: Option<ImageUi>,
     image_token: u64,
@@ -302,6 +304,7 @@ impl SimpleComponent for App {
             meter: None,
             pending: None,
             queued: None,
+            queue: None,
             lister: None,
             image: None,
             image_token: 0,
@@ -431,7 +434,16 @@ impl App {
                     self.close_dialog();
                 }
             }
-            Msg::Poll => self.poll_job(sender),
+            Msg::Poll => {
+                self.poll_job(sender);
+                self.poll_queue(sender);
+            }
+            Msg::Enqueue(text) => self.enqueue(&text, sender),
+            Msg::QueuePause => self.toggle_queue_pause(),
+            Msg::QueueRemove => self.remove_queued(),
+            Msg::QueueCancel => self.cancel_queued(),
+            Msg::QueueConflict(choice) => self.answer_queue_conflict(choice),
+            Msg::QueueClosed => self.close_queue(),
             Msg::Preview { generation, body } => {
                 lister::apply_preview(&mut self.preview, generation, body);
             }
@@ -1469,6 +1481,16 @@ impl App {
         if !self.wait_job(sender) || !left.join("move-me.txt").is_file() {
             errors.push("move back failed".into());
         }
+        self.reload_pane(PaneId::Left);
+        self.state.tab_mut(PaneId::Left).marked.clear();
+        if !self.point_at(PaneId::Left, "move-me.txt") {
+            errors.push("missing queued file".into());
+        }
+        self.on_fkey(5, false, sender);
+        self.enqueue(&right.join("queued").display().to_string(), sender);
+        if !self.wait_job(sender) || !right.join("queued/move-me.txt").is_file() || !left.join("move-me.txt").is_file() {
+            errors.push("queued copy failed".into());
+        }
 
         self.state.active = PaneId::Left;
         self.on_fkey(7, false, sender);
@@ -1610,7 +1632,8 @@ impl App {
     fn wait_job(&mut self, sender: &ComponentSender<Self>) -> bool {
         for _ in 0..300 {
             self.poll_job(sender);
-            if self.job.is_none() {
+            self.poll_queue(sender);
+            if self.job.is_none() && self.queue.is_none() {
                 return true;
             }
             std::thread::sleep(Duration::from_millis(10));

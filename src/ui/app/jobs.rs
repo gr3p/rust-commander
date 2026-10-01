@@ -24,24 +24,7 @@ impl App {
         }
         // One job at a time. A second job would take over the progress and conflict channels.
         let Some(pipes) = self.open_job(Work::Transfer) else { return };
-        let JobOut { cancel, progress_tx, conflict_tx, answer_rx, done_tx } = pipes;
-        std::thread::spawn(move || {
-            let result = ops::transfer(
-                &items,
-                kind,
-                &cancel,
-                &mut |p| {
-                    let _ = progress_tx.send(p.clone());
-                },
-                &mut |src, dst| {
-                    if conflict_tx.send((src.to_path_buf(), dst.to_path_buf())).is_err() {
-                        return Choice::Cancel;
-                    }
-                    answer_rx.recv().unwrap_or(Choice::Cancel)
-                },
-            );
-            let _ = done_tx.send(result.map_err(|e| e.to_string()));
-        });
+        run_transfer(items, kind, Arc::new(std::sync::atomic::AtomicBool::new(false)), pipes);
         let _ = sender;
     }
 
@@ -232,23 +215,10 @@ impl App {
             self.status = "Busy".into();
             return None;
         }
-        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (progress_tx, progress_rx) = mpsc::channel();
-        let (conflict_tx, conflict_rx) = mpsc::channel();
-        let (answer_tx, answer_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
+        let (job, out) = new_job(work);
         self.meter = None;
-        self.job = Some(Job {
-            work,
-            cancel: Arc::clone(&cancel),
-            progress_rx,
-            conflict_rx,
-            answer_tx,
-            done_rx,
-            started: Instant::now(),
-            conflict_open: false,
-        });
-        Some(JobOut { cancel, progress_tx, conflict_tx, answer_rx, done_tx })
+        self.job = Some(job);
+        Some(out)
     }
 
     pub(in crate::ui::app) fn begin_unpack(&mut self, pick: bool, sender: &ComponentSender<Self>) {
@@ -867,9 +837,27 @@ impl App {
         let entry_ok = entry.clone();
         let tx_ok = tx.clone();
         crate::ui::shell::on_click(&ok, move || tx_ok.emit(Msg::Submit(entry_ok.text().to_string())));
+        row.append(&ok);
+        if matches!(self.ask, Some(Ask::Copy(_) | Ask::Move(_))) {
+            let queue = gtk::Button::with_label("F2 Queue");
+            let entry_queue = entry.clone();
+            let tx_queue = tx.clone();
+            crate::ui::shell::on_click(&queue, move || tx_queue.emit(Msg::Enqueue(entry_queue.text().to_string())));
+            let keys = gtk::EventControllerKey::new();
+            keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let queue_key = queue.clone();
+            keys.connect_key_pressed(move |_, key, _, _| {
+                if key != gtk::gdk::Key::F2 {
+                    return gtk::glib::Propagation::Proceed;
+                }
+                queue_key.emit_clicked();
+                gtk::glib::Propagation::Stop
+            });
+            win.add_controller(keys);
+            row.append(&queue);
+        }
         let cancel = gtk::Button::with_label("Cancel");
         crate::ui::shell::on_click(&cancel, move || tx.emit(Msg::CancelAsk));
-        row.append(&ok);
         row.append(&cancel);
         column.append(&entry);
         column.append(&row);
@@ -901,43 +889,7 @@ impl App {
 
     pub(in crate::ui::app) fn ask_conflict(&mut self, src: &Path, dst: &Path, tx: relm4::Sender<Msg>) {
         self.close_dialog();
-        let win = gtk::Window::new();
-        win.set_title(Some("File exists"));
-        win.set_modal(true);
-        win.set_transient_for(Some(&self.shell.window));
-        let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        column.set_margin_all(12);
-        let label = gtk::Label::new(Some(&format!("{}\nalready exists as\n{}", src.display(), dst.display())));
-        label.set_wrap(true);
-        column.append(&label);
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        let answered = std::rc::Rc::new(std::cell::Cell::new(false));
-        for (caption, choice) in [
-            ("Overwrite", Choice::Overwrite),
-            ("All", Choice::OverwriteAll),
-            ("Skip", Choice::Skip),
-            ("Skip all", Choice::SkipAll),
-            ("Cancel", Choice::Cancel),
-        ] {
-            let button = gtk::Button::with_label(caption);
-            let tx = tx.clone();
-            let answered = answered.clone();
-            crate::ui::shell::on_click(&button, move || {
-                answered.set(true);
-                tx.emit(Msg::Conflict(choice));
-            });
-            row.append(&button);
-        }
-        // Closing the window must answer too, or the worker waits forever and every new job is Busy.
-        win.connect_close_request(move |_| {
-            if !answered.get() {
-                answered.set(true);
-                tx.emit(Msg::Conflict(Choice::Cancel));
-            }
-            gtk::glib::Propagation::Proceed
-        });
-        column.append(&row);
-        win.set_child(Some(&column));
+        let win = conflict_window(src, dst, &self.shell.window, move |choice| tx.emit(Msg::Conflict(choice)));
         win.present();
         self.dialog = Some(win);
     }
@@ -1052,6 +1004,98 @@ fn window_button(win: &gtk::Window) -> Option<gtk::Button> {
 
 pub(in crate::ui::app) fn first_line(text: &str) -> String {
     text.lines().next().unwrap_or(text).to_string()
+}
+
+pub(in crate::ui::app) fn new_job(work: Work) -> (Job, JobOut) {
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (progress_tx, progress_rx) = mpsc::channel();
+    let (conflict_tx, conflict_rx) = mpsc::channel();
+    let (answer_tx, answer_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let job = Job {
+        work,
+        cancel: Arc::clone(&cancel),
+        progress_rx,
+        conflict_rx,
+        answer_tx,
+        done_rx,
+        started: Instant::now(),
+        conflict_open: false,
+    };
+    (job, JobOut { cancel, progress_tx, conflict_tx, answer_rx, done_tx })
+}
+
+pub(in crate::ui::app) fn run_transfer(
+    items: Vec<(PathBuf, PathBuf)>,
+    kind: Kind,
+    pause: Arc<std::sync::atomic::AtomicBool>,
+    pipes: JobOut,
+) {
+    let JobOut { cancel, progress_tx, conflict_tx, answer_rx, done_tx } = pipes;
+    std::thread::spawn(move || {
+        let result = ops::transfer(
+            &items,
+            kind,
+            &cancel,
+            &pause,
+            &mut |p| {
+                let _ = progress_tx.send(p.clone());
+            },
+            &mut |src, dst| {
+                if conflict_tx.send((src.to_path_buf(), dst.to_path_buf())).is_err() {
+                    return Choice::Cancel;
+                }
+                answer_rx.recv().unwrap_or(Choice::Cancel)
+            },
+        );
+        let _ = done_tx.send(result.map_err(|e| e.to_string()));
+    });
+}
+
+pub(in crate::ui::app) fn conflict_window(
+    src: &Path,
+    dst: &Path,
+    parent: &gtk::Window,
+    answer: impl Fn(Choice) + Clone + 'static,
+) -> gtk::Window {
+    let win = gtk::Window::new();
+    win.set_title(Some("File exists"));
+    win.set_modal(true);
+    win.set_transient_for(Some(parent));
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    column.set_margin_all(12);
+    let label = gtk::Label::new(Some(&format!("{}\nalready exists as\n{}", src.display(), dst.display())));
+    label.set_wrap(true);
+    column.append(&label);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let answered = std::rc::Rc::new(std::cell::Cell::new(false));
+    for (caption, choice) in [
+        ("Overwrite", Choice::Overwrite),
+        ("All", Choice::OverwriteAll),
+        ("Skip", Choice::Skip),
+        ("Skip all", Choice::SkipAll),
+        ("Cancel", Choice::Cancel),
+    ] {
+        let button = gtk::Button::with_label(caption);
+        let answer = answer.clone();
+        let answered = answered.clone();
+        crate::ui::shell::on_click(&button, move || {
+            answered.set(true);
+            answer(choice);
+        });
+        row.append(&button);
+    }
+    // Closing the window must answer too, or the worker waits forever and every new job is Busy.
+    win.connect_close_request(move |_| {
+        if !answered.get() {
+            answered.set(true);
+            answer(Choice::Cancel);
+        }
+        gtk::glib::Propagation::Proceed
+    });
+    column.append(&row);
+    win.set_child(Some(&column));
+    win
 }
 
 pub(in crate::ui::app) fn items_into(sources: Vec<PathBuf>, dest_dir: &Path) -> Vec<(PathBuf, PathBuf)> {
