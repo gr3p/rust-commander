@@ -12,7 +12,10 @@ Bibliotek i `src/lib.rs`. Fönstret startar i `src/main.rs` via `ui::run`.
 | Tangenter, aktiv panel, synk | `src/ui/app.rs` (stor; dela inte upp den) |
 | F3, bild, Lister, Quick View | `src/ui/app/view.rs` |
 | Kopiera, flytta, packa, packa upp, sfv | `src/ui/app/jobs.rs` |
+| Överföringskö, F2 i F5/F6-dialogen | `src/ui/app/queue.rs` |
 | F12 | `src/ui/app/settings.rs` |
+| Kommandon, poäng, F1 | `src/commands.rs`, katalog i `src/ui/app/settings.rs`, körning i `src/ui/app/commands.rs` |
+| Egenskaper, rättigheter | `src/props.rs`, dialog i `src/ui/app/props.rs` |
 | Fönster, paneler, tangentfångst | `src/ui/shell.rs` |
 | Kolumner, ikon, markör | `src/ui/row.rs` |
 | Meddelanden | `src/ui/msg.rs` |

@@ -31,7 +31,7 @@ pub(super) struct SearchUi {
 }
 
 impl App {
-    pub(super) fn open_search(&mut self, sender: &ComponentSender<Self>) {
+    pub(in crate::ui::app) fn open_search(&mut self, sender: &ComponentSender<Self>) {
         if let Some(ui) = &self.search {
             ui.window.present();
             return;
@@ -145,9 +145,13 @@ impl App {
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let tx = sender.input_sender().clone();
-        keys.connect_key_pressed(move |_, key, _, _| {
+        keys.connect_key_pressed(move |_, key, _, mods| {
+            let plain = !mods.contains(gtk::gdk::ModifierType::CONTROL_MASK) && !mods.contains(gtk::gdk::ModifierType::ALT_MASK);
             if key == gtk::gdk::Key::Escape {
                 tx.emit(Msg::SearchEscape);
+                gtk::glib::Propagation::Stop
+            } else if plain && key == gtk::gdk::Key::F1 {
+                tx.emit(Msg::ShowCommands);
                 gtk::glib::Propagation::Stop
             } else {
                 gtk::glib::Propagation::Proceed

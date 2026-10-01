@@ -24,7 +24,9 @@ static SIZING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 use super::row::{self, EntryObject};
 use super::shell::{self, Shell};
 
+mod commands;
 mod jobs;
+mod props;
 mod queue;
 mod search;
 mod settings;
@@ -184,6 +186,7 @@ pub struct App {
     search_gen: u64,
     search_target: Option<(PaneId, usize, u64, String)>,
     settings: Option<SettingsUi>,
+    command_list: Option<gtk::Window>,
     smoke: bool,
 }
 
@@ -329,6 +332,7 @@ impl SimpleComponent for App {
             search_gen: 0,
             search_target: None,
             settings: None,
+            command_list: None,
             smoke,
         };
         model.apply_css(&theme::load_named(&theme::active_name(
@@ -482,6 +486,14 @@ impl App {
             Msg::DiscardQuick => self.discard_quick(sender),
             Msg::CopyPreviewPath => self.copy_preview_path(),
             Msg::CopyPreviewImage => self.copy_preview_image(sender),
+            Msg::Run(act) => self.run_act(act, sender),
+            Msg::ShowCommands => self.toggle_commands(sender),
+            Msg::CommandsClosed => self.command_list = None,
+            Msg::PropsSaved => {
+                self.close_dialog();
+                self.refresh_active(sender);
+            }
+            Msg::RefreshActive => self.refresh_active(sender),
             Msg::PreviewImageCopied { generation, image } => self.finish_image_copy(generation, image),
             Msg::ShellExited(id) => self.on_shell_exited(id),
             Msg::SelectShell(id) => self.select_shell(id),
@@ -503,9 +515,6 @@ impl App {
                 self.close_dialog();
                 self.confirm_pack(PathBuf::from(dest), opts, sender);
             }
-            Msg::UnpackList => self.begin_unpack(true, sender),
-            Msg::UnpackHere => self.begin_unpack(false, sender),
-            Msg::VerifySfv => self.start_verify(sender),
             Msg::SetSevenZip(path) => self.set_tool(true, path),
             Msg::SetRar(path) => self.set_tool(false, path),
             Msg::SetEditor(id) => self.set_editor(id),
@@ -543,6 +552,14 @@ impl App {
     fn on_key(&mut self, key: Key, mods: ModifierType, sender: &ComponentSender<Self>) {
         if key == Key::F12 && !mods.contains(ModifierType::CONTROL_MASK) && !mods.contains(ModifierType::ALT_MASK) {
             self.toggle_settings(sender);
+            return;
+        }
+        if key == Key::F1
+            && !mods.contains(ModifierType::CONTROL_MASK)
+            && !mods.contains(ModifierType::ALT_MASK)
+            && !mods.contains(ModifierType::SHIFT_MASK)
+        {
+            self.toggle_commands(sender);
             return;
         }
         let ctrl = mods.contains(ModifierType::CONTROL_MASK);
@@ -592,6 +609,11 @@ impl App {
                 return;
             }
             match key {
+                Key::a | Key::A if !shift => {
+                    self.state.toggle_visible_marks();
+                    self.touch(self.state.active);
+                }
+                Key::c | Key::C if shift => self.copy_selected_paths(),
                 Key::c | Key::C if self.preview_image_focused() => self.copy_preview_image(sender),
                 Key::F3 => self.set_sort(rust_commander::listing::SortKey::Name),
                 Key::F4 => self.set_sort(rust_commander::listing::SortKey::Ext),
@@ -657,6 +679,8 @@ impl App {
                 return;
             }
             match key {
+                Key::c | Key::C if shift => self.copy_panel_dir(),
+                Key::Return | Key::KP_Enter => self.show_properties(sender),
                 Key::F1 => self.show_places(PaneId::Left, sender),
                 Key::F2 => self.show_places(PaneId::Right, sender),
                 Key::F3 => self.open_external(true),
@@ -721,13 +745,7 @@ impl App {
             Key::Escape if self.shell.editing.get() => {
                 self.leave_quick_edit(sender);
             }
-            Key::Escape => {
-                self.state.quick_view = false;
-                self.state.pane_mut(self.state.active).filter.clear();
-                self.shell.panes[self.state.active.index()].filter.set_text("");
-                self.shell.panes[self.state.active.index()].filter.set_visible(false);
-                self.touch(self.state.active);
-            }
+            Key::Escape => self.dismiss(),
             _ => {}
         }
     }
@@ -1427,7 +1445,9 @@ impl App {
         self.state.tab_mut(PaneId::Left).marked.insert(left.join("note.txt"));
         self.state.tab_mut(PaneId::Left).marked.insert(left.join("sub"));
         self.sync();
-        if !self.shell.pack.is_visible() || !self.shell.pack_here.is_visible() {
+        if !super::shell::shows(&self.shell.hints, rust_commander::commands::Act::Pack)
+            || !super::shell::shows(&self.shell.hints, rust_commander::commands::Act::PackHere)
+        {
             errors.push("pack hint".into());
         }
         if Path::new(&self.pack_suggestion(false)).parent() != Some(right.as_path())
@@ -1460,7 +1480,9 @@ impl App {
         self.reload_pane(PaneId::Right);
         self.state.tab_mut(PaneId::Left).marked.clear();
         self.sync();
-        if self.shell.pack.is_visible() || self.shell.pack_here.is_visible() {
+        if super::shell::shows(&self.shell.hints, rust_commander::commands::Act::Pack)
+            || super::shell::shows(&self.shell.hints, rust_commander::commands::Act::PackHere)
+        {
             errors.push("pack hint stays".into());
         }
         if !self.point_at(PaneId::Left, "move-me.txt") {
@@ -1692,6 +1714,16 @@ impl App {
         let tab = self.state.pane(id).active;
         self.spawn_load(sender, id, tab, path, token);
         self.focus_list();
+    }
+
+    fn dismiss(&mut self) {
+        self.close_image();
+        self.close_lister();
+        self.state.quick_view = false;
+        self.state.pane_mut(self.state.active).filter.clear();
+        self.shell.panes[self.state.active.index()].filter.set_text("");
+        self.shell.panes[self.state.active.index()].filter.set_visible(false);
+        self.touch(self.state.active);
     }
 
     fn cancel_path_edit(&mut self) {

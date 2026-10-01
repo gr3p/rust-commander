@@ -7,6 +7,7 @@ pub fn app_title() -> &'static str {
 }
 
 pub mod archive;
+pub mod commands;
 pub mod config;
 pub mod log;
 pub mod entry;
@@ -19,6 +20,7 @@ pub mod lister;
 pub mod ops;
 pub mod pack;
 pub mod places;
+pub mod props;
 pub mod sandbox;
 pub mod search;
 pub mod sfv;

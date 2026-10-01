@@ -796,24 +796,24 @@ impl App {
     }
 
     pub(in crate::ui::app) fn sync_hints(&self) {
-        let entry = self.state.cursor_entry(self.state.active);
-        let archive = entry.is_some_and(|entry| !entry.is_dir() && rust_commander::archive::is_archive(Path::new(entry.name.as_ref())));
-        let sfv = self.state.tab(self.state.active).entries.iter().any(|entry| {
-            !entry.is_dir() && rust_commander::sfv::is_sfv(Path::new(entry.name.as_ref()))
-        });
-        if archive {
-            let side = if self.state.active == PaneId::Left { "right" } else { "left" };
-            let label = format!("Alt+F9 Unpack to {side} panel");
-            if self.shell.unpack_list.label().as_deref() != Some(label.as_str()) {
-                self.shell.unpack_list.set_label(&label);
+        let cue = self.cue();
+        let side = if self.state.active == PaneId::Left { "right" } else { "left" };
+        let ranked = rust_commander::commands::rank(&cue);
+        for (slot, hint) in self.shell.hints.iter().enumerate() {
+            if let Some(act) = ranked.get(slot).copied() {
+                let label = rust_commander::commands::hint_label(act, side);
+                if hint.button.label().as_deref() != Some(label.as_str()) {
+                    hint.button.set_label(&label);
+                }
+                if hint.act.get() != Some(act) {
+                    hint.act.set(Some(act));
+                }
+                hint.button.set_visible(true);
+            } else {
+                hint.act.set(None);
+                hint.button.set_visible(false);
             }
         }
-        self.shell.unpack_list.set_visible(archive);
-        self.shell.unpack_here.set_visible(archive);
-        self.shell.verify_sfv.set_visible(sfv);
-        let marked = !self.state.tab(self.state.active).marked.is_empty();
-        self.shell.pack.set_visible(marked);
-        self.shell.pack_here.set_visible(marked);
     }
 
     pub(in crate::ui::app) fn ask_text(&mut self, title: &str, initial: &str, tx: relm4::Sender<Msg>) {

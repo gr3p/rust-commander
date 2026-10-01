@@ -122,6 +122,11 @@ pub fn popup(
     let busy_keys = busy.clone();
     keys.connect_key_pressed(move |_, key, _, mods| {
         let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+        let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
+        if !ctrl && !alt && key == gtk::gdk::Key::F1 {
+            tx.emit(Msg::ShowCommands);
+            return gtk::glib::Propagation::Stop;
+        }
         if ctrl && matches!(key, gtk::gdk::Key::d | gtk::gdk::Key::D) {
             tx.emit(Msg::Hotlist);
             return gtk::glib::Propagation::Stop;

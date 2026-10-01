@@ -479,6 +479,19 @@ label.cmd-head {{
   font-weight: 700;
   padding-top: 14px;
 }}
+button.command {{
+  background: transparent;
+  box-shadow: none;
+  border: none;
+  padding: 1px 4px;
+  min-height: 0;
+}}
+button.command:hover {{
+  background: {sel};
+}}
+button.command:disabled {{
+  opacity: 0.38;
+}}
 dropdown.editor-pick > button {{
   background: {sel};
   color: {fg};

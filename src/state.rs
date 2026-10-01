@@ -215,6 +215,38 @@ impl AppState {
         self.toggle_at_cursor(true);
     }
 
+    // First press marks every visible row except `..`. When those are already
+    // marked, the next press clears the whole set, including filtered rows.
+    pub fn toggle_visible_marks(&mut self) -> bool {
+        let id = self.active;
+        let vis = self.visible(id);
+        let dir = self.tab(id).path.clone();
+        let paths: Vec<PathBuf> = vis
+            .iter()
+            .filter_map(|&i| {
+                let entry = &self.tab(id).entries[i];
+                if entry.name.as_ref() == ".." {
+                    return None;
+                }
+                Some(listing::entry_path(&dir, entry))
+            })
+            .collect();
+        if paths.is_empty() {
+            return false;
+        }
+        let all = paths.iter().all(|path| self.tab(id).marked.contains(path));
+        let tab = self.tab_mut(id);
+        if all {
+            tab.marked.clear();
+            false
+        } else {
+            for path in paths {
+                tab.marked.insert(path);
+            }
+            true
+        }
+    }
+
     pub fn toggle_mark_stay(&mut self) {
         self.toggle_at_cursor(false);
     }
@@ -403,5 +435,56 @@ impl AppState {
                 (src, dest_dir.join(name))
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entry::Entry;
+
+    fn file(name: &str) -> Entry {
+        Entry {
+            name: name.into(),
+            raw: None,
+            size: 1,
+            mtime: 0,
+            mode: 0o644,
+            flags: 0,
+        }
+    }
+
+    #[test]
+    fn ctrl_a_marks_visible_then_clears_all() {
+        let mut state = AppState::new("/left".into(), "/right".into());
+        state.tab_mut(PaneId::Left).entries = vec![Entry::dotdot(), file("a.txt"), file("b.txt")];
+        assert!(state.toggle_visible_marks());
+        let marked = &state.tab(PaneId::Left).marked;
+        assert!(marked.contains(&PathBuf::from("/left/a.txt")));
+        assert!(marked.contains(&PathBuf::from("/left/b.txt")));
+        assert!(!marked.iter().any(|path| path.ends_with("..")));
+        assert!(!state.toggle_visible_marks());
+        assert!(state.tab(PaneId::Left).marked.is_empty());
+    }
+
+    #[test]
+    fn ctrl_a_respects_the_filter() {
+        let mut state = AppState::new("/left".into(), "/right".into());
+        state.tab_mut(PaneId::Left).entries = vec![Entry::dotdot(), file("a.txt"), file("b.txt")];
+        state.pane_mut(PaneId::Left).filter = "a".into();
+        assert!(state.toggle_visible_marks());
+        let marked = &state.tab(PaneId::Left).marked;
+        assert!(marked.contains(&PathBuf::from("/left/a.txt")));
+        assert!(!marked.contains(&PathBuf::from("/left/b.txt")));
+    }
+
+    #[test]
+    fn ctrl_a_clears_marks_hidden_by_the_filter() {
+        let mut state = AppState::new("/left".into(), "/right".into());
+        state.tab_mut(PaneId::Left).entries = vec![Entry::dotdot(), file("a.txt"), file("b.txt")];
+        state.toggle_visible_marks();
+        state.pane_mut(PaneId::Left).filter = "a".into();
+        assert!(!state.toggle_visible_marks());
+        assert!(state.tab(PaneId::Left).marked.is_empty());
     }
 }

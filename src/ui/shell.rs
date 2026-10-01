@@ -11,6 +11,7 @@ use relm4::RelmWidgetExt;
 use vte4::prelude::{TerminalExt, TerminalExtManual};
 use vte4::Terminal;
 
+use rust_commander::commands::Act;
 use rust_commander::icons;
 use rust_commander::listing::SortKey;
 
@@ -46,11 +47,7 @@ pub struct Shell {
     pub mode_bar: gtk::Stack,
     pub image_scale: gtk::Button,
     pub text_modes: CharsetBar,
-    pub unpack_list: gtk::Button,
-    pub unpack_here: gtk::Button,
-    pub verify_sfv: gtk::Button,
-    pub pack: gtk::Button,
-    pub pack_here: gtk::Button,
+    pub hints: [Hint; 6],
     pub active: Rc<Cell<usize>>,
     pub drives: Vec<(PathBuf, gtk::Button)>,
     pub edit_button: gtk::Button,
@@ -63,6 +60,11 @@ pub struct Shell {
     pub shells: Vec<PanelShell>,
     pub shell_current: Option<u64>,
     pub shell_seq: u64,
+}
+
+pub struct Hint {
+    pub button: gtk::Button,
+    pub act: Rc<Cell<Option<Act>>>,
 }
 
 pub struct PanelShell {
@@ -144,30 +146,20 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
         }
         fkey_row.append(&button);
     }
-    let unpack_list = hint_button("Alt+F9 Unpack to right panel", || super::msg::Msg::UnpackList, sender);
-    let unpack_here = hint_button("Shift+Alt+F9 Extract here", || super::msg::Msg::UnpackHere, sender);
-    let verify_sfv = hint_button("Ctrl+Shift+F9 Verify", || super::msg::Msg::VerifySfv, sender);
-    let pack = hint_button("Alt+F5 Pack", || super::msg::Msg::Key(gtk::gdk::Key::F5, gtk::gdk::ModifierType::ALT_MASK), sender);
-    let pack_here = hint_button(
-        "Ctrl+Shift+F5 Pack here",
-        || super::msg::Msg::Key(gtk::gdk::Key::F5, gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::SHIFT_MASK),
-        sender,
-    );
-    context_row.append(&pack);
-    context_row.append(&pack_here);
-    context_row.append(&unpack_list);
-    context_row.append(&unpack_here);
-    context_row.append(&verify_sfv);
-    let filter_button = bar_button("Ctrl+S Filter", || super::msg::Msg::Key(gtk::gdk::Key::s, gtk::gdk::ModifierType::CONTROL_MASK), sender);
-    let search_button = bar_button(
-        "Ctrl+Shift+S Search",
-        || super::msg::Msg::Key(gtk::gdk::Key::S, gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::SHIFT_MASK),
-        sender,
-    );
-    filter_button.set_visible(true);
-    search_button.set_visible(true);
-    context_row.append(&filter_button);
-    context_row.append(&search_button);
+    let hints = std::array::from_fn(|_| hint_slot(sender));
+    for hint in &hints {
+        context_row.append(&hint.button);
+    }
+    let all = gtk::Button::with_label("F1 All");
+    all.add_css_class("fkey");
+    all.set_hexpand(true);
+    all.set_focus_on_click(false);
+    if let Some(label) = all.child().and_then(|child| child.downcast::<gtk::Label>().ok()) {
+        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    }
+    let tx = sender.clone();
+    on_click(&all, move || tx.emit(super::msg::Msg::Key(gtk::gdk::Key::F1, gtk::gdk::ModifierType::empty())));
+    context_row.append(&all);
     let image_bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     image_bar.add_css_class("fbar");
     image_bar.set_margin_all(4);
@@ -249,11 +241,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
         mode_bar,
         image_scale,
         text_modes,
-        unpack_list,
-        unpack_here,
-        verify_sfv,
-        pack,
-        pack_here,
+        hints,
         active,
         drives,
         edit_button,
@@ -300,6 +288,30 @@ fn bar_button(
     let button = hint_button(label, make, sender);
     button.set_focus_on_click(false);
     button
+}
+
+fn hint_slot(sender: &relm4::Sender<super::msg::Msg>) -> Hint {
+    let act = Rc::new(Cell::new(None));
+    let button = gtk::Button::with_label("");
+    button.add_css_class("fkey");
+    button.set_hexpand(true);
+    button.set_visible(false);
+    button.set_focus_on_click(false);
+    if let Some(label) = button.child().and_then(|child| child.downcast::<gtk::Label>().ok()) {
+        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    }
+    let tx = sender.clone();
+    let slot = Rc::clone(&act);
+    on_click(&button, move || {
+        if let Some(act) = slot.get() {
+            tx.emit(super::msg::Msg::Run(act));
+        }
+    });
+    Hint { button, act }
+}
+
+pub fn shows(hints: &[Hint], act: Act) -> bool {
+    hints.iter().any(|hint| hint.button.is_visible() && hint.act.get() == Some(act))
 }
 
 fn hint_button(
@@ -571,8 +583,9 @@ fn edit_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
     use gtk::gdk::Key;
     let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
     let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
-    // Escape and Ctrl+V leave. Ctrl+D discards. Ctrl+S saves. Ctrl+E stays out of the text.
-    key == Key::Escape
+    // Escape and Ctrl+V leave. Ctrl+D discards. Ctrl+S saves. Ctrl+E stays out of the text. F1 opens commands.
+    (!ctrl && !alt && key == Key::F1)
+        || key == Key::Escape
         || (ctrl && !alt && matches!(key, Key::s | Key::S | Key::v | Key::V | Key::e | Key::E | Key::d | Key::D))
 }
 
@@ -580,8 +593,8 @@ fn terminal_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
     use gtk::gdk::Key;
     let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
     let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
-    // Escape stays in the shell (vim, fzf). F9 toggles back to the file list.
-    (!ctrl && !alt && matches!(key, Key::F9))
+    // Escape stays in the shell (vim, fzf). F9 toggles back to the file list. F1 opens commands.
+    (!ctrl && !alt && matches!(key, Key::F1 | Key::F9))
         || (ctrl && !alt && matches!(key, Key::q | Key::Q | Key::w | Key::W | Key::F9))
         || (alt && !ctrl && is_digit_key(key))
 }

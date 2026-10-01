@@ -281,7 +281,7 @@ impl App {
         column.append(&tool_row("7-Zip", rust_commander::pack::SEVEN_ZIP_HINT, &self.cfg.seven_zip, "/usr/bin/7z", tx.clone(), true));
         column.append(&tool_row("RAR", rust_commander::pack::RAR_HINT, &self.cfg.rar, "/usr/bin/rar", tx.clone(), false));
         column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-        column.append(&commands_row(&win));
+        column.append(&commands_row(tx.clone()));
         scroll.set_child(Some(&column));
         win.set_child(Some(&scroll));
         let keys = gtk::EventControllerKey::new();
@@ -290,6 +290,7 @@ impl App {
         keys.connect_key_pressed(move |_, key, _, _| {
             let on_control = focused_control(&keys_win);
             match key {
+                Key::F1 => tx.emit(Msg::ShowCommands),
                 Key::Escape | Key::F12 => tx.emit(Msg::CloseSettings),
                 Key::Return | Key::KP_Enter | Key::space | Key::KP_Space if !on_control => tx.emit(Msg::ToggleAutoColumns),
                 Key::h | Key::H if !on_control => tx.emit(Msg::ToggleHidden),
@@ -729,7 +730,7 @@ pub(in crate::ui::app) fn focused_control(win: &gtk::Window) -> bool {
     }
 }
 
-pub(in crate::ui::app) fn commands_row(parent: &gtk::Window) -> gtk::Box {
+pub(in crate::ui::app) fn commands_row(tx: relm4::Sender<Msg>) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     row.add_css_class("settings-row");
     let name = gtk::Label::new(Some("Keyboard"));
@@ -737,137 +738,113 @@ pub(in crate::ui::app) fn commands_row(parent: &gtk::Window) -> gtk::Box {
     name.set_hexpand(true);
     let open = gtk::Button::with_label("Commands");
     open.add_css_class("fkey");
-    let parent = parent.clone();
-    crate::ui::shell::on_click(&open, move || show_commands(&parent));
+    crate::ui::shell::on_click(&open, move || tx.emit(Msg::ShowCommands));
     row.append(&name);
     row.append(&open);
     row
 }
 
-pub(in crate::ui::app) fn show_commands(parent: &gtk::Window) {
+pub(in crate::ui::app) fn show_commands(parent: &gtk::Window, cue: rust_commander::commands::Cue, tx: relm4::Sender<Msg>) -> gtk::Window {
     let win = gtk::Window::new();
-    win.set_title(Some("Keyboard"));
+    win.set_title(Some("Commands"));
     win.set_modal(true);
     win.set_transient_for(Some(parent));
-    win.set_default_width(680);
-    win.set_default_height(560);
-    let columns = gtk::Box::new(gtk::Orientation::Horizontal, 36);
-    columns.set_halign(gtk::Align::Start);
-    columns.set_valign(gtk::Align::Start);
-    columns.set_margin_start(16);
-    columns.set_margin_end(16);
-    columns.set_margin_bottom(16);
-    columns.append(&command_groups(&[
-        ("Sort", &[
-            ("Ctrl+F3", "Name"),
-            ("Ctrl+F4", "Extension"),
-            ("Ctrl+F5", "Date"),
-            ("Ctrl+F6", "Size"),
-            ("Ctrl+F7", "Attributes"),
-        ]),
-        ("Navigate", &[
-            ("Tab", "Other pane"),
-            ("Ctrl+Tab", "Next tab"),
-            ("Ctrl+T", "New tab"),
-            ("Ctrl+W", "Close tab"),
-            ("BackSpace", "Up"),
-            ("Alt+Left", "Back"),
-            ("Alt+Right", "Forward"),
-            ("Ctrl+Left/Right", "Mirror folder"),
-            ("Alt+F1", "Left places"),
-            ("Alt+F2", "Right places"),
-            ("Ctrl+D", "Hotlist"),
-            ("Enter", "Open"),
-            ("Insert", "Mark"),
-            ("Space", "Mark"),
-        ]),
-        ("Lister", &[
-            ("1", "Text"),
-            ("2", "Binary"),
-            ("3", "Hex"),
-            ("A", "Ansi"),
-            ("S / D", "Ascii"),
-        ]),
-    ]));
-    columns.append(&command_groups(&[
-        ("Files", &[
-            ("F2", "Refresh"),
-            ("F3", "View"),
-            ("F4", "Edit"),
-            ("Shift+F4", "New file"),
-            ("F5", "Copy"),
-            ("F6", "Move"),
-            ("F2 in F5/F6", "Add to queue"),
-            ("F7", "New folder"),
-            ("F8 / Delete", "Trash"),
-            ("Shift+F5", "Copy as"),
-            ("Shift+F6", "Rename"),
-            ("Shift+F8", "Delete"),
-            ("F12", "Settings"),
-        ]),
-        ("Archive", &[
-            ("Alt+F5", "Pack"),
-            ("Ctrl+Shift+F5", "Pack here"),
-            ("Alt+F9", "Unpack to other panel"),
-            ("Shift+Alt+F9", "Extract here"),
-            ("Shift+F9", "Create SFV"),
-            ("Ctrl+Shift+F9", "Verify SFV"),
-            ("Enter", "Verify SFV"),
-        ]),
-        ("View", &[
-            ("Ctrl+S", "Filter"),
-            ("Ctrl+H", "Hidden"),
-            ("Ctrl+Q", "Quick view"),
-            ("F9", "Terminal in other panel"),
-            ("Ctrl+F9", "New shell"),
-            ("Ctrl+W", "Close shell"),
-            ("Alt+1…9", "Switch shell"),
-            ("Alt+F3", "Viewer"),
-            ("Escape", "Close view"),
-            ("S", "Fit or 1:1"),
-            ("Left/Right", "Previous or next"),
-        ]),
-    ]));
+    win.set_default_width(560);
+    win.set_default_height(640);
+    let search = gtk::Entry::new();
+    search.set_placeholder_text(Some("Search commands"));
+    let list = gtk::Box::new(gtk::Orientation::Vertical, 2);
     let scroll = gtk::ScrolledWindow::new();
-    scroll.set_child(Some(&columns));
-    win.set_child(Some(&scroll));
+    scroll.set_child(Some(&list));
+    scroll.set_vexpand(true);
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    column.set_margin_all(12);
+    column.append(&search);
+    column.append(&scroll);
+    win.set_child(Some(&column));
+    let list_fill = list.clone();
+    let win_fill = win.clone();
+    let fill = Rc::new(move |query: String| {
+        while let Some(child) = list_fill.first_child() {
+            list_fill.remove(&child);
+        }
+        let needle = query.trim().to_lowercase();
+        for group in rust_commander::commands::Group::ALL {
+            let rows: Vec<_> = rust_commander::commands::catalog()
+                .iter()
+                .filter(|item| item.group == group && command_matches(&needle, item))
+                .collect();
+            if rows.is_empty() {
+                continue;
+            }
+            let head = gtk::Label::new(Some(group.name()));
+            head.set_xalign(0.0);
+            head.add_css_class("cmd-head");
+            list_fill.append(&head);
+            for item in rows {
+                list_fill.append(&command_button(item, cue, tx.clone(), win_fill.clone()));
+            }
+        }
+    });
+    fill(String::new());
+    let fill_changed = Rc::clone(&fill);
+    search.connect_changed(move |entry| fill_changed(entry.text().to_string()));
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     let close = win.clone();
-    keys.connect_key_pressed(move |_, key, _, _| {
-        if matches!(key, Key::Escape | Key::F12) {
+    keys.connect_key_pressed(move |_, key, _, mods| {
+        let plain = !mods.contains(gtk::gdk::ModifierType::CONTROL_MASK)
+            && !mods.contains(gtk::gdk::ModifierType::ALT_MASK)
+            && !mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+        if plain && matches!(key, Key::Escape | Key::F1) {
             close.close();
+            return gtk::glib::Propagation::Stop;
         }
-        gtk::glib::Propagation::Stop
+        gtk::glib::Propagation::Proceed
     });
     win.add_controller(keys);
     win.present();
+    search.grab_focus();
+    win
 }
 
-pub(in crate::ui::app) fn command_groups(groups: &[(&str, &[(&str, &str)])]) -> gtk::Grid {
-    let grid = gtk::Grid::new();
-    grid.set_column_spacing(18);
-    grid.set_row_spacing(3);
-    let mut y = 0;
-    for (title, rows) in groups {
-        let head = gtk::Label::new(Some(title));
-        head.set_xalign(0.0);
-        head.add_css_class("cmd-head");
-        grid.attach(&head, 0, y, 2, 1);
-        y += 1;
-        for (key, action) in *rows {
-            let key_label = gtk::Label::new(Some(key));
-            key_label.set_xalign(0.0);
-            key_label.add_css_class("cmd-key");
-            let action_label = gtk::Label::new(Some(action));
-            action_label.set_xalign(0.0);
-            action_label.set_hexpand(true);
-            grid.attach(&key_label, 0, y, 1, 1);
-            grid.attach(&action_label, 1, y, 1, 1);
-            y += 1;
-        }
+fn command_matches(needle: &str, item: &rust_commander::commands::Item) -> bool {
+    needle.is_empty()
+        || item.label.to_lowercase().contains(needle)
+        || item.keys.to_lowercase().contains(needle)
+        || item.group.name().to_lowercase().contains(needle)
+}
+
+fn command_button(
+    item: &rust_commander::commands::Item,
+    cue: rust_commander::commands::Cue,
+    tx: relm4::Sender<Msg>,
+    win: gtk::Window,
+) -> gtk::Button {
+    let button = gtk::Button::new();
+    button.add_css_class("command");
+    button.set_hexpand(true);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+    let key = gtk::Label::new(Some(item.keys));
+    key.add_css_class("cmd-key");
+    key.set_xalign(0.0);
+    key.set_width_chars(16);
+    let label = gtk::Label::new(Some(item.label));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    row.append(&key);
+    row.append(&label);
+    button.set_child(Some(&row));
+    let act = item.act;
+    let on = rust_commander::commands::applies(act, &cue);
+    button.set_sensitive(on);
+    if on {
+        crate::ui::shell::on_click(&button, move || {
+            win.close();
+            tx.emit(Msg::Run(act));
+        });
     }
-    grid
+    button
 }
 
 pub(in crate::ui::app) fn tool_row(title: &str, hint: &str, value: &str, placeholder: &str, tx: relm4::Sender<Msg>, seven: bool) -> gtk::Box {
