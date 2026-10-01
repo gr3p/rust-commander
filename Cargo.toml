@@ -14,6 +14,7 @@ harness = false
 
 [dependencies]
 crc32fast = "1.5.2"
+flate2 = "1.1.10"
 gtk4 = { version = "0.11.5", features = ["v4_10"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff", "ico"] }
 landlock = "0.4.7"

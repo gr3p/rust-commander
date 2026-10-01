@@ -116,6 +116,8 @@ impl App {
         if self.shell.shell_current == Some(id) {
             self.shell.shell_current = None;
             self.state.panel_terminal = false;
+            // Shell lived on the other pane; land there after quit.
+            self.state.active = self.state.active.other();
             self.focus_list();
         }
     }
@@ -156,7 +158,7 @@ impl App {
             if shell.number.text().as_str() != n {
                 shell.number.set_text(&n);
             }
-            let tip = format!("Alt+{n}");
+            let tip = rust_commander::commands::format_keys(&format!("Alt+{n}"));
             if shell.button.tooltip_text().as_deref() != Some(tip.as_str()) {
                 shell.button.set_tooltip_text(Some(&tip));
             }

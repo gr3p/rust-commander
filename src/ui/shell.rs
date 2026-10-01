@@ -173,9 +173,9 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
     image_bar.append(&image_prev);
     image_bar.append(&image_next);
     let text_modes = charset_bar(sender);
-    let edit_button = bar_button("Ctrl+E Edit", || super::msg::Msg::ToggleQuickEdit, sender);
-    let save_button = bar_button("Ctrl+S Save", || super::msg::Msg::SaveQuick, sender);
-    let discard_button = bar_button("Ctrl+D Discard", || super::msg::Msg::DiscardQuick, sender);
+    let edit_button = bar_button(&rust_commander::commands::caption("Ctrl+E", "Edit"), || super::msg::Msg::ToggleQuickEdit, sender);
+    let save_button = bar_button(&rust_commander::commands::caption("Ctrl+S", "Save"), || super::msg::Msg::SaveQuick, sender);
+    let discard_button = bar_button(&rust_commander::commands::caption("Ctrl+D", "Discard"), || super::msg::Msg::DiscardQuick, sender);
     text_modes.bar.append(&edit_button);
     text_modes.bar.append(&save_button);
     text_modes.bar.append(&discard_button);
@@ -355,7 +355,7 @@ fn drive_bar(
         row.append(&caption);
         button.set_child(Some(&row));
         let shortcut = if index < 9 {
-            format!("Ctrl+{}", index + 1)
+            rust_commander::commands::format_keys(&format!("Ctrl+{}", index + 1))
         } else {
             String::new()
         };
@@ -583,10 +583,11 @@ fn edit_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
     use gtk::gdk::Key;
     let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
     let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
-    // Escape and Ctrl+V leave. Ctrl+D discards. Ctrl+S saves. Ctrl+E stays out of the text. F1 opens commands.
+    // Escape and Ctrl+V leave edit. Ctrl+Q leaves quick view once the text is saved.
+    // Ctrl+D discards. Ctrl+S saves. Ctrl+Y toggles syntax. Ctrl+L edits the path. Ctrl+E stays out of the text. F1 opens commands.
     (!ctrl && !alt && key == Key::F1)
         || key == Key::Escape
-        || (ctrl && !alt && matches!(key, Key::s | Key::S | Key::v | Key::V | Key::e | Key::E | Key::d | Key::D))
+        || (ctrl && !alt && matches!(key, Key::s | Key::S | Key::v | Key::V | Key::e | Key::E | Key::d | Key::D | Key::q | Key::Q | Key::y | Key::Y | Key::l | Key::L))
 }
 
 fn terminal_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
@@ -682,6 +683,17 @@ fn image_menu(sender: &relm4::Sender<super::msg::Msg>) -> gtk::Popover {
     menu
 }
 
+fn hide_path_copy(path: &gtk::Entry, copy: &gtk::Button) {
+    let path = path.clone();
+    let copy = copy.clone();
+    // Focus moves to the button before this runs, so a click or Tab does not hide it first.
+    gtk::glib::idle_add_local_once(move || {
+        if !path.has_focus() && !copy.has_focus() {
+            copy.set_visible(false);
+        }
+    });
+}
+
 fn under(widget: &gtk::Widget, ancestor: &gtk::Widget) -> bool {
     let mut current = Some(widget.clone());
     while let Some(widget) = current {
@@ -706,11 +718,18 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     path.connect_activate(move |entry| {
         tx.emit(super::msg::Msg::PathGo(index, entry.text().to_string()));
     });
+    let copy = gtk::Button::with_label("Copy path");
+    copy.add_css_class("fkey");
+    copy.set_can_focus(false);
+    copy.set_focus_on_click(false);
+    copy.set_visible(false);
+    let copy_show = copy.clone();
     let path_focus = path.clone();
     let tx = sender.clone();
     let path_active = active_pane.clone();
     let focus = gtk::EventControllerFocus::new();
     focus.connect_enter(move |_| {
+        copy_show.set_visible(true);
         path_active.set(index);
         tx.emit(super::msg::Msg::FocusPane(index));
         // The click moves the cursor after focus; select the whole path once that is done.
@@ -721,7 +740,15 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
             }
         });
     });
+    let path_for_hide = path.clone();
+    let copy_for_hide = copy.clone();
+    focus.connect_leave(move |_| hide_path_copy(&path_for_hide, &copy_for_hide));
     path.add_controller(focus);
+    let tx = sender.clone();
+    on_click(&copy, move || tx.emit(super::msg::Msg::CopyShownPath(index)));
+    let path_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    path_row.append(&path);
+    path_row.append(&copy);
     let filter = gtk::Entry::new();
     filter.set_placeholder_text(Some("Filter"));
     filter.set_visible(false);
@@ -850,7 +877,7 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     stack.add_named(&terminal_slot, Some("terminal"));
     stack.set_vexpand(true);
     column.append(&tabs);
-    column.append(&path);
+    column.append(&path_row);
     column.append(&filter);
     column.append(&stack);
     frame.set_child(Some(&column));
@@ -914,6 +941,10 @@ mod tests {
         assert!(edit_command(Key::Escape, ModifierType::empty()));
         assert!(edit_command(Key::d, ModifierType::CONTROL_MASK));
         assert!(edit_command(Key::s, ModifierType::CONTROL_MASK));
+        assert!(edit_command(Key::q, ModifierType::CONTROL_MASK));
+        assert!(edit_command(Key::y, ModifierType::CONTROL_MASK));
+        assert!(edit_command(Key::l, ModifierType::CONTROL_MASK));
         assert!(!edit_command(Key::d, ModifierType::empty()));
+        assert!(!edit_command(Key::q, ModifierType::empty()));
     }
 }

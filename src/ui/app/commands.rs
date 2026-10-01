@@ -71,6 +71,14 @@ impl App {
         self.write_clipboard(&text, "Path copied");
     }
 
+    pub(in crate::ui::app) fn copy_shown_path(&mut self, pane: usize) {
+        let text = self.shell.panes[pane].path.text().to_string();
+        if text.is_empty() {
+            return;
+        }
+        self.write_clipboard(&text, "Path copied");
+    }
+
     fn write_clipboard(&mut self, text: &str, status: &str) {
         let Some(display) = gtk::gdk::Display::default() else { return };
         display.clipboard().set_text(text);
@@ -138,6 +146,7 @@ impl App {
             Act::PlacesLeft => self.show_places(PaneId::Left, sender),
             Act::PlacesRight => self.show_places(PaneId::Right, sender),
             Act::Hotlist => self.toggle_hotlist(sender),
+            Act::Path => self.focus_path(),
             Act::Open => self.activate_cursor(sender),
             Act::Mark => {
                 let index = self.state.tab(self.state.active).cursor;
@@ -165,6 +174,7 @@ impl App {
             }
             Act::Search => self.open_search(sender),
             Act::Hidden => self.toggle_hidden(),
+            Act::Syntax => self.toggle_syntax(),
             Act::QuickView => {
                 if self.shell.editing.get() && !self.leave_quick_edit(sender) {
                     return;

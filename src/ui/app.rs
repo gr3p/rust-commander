@@ -132,6 +132,7 @@ struct SettingsUi {
     hints: gtk::Label,
     icons: gtk::Label,
     flash: gtk::Label,
+    syntax: gtk::Label,
     image: gtk::Label,
     clear: gtk::Button,
     stretch: gtk::Label,
@@ -176,6 +177,7 @@ pub struct App {
     preview_shown: [u64; 2],
     quick_fit: bool,
     edit_quiet: Rc<Cell<bool>>,
+    syntax_on: Rc<Cell<bool>>,
     edit_name: Rc<RefCell<String>>,
     edit_changes: Rc<Cell<u64>>,
     quick_edit: Option<QuickEdit>,
@@ -267,6 +269,7 @@ impl SimpleComponent for App {
             .map(|b| (b.name.clone(), b.path.clone()))
             .collect();
         let edit_quiet = Rc::new(Cell::new(false));
+        let syntax_on = Rc::new(Cell::new(cfg.syntax_highlight));
         let edit_name = Rc::new(RefCell::new(String::new()));
         let edit_changes = Rc::new(Cell::new(0u64));
         let editing = Rc::clone(&shell.editing);
@@ -277,12 +280,16 @@ impl SimpleComponent for App {
             let window = window.clone();
             let name = Rc::clone(&edit_name);
             let changes = Rc::clone(&edit_changes);
+            let syntax_on = Rc::clone(&syntax_on);
+            let preview = pane.preview.clone();
             pane.preview.buffer().connect_changed(move |_| {
                 if quiet.get() || !editing.get() {
                     return;
                 }
                 changes.set(changes.get() + 1);
                 window.set_title(Some(&format!("{}*", name.borrow())));
+                // Tags do not change the text, so this does not run again.
+                view::paint_syntax(&preview, &name.borrow(), syntax_on.get());
             });
         }
         // Closing the window with a quick edit open gets the same unsaved-changes guard as Esc.
@@ -322,6 +329,7 @@ impl SimpleComponent for App {
             preview_shown: [0, 0],
             quick_fit: true,
             edit_quiet,
+            syntax_on,
             edit_name,
             edit_changes,
             quick_edit: None,
@@ -415,6 +423,7 @@ impl App {
                 self.touch(PaneId::from_index(pane));
             }
             Msg::PathGo(pane, text) => self.go_typed_path(pane, &text, sender),
+            Msg::CopyShownPath(pane) => self.copy_shown_path(pane),
             Msg::CloseSearch => self.close_search(),
             Msg::SearchEscape => self.escape_search(),
             Msg::SearchStart => self.start_search(sender),
@@ -477,6 +486,7 @@ impl App {
             Msg::ToggleHidden => self.toggle_hidden(),
             Msg::ToggleModeButtons => self.toggle_mode_buttons(),
             Msg::ToggleFileIcons => self.toggle_file_icons(),
+            Msg::ToggleSyntax => self.toggle_syntax(),
             Msg::ToggleFlashFeedback => self.toggle_flash_feedback(),
             Msg::ToggleBackgroundStretch => self.toggle_background_stretch(),
             Msg::ToggleImageScale => self.toggle_shown_scale(sender),
@@ -565,6 +575,13 @@ impl App {
         let ctrl = mods.contains(ModifierType::CONTROL_MASK);
         let shift = mods.contains(ModifierType::SHIFT_MASK);
         let alt = mods.contains(ModifierType::ALT_MASK);
+        // The path field keeps the pane you opened it from. Tab only completes that path.
+        if self.path_focused() && matches!(key, Key::Tab | Key::ISO_Left_Tab) {
+            if !ctrl && !alt && !shift {
+                self.complete_focused_path();
+            }
+            return;
+        }
         if self.image.is_some() && !ctrl && !alt {
             match key {
                 Key::Escape => self.close_image(),
@@ -633,6 +650,8 @@ impl App {
                     }
                 }
                 Key::h | Key::H => self.toggle_hidden(),
+                Key::l | Key::L => self.focus_path(),
+                Key::y | Key::Y => self.toggle_syntax(),
                 Key::t | Key::T => self.open_new_tab(sender),
                 Key::w | Key::W => {
                     if self.shell_has_focus() {
@@ -741,7 +760,7 @@ impl App {
             Key::j | Key::J if self.state.quick_view => self.set_charset(Charset::Json, sender),
             Key::s | Key::S if self.state.quick_view && self.cursor_is_image() => self.toggle_quick_scale(),
             Key::s | Key::S | Key::d | Key::D if self.state.quick_view => self.set_charset(Charset::Ascii, sender),
-            Key::Escape if self.shell.panes.iter().any(|pane| pane.path.has_focus()) => self.cancel_path_edit(),
+            Key::Escape if self.path_focused() => self.cancel_path_edit(),
             Key::Escape if self.shell.editing.get() => {
                 self.leave_quick_edit(sender);
             }
@@ -1290,7 +1309,7 @@ impl App {
                     shell::blink_frame(&ui.frame, pane);
                 }
             }
-            if !ui.path.has_focus() && ui.path.text().as_str() != path {
+            if !self.focus_inside(&ui.path) && ui.path.text().as_str() != path {
                 ui.path.set_text(&path);
             }
             let show_filter = filter_on || ui.filter.has_focus() || gtk::prelude::WidgetExt::is_visible(&ui.filter);
@@ -1308,7 +1327,8 @@ impl App {
                 ui.stack.set_visible_child_name(page);
             }
             if show_preview && !self.shell.editing.get() {
-                if let Some(rev) = view::show_slot(ui, &self.preview, self.preview_shown[pane], self.quick_fit) {
+                let (syntax, name) = self.preview_syntax();
+                if let Some(rev) = view::show_slot(ui, &self.preview, self.preview_shown[pane], self.quick_fit, syntax, &name) {
                     self.preview_shown[pane] = rev;
                 }
             }
@@ -1726,10 +1746,50 @@ impl App {
         self.touch(self.state.active);
     }
 
+    fn focus_path(&mut self) {
+        let ui = &self.shell.panes[self.state.active.index()];
+        ui.path.grab_focus();
+    }
+
+    fn path_focused(&self) -> bool {
+        self.shell.panes.iter().any(|ui| self.focus_inside(&ui.path))
+    }
+
+    fn focus_inside(&self, ancestor: &impl IsA<gtk::Widget>) -> bool {
+        let Some(focus) = gtk::prelude::GtkWindowExt::focus(&self.shell.window) else { return false };
+        let ancestor = ancestor.clone().upcast::<gtk::Widget>();
+        let mut current: Option<gtk::Widget> = Some(focus);
+        while let Some(widget) = current {
+            if widget == ancestor {
+                return true;
+            }
+            current = widget.parent();
+        }
+        false
+    }
+
+    fn complete_focused_path(&mut self) -> bool {
+        let Some(pane) = self.shell.panes.iter().position(|ui| self.focus_inside(&ui.path)) else {
+            return false;
+        };
+        let text = self.shell.panes[pane].path.text().to_string();
+        let current = self.state.tab(PaneId::from_index(pane)).path.clone();
+        match complete_path(&current, &text) {
+            Ok(next) => {
+                let ui = &self.shell.panes[pane];
+                ui.path.set_text(&next);
+                ui.path.set_position(-1);
+                self.status.clear();
+            }
+            Err(msg) => self.status = msg,
+        }
+        true
+    }
+
     fn cancel_path_edit(&mut self) {
         for pane in 0..2 {
             let ui = &self.shell.panes[pane];
-            if ui.path.has_focus() {
+            if self.focus_inside(&ui.path) {
                 let shown = self.state.tab(PaneId::from_index(pane)).path.display().to_string();
                 ui.path.set_text(&shown);
             }
@@ -1896,6 +1956,91 @@ fn reveal_row(list: &gtk::ColumnView, pos: u32) {
 }
 
 
+// Tab fills the next directory name. One match is finished with a slash. Several matches share their prefix, or the names are shown.
+fn complete_path(current: &Path, text: &str) -> Result<String, String> {
+    let text = text.trim();
+    if text == "~" {
+        return Ok("~/".into());
+    }
+    let (base, prefix) = split_typed(text);
+    let dir = listing_dir(current, &base)?;
+    let mut names = dir_names(&dir, &prefix)?;
+    names.sort();
+    if names.is_empty() {
+        return Err("No match".into());
+    }
+    if names.len() == 1 {
+        return Ok(format!("{base}{}/", names[0]));
+    }
+    let shared = common_prefix(&names);
+    if shared.chars().count() > prefix.chars().count() {
+        return Ok(format!("{base}{shared}"));
+    }
+    let shown = if names.len() > 8 {
+        format!("{}  …", names[..8].join("  "))
+    } else {
+        names.join("  ")
+    };
+    Err(shown)
+}
+
+fn split_typed(text: &str) -> (String, String) {
+    if text.ends_with('/') {
+        (text.to_string(), String::new())
+    } else if let Some((dir, name)) = text.rsplit_once('/') {
+        (format!("{dir}/"), name.to_string())
+    } else {
+        (String::new(), text.to_string())
+    }
+}
+
+fn listing_dir(current: &Path, base: &str) -> Result<PathBuf, String> {
+    if base.is_empty() {
+        return Ok(current.to_path_buf());
+    }
+    let trimmed = base.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Ok(PathBuf::from("/"));
+    }
+    let raw = if trimmed == "~" {
+        home_dir()
+    } else if let Some(rest) = trimmed.strip_prefix("~/") {
+        home_dir().join(rest)
+    } else {
+        let raw = PathBuf::from(trimmed);
+        if raw.is_absolute() { raw } else { current.join(raw) }
+    };
+    if raw.is_dir() { Ok(raw) } else { Err("No match".into()) }
+}
+
+fn dir_names(dir: &Path, prefix: &str) -> Result<Vec<String>, String> {
+    let read = std::fs::read_dir(dir).map_err(|_| "No match".to_string())?;
+    let mut names = Vec::new();
+    for item in read.flatten() {
+        let name = item.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(prefix) || (name.starts_with('.') && !prefix.starts_with('.')) {
+            continue;
+        }
+        let linked = item.file_type().is_ok_and(|kind| kind.is_symlink());
+        let is_dir = item.file_type().is_ok_and(|kind| kind.is_dir())
+            || (linked && std::fs::metadata(item.path()).is_ok_and(|meta| meta.is_dir()));
+        if is_dir {
+            names.push(name);
+        }
+    }
+    Ok(names)
+}
+
+fn common_prefix(names: &[String]) -> String {
+    let mut prefix: Vec<char> = names[0].chars().collect();
+    for name in &names[1..] {
+        let chars: Vec<char> = name.chars().collect();
+        let len = prefix.iter().zip(chars.iter()).take_while(|(a, b)| a == b).count();
+        prefix.truncate(len);
+    }
+    prefix.into_iter().collect()
+}
+
 // ~ and ~/ expand to $HOME. A relative path is joined onto the pane's current directory.
 fn typed_dir(current: &Path, text: &str) -> Result<PathBuf, String> {
     let text = text.trim();
@@ -1985,5 +2130,50 @@ fn smoke_dirs() -> (PathBuf, PathBuf) {
     let _ = std::fs::write(left.join("sub").join("b.txt"), "nested\n");
     let _ = std::fs::write(left.join("move-me.txt"), "move\n");
     (left, right)
+}
+
+#[cfg(test)]
+mod path_complete {
+    use super::complete_path;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rust-commander-complete-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("Documents")).unwrap();
+        fs::create_dir_all(dir.join("Downloads")).unwrap();
+        fs::create_dir_all(dir.join("notes")).unwrap();
+        fs::write(dir.join("file.txt"), "x").unwrap();
+        dir
+    }
+
+    #[test]
+    fn unique_directory_gains_a_slash() {
+        let dir = scratch("one");
+        assert_eq!(complete_path(&dir, "Doc").unwrap(), "Documents/");
+        assert_eq!(
+            complete_path(&dir, &format!("{}/Doc", dir.display())).unwrap(),
+            format!("{}/Documents/", dir.display())
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn several_matches_share_a_prefix_or_list() {
+        let dir = scratch("many");
+        assert_eq!(complete_path(&dir, "D").unwrap(), "Do");
+        let listed = complete_path(&dir, "Do").unwrap_err();
+        assert!(listed.contains("Documents"));
+        assert!(listed.contains("Downloads"));
+        assert!(!listed.contains("file.txt"));
+        assert!(!listed.contains("notes"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tilde_opens_home() {
+        assert_eq!(complete_path(std::path::Path::new("/"), "~").unwrap(), "~/");
+    }
 }
 

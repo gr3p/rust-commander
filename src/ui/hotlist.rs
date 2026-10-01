@@ -441,7 +441,11 @@ fn confirm(button: &gtk::Button, busy: &Rc<Cell<bool>>, emit: impl Fn() + 'stati
 }
 
 fn shortcut_hint() -> gtk::Label {
-    let hint = gtk::Label::new(Some("Example: Dropbox &d opens the path. Ctrl+D, then D."));
+    let tip = format!(
+        "Example: Dropbox &d opens the path. {}, then D.",
+        rust_commander::commands::format_keys("Ctrl+D"),
+    );
+    let hint = gtk::Label::new(Some(&tip));
     hint.set_xalign(0.0);
     hint.set_wrap(true);
     hint

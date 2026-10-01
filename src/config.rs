@@ -55,6 +55,8 @@ pub struct Config {
     pub icon_pack: String,
     #[serde(default = "default_true")]
     pub flash_feedback: bool,
+    #[serde(default = "default_true")]
+    pub syntax_highlight: bool,
 }
 
 fn default_theme() -> String {
@@ -98,6 +100,7 @@ impl Default for Config {
             file_icons: false,
             icon_pack: default_icon_pack(),
             flash_feedback: true,
+            syntax_highlight: true,
         }
     }
 }

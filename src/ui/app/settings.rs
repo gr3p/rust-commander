@@ -21,7 +21,7 @@ impl App {
     pub(in crate::ui::app) fn apply_css(&self, palette: &Palette) {
         let image = self.background_path();
         let sheet = format!(
-            "window, label, entry, button {{ font-family: \"JetBrainsMono Nerd Font\", \"JetBrains Mono\", monospace; font-size: 13px; }}\ntextview, textview text {{ font-family: \"DejaVu Sans Mono\", \"JetBrains Mono\", monospace; font-size: 13px; }}\n{}{}",
+            "window, label, entry, button {{ font-family: \"JetBrainsMono Nerd Font\", \"JetBrains Mono\", \"Noto Sans CJK SC\", monospace; font-size: 13px; }}\ntextview, textview text {{ font-family: \"DejaVu Sans Mono\", \"JetBrains Mono\", monospace; font-size: 13px; }}\n{}{}",
             theme::stylesheet(palette),
             theme::list_background(
                 palette,
@@ -164,7 +164,10 @@ impl App {
             tx_columns.emit(Msg::ToggleAutoColumns);
         });
         columns_row.add_controller(click);
-        let (hidden_row, hidden) = settings_row("Show hidden files    Ctrl+H", self.state.show_hidden);
+        let (hidden_row, hidden) = settings_row(
+            &format!("Show hidden files    {}", rust_commander::commands::format_keys("Ctrl+H")),
+            self.state.show_hidden,
+        );
         let tx_hidden = tx.clone();
         let flash = hidden_row.clone();
         let click = gtk::GestureClick::new();
@@ -191,6 +194,18 @@ impl App {
             tx_icons.emit(Msg::ToggleFileIcons);
         });
         icons_row.add_controller(click);
+        let (syntax_row, syntax) = settings_row(
+            &format!("Syntax highlight    {}", rust_commander::commands::format_keys("Ctrl+Y")),
+            self.cfg.syntax_highlight,
+        );
+        let tx_syntax = tx.clone();
+        let flash = syntax_row.clone();
+        let click = gtk::GestureClick::new();
+        click.connect_released(move |_, _, _, _| {
+            crate::ui::shell::blink_widget(flash.upcast_ref());
+            tx_syntax.emit(Msg::ToggleSyntax);
+        });
+        syntax_row.add_controller(click);
         let (flash_row, flash_switch) = settings_row("Confirmation flash", self.cfg.flash_feedback);
         let tx_flash = tx.clone();
         let flash_widget = flash_row.clone();
@@ -204,6 +219,7 @@ impl App {
         column.append(&hidden_row);
         column.append(&hints_row);
         column.append(&icons_row);
+        column.append(&syntax_row);
         column.append(&flash_row);
         let palette = theme::load_named(&theme::active_name(&self.cfg.theme, &config::active_theme_path()));
         let color_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -294,6 +310,7 @@ impl App {
                 Key::Escape | Key::F12 => tx.emit(Msg::CloseSettings),
                 Key::Return | Key::KP_Enter | Key::space | Key::KP_Space if !on_control => tx.emit(Msg::ToggleAutoColumns),
                 Key::h | Key::H if !on_control => tx.emit(Msg::ToggleHidden),
+                Key::y | Key::Y if !on_control => tx.emit(Msg::ToggleSyntax),
                 _ if on_control => return gtk::glib::Propagation::Proceed,
                 _ => {}
             }
@@ -308,6 +325,7 @@ impl App {
             hidden,
             hints,
             icons,
+            syntax,
             flash: flash_switch,
             image,
             clear,
@@ -428,6 +446,21 @@ impl App {
         self.paint_settings_switch();
     }
 
+    pub(in crate::ui::app) fn toggle_syntax(&mut self) {
+        self.cfg.syntax_highlight = !self.cfg.syntax_highlight;
+        self.syntax_on.set(self.cfg.syntax_highlight);
+        let _ = config::save(&self.cfg);
+        self.status = if self.cfg.syntax_highlight { "Syntax on".into() } else { "Syntax off".into() };
+        self.paint_settings_switch();
+        if let Some(edit) = &self.quick_edit {
+            let preview = self.shell.panes[edit.pane].preview.clone();
+            let name = self.edit_name.borrow().clone();
+            super::view::paint_syntax(&preview, &name, self.cfg.syntax_highlight);
+        }
+        self.paint_preview();
+        self.lister_redraw();
+    }
+
     pub(in crate::ui::app) fn toggle_mode_buttons(&mut self) {
         self.cfg.mode_buttons = !self.cfg.mode_buttons;
         let _ = config::save(&self.cfg);
@@ -473,6 +506,7 @@ impl App {
         paint_switch(&ui.hidden, self.state.show_hidden);
         paint_switch(&ui.hints, self.cfg.mode_buttons);
         paint_switch(&ui.icons, self.cfg.file_icons);
+        paint_switch(&ui.syntax, self.cfg.syntax_highlight);
         paint_switch(&ui.flash, self.cfg.flash_feedback);
         paint_switch(&ui.stretch, self.cfg.background_stretch);
         ui.image.set_text(&image_caption(&self.cfg.background));
@@ -812,6 +846,7 @@ fn command_matches(needle: &str, item: &rust_commander::commands::Item) -> bool 
     needle.is_empty()
         || item.label.to_lowercase().contains(needle)
         || item.keys.to_lowercase().contains(needle)
+        || rust_commander::commands::format_keys(item.keys).to_lowercase().contains(needle)
         || item.group.name().to_lowercase().contains(needle)
 }
 
@@ -825,15 +860,15 @@ fn command_button(
     button.add_css_class("command");
     button.set_hexpand(true);
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
-    let key = gtk::Label::new(Some(item.keys));
-    key.add_css_class("cmd-key");
-    key.set_xalign(0.0);
-    key.set_width_chars(16);
     let label = gtk::Label::new(Some(item.label));
     label.set_xalign(0.0);
     label.set_hexpand(true);
-    row.append(&key);
+    let key = gtk::Label::new(Some(&rust_commander::commands::format_keys(item.keys)));
+    key.add_css_class("cmd-key");
+    key.set_xalign(1.0);
+    key.set_width_chars(16);
     row.append(&label);
+    row.append(&key);
     button.set_child(Some(&row));
     let act = item.act;
     let on = rust_commander::commands::applies(act, &cue);

@@ -188,6 +188,10 @@ impl App {
         view.set_editable(false);
         view.set_monospace(true);
         view.buffer().set_text(&text);
+        if self.cfg.syntax_highlight && self.charset == Charset::Utf8 {
+            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            paint_syntax(&view, name, true);
+        }
         let scroll = gtk::ScrolledWindow::new();
         scroll.set_child(Some(&view));
         scroll.set_vexpand(true);
@@ -238,6 +242,7 @@ impl App {
         self.edit_quiet.set(true);
         preview.buffer().set_text(&text);
         self.edit_quiet.set(false);
+        paint_syntax(preview, &name, self.cfg.syntax_highlight);
         self.quick_edit = Some(QuickEdit { path, pane, form, saved: self.edit_changes.get(), armed: None });
         self.shell.editing.set(true);
         preview.set_editable(true);
@@ -252,7 +257,11 @@ impl App {
         if let Some(edit) = self.quick_edit.as_mut() {
             if edit.saved != changes && edit.armed != Some(changes) {
                 edit.armed = Some(changes);
-                self.status = "Unsaved changes: Ctrl+S saves, Ctrl+D discards, or press again".into();
+                self.status = format!(
+                    "Unsaved changes: {} saves, {} discards, or press again",
+                    rust_commander::commands::format_keys("Ctrl+S"),
+                    rust_commander::commands::format_keys("Ctrl+D"),
+                );
                 return false;
             }
         }
@@ -339,8 +348,11 @@ impl App {
         let charset = self.charset;
         let Some(lister) = self.lister.as_mut() else { return };
         let mode = lister.mode;
+        let name = lister.reader.file_name().to_string();
         if let Ok(text) = lister::render_reader(&mut lister.reader, mode, charset) {
             lister.view.buffer().set_text(&text);
+            let on = self.cfg.syntax_highlight && mode == ViewMode::Text && charset == Charset::Utf8;
+            paint_syntax(&lister.view, &name, on);
         }
     }
 
@@ -428,9 +440,18 @@ impl App {
         }
         let pane = self.state.active.other().index();
         let ui = &self.shell.panes[pane];
-        if let Some(rev) = show_slot(ui, &self.preview, self.preview_shown[pane], self.quick_fit) {
+        let (syntax, name) = self.preview_syntax();
+        if let Some(rev) = show_slot(ui, &self.preview, self.preview_shown[pane], self.quick_fit, syntax, &name) {
             self.preview_shown[pane] = rev;
         }
+    }
+
+    pub(in crate::ui::app) fn preview_syntax(&self) -> (bool, String) {
+        let name = self
+            .file_under_cursor()
+            .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+            .unwrap_or_default();
+        (self.cfg.syntax_highlight && self.charset == Charset::Utf8, name)
     }
 
     pub(in crate::ui::app) fn file_under_cursor(&self) -> Option<PathBuf> {
@@ -566,7 +587,11 @@ pub(in crate::ui::app) fn preview_body(path: &Path, max_edge: u32) -> PreviewBod
 }
 
 fn paint_edit(button: &gtk::Button, on: bool) {
-    button.set_label(if on { "Ctrl+V View" } else { "Ctrl+E Edit" });
+    button.set_label(&if on {
+        rust_commander::commands::caption("Ctrl+V", "View")
+    } else {
+        rust_commander::commands::caption("Ctrl+E", "Edit")
+    });
     mark_button(button, on);
 }
 
@@ -613,7 +638,7 @@ pub(in crate::ui::app) fn apply_image_scale(ui: &ImageUi) {
     ui.scale.set_label(if fit { "S Fit" } else { "S 1:1" });
 }
 
-pub(in crate::ui::app) fn show_slot(ui: &crate::ui::shell::PaneUi, slot: &lister::PreviewSlot, shown: u64, fit: bool) -> Option<u64> {
+pub(in crate::ui::app) fn show_slot(ui: &crate::ui::shell::PaneUi, slot: &lister::PreviewSlot, shown: u64, fit: bool, syntax: bool, name: &str) -> Option<u64> {
     match &slot.body {
         PreviewBody::Text(text) => {
             if ui.preview_kind.visible_child_name().as_deref() != Some("text") {
@@ -626,6 +651,7 @@ pub(in crate::ui::app) fn show_slot(ui: &crate::ui::shell::PaneUi, slot: &lister
                 let mut start = buf.start_iter();
                 ui.preview.scroll_to_iter(&mut start, 0.0, true, 0.0, 0.0);
             }
+            paint_syntax(&ui.preview, name, syntax);
             None
         }
         PreviewBody::Image { width, height, pixels } => {
@@ -643,6 +669,38 @@ pub(in crate::ui::app) fn show_slot(ui: &crate::ui::shell::PaneUi, slot: &lister
             set_texture(&ui.picture, *width, *height, pixels);
             Some(slot.rev)
         }
+    }
+}
+
+pub(in crate::ui::app) fn paint_syntax(view: &gtk::TextView, name: &str, on: bool) {
+    let buf = view.buffer();
+    let start = buf.start_iter();
+    let end = buf.end_iter();
+    buf.remove_all_tags(&start, &end);
+    if !on {
+        return;
+    }
+    let text = buf.text(&buf.start_iter(), &buf.end_iter(), false);
+    let spans = rust_commander::syntax::highlight(name, text.as_str());
+    if spans.is_empty() {
+        return;
+    }
+    for (tag, color) in [("syn-comment", "#565f89"), ("syn-string", "#9ece6a"), ("syn-keyword", "#7aa2f7")] {
+        if buf.tag_table().lookup(tag).is_none() {
+            let mark = gtk::TextTag::new(Some(tag));
+            mark.set_foreground(Some(color));
+            buf.tag_table().add(&mark);
+        }
+    }
+    for span in spans {
+        let start = buf.iter_at_offset(span.start as i32);
+        let end = buf.iter_at_offset(span.end as i32);
+        let tag = match span.kind {
+            rust_commander::syntax::Kind::Comment => "syn-comment",
+            rust_commander::syntax::Kind::String => "syn-string",
+            rust_commander::syntax::Kind::Keyword => "syn-keyword",
+        };
+        buf.apply_tag_by_name(tag, &start, &end);
     }
 }
 

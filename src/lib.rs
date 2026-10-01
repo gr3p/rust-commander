@@ -25,4 +25,5 @@ pub mod sandbox;
 pub mod search;
 pub mod sfv;
 pub mod state;
+pub mod syntax;
 pub mod theme;

@@ -76,6 +76,7 @@ pub enum Act {
     PlacesLeft,
     PlacesRight,
     Hotlist,
+    Path,
     Open,
     Mark,
     MarkStay,
@@ -90,6 +91,7 @@ pub enum Act {
     Search,
     Hidden,
     QuickView,
+    Syntax,
     Terminal,
     NewShell,
     CloseShell,
@@ -106,7 +108,7 @@ pub enum Act {
 }
 
 impl Act {
-    pub const ALL: [Act; 59] = [
+    pub const ALL: [Act; 61] = [
         Act::Refresh,
         Act::View,
         Act::Edit,
@@ -139,6 +141,7 @@ impl Act {
         Act::PlacesLeft,
         Act::PlacesRight,
         Act::Hotlist,
+        Act::Path,
         Act::Open,
         Act::Mark,
         Act::MarkStay,
@@ -153,6 +156,7 @@ impl Act {
         Act::Search,
         Act::Hidden,
         Act::QuickView,
+        Act::Syntax,
         Act::Terminal,
         Act::NewShell,
         Act::CloseShell,
@@ -229,26 +233,49 @@ pub fn rank(cue: &Cue) -> Vec<Act> {
     scored.into_iter().take(6).map(|(_, _, act)| act).collect()
 }
 
+/// PC: Ctl and ⇧. Mac: ⌃ ⌥ ⇧. The CSS font list falls back to Noto Sans CJK for a full-height ⇧.
+pub fn format_keys(keys: &str) -> String {
+    if cfg!(target_os = "macos") {
+        keys.replace("Ctrl", "⌃").replace("Shift", "⇧").replace("Alt", "⌥")
+    } else {
+        keys.replace("Ctrl", "Ctl").replace("Shift", "⇧")
+    }
+}
+
+pub fn keys_first(keys: &str) -> bool {
+    keys.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|part| part.starts_with('F') && part.as_bytes().get(1).is_some_and(u8::is_ascii_digit))
+}
+
+pub fn caption(keys: &str, label: &str) -> String {
+    let shown = format_keys(keys);
+    if keys_first(keys) {
+        format!("{shown} {label}")
+    } else {
+        format!("{label} {shown}")
+    }
+}
+
 pub fn hint_label(act: Act, side: &str) -> String {
     match act {
-        Act::Unpack => format!("Alt+F9 Unpack to {side} panel"),
-        Act::UnpackHere => "Shift+Alt+F9 Extract here".into(),
-        Act::Verify => "Ctrl+Shift+F9 Verify".into(),
-        Act::Pack => "Alt+F5 Pack".into(),
-        Act::PackHere => "Ctrl+Shift+F5 Pack here".into(),
-        Act::View => "F3 View".into(),
-        Act::Edit => "F4 Edit".into(),
-        Act::Copy => "F5 Copy".into(),
-        Act::Move => "F6 Move".into(),
-        Act::CopyPaths => "Ctrl+Shift+C Copy path".into(),
-        Act::CopyDir => "Alt+Shift+C Copy folder".into(),
-        Act::Properties => "Alt+Enter Properties".into(),
-        Act::Filter => "Ctrl+S Filter".into(),
-        Act::Search => "Ctrl+Shift+S Search".into(),
+        Act::Unpack => caption("Alt+F9", &format!("Unpack to {side} panel")),
+        Act::UnpackHere => caption("Shift+Alt+F9", "Extract here"),
+        Act::Verify => caption("Ctrl+Shift+F9", "Verify"),
+        Act::Pack => caption("Alt+F5", "Pack"),
+        Act::PackHere => caption("Ctrl+Shift+F5", "Pack here"),
+        Act::View => caption("F3", "View"),
+        Act::Edit => caption("F4", "Edit"),
+        Act::Copy => caption("F5", "Copy"),
+        Act::Move => caption("F6", "Move"),
+        Act::CopyPaths => caption("Ctrl+Shift+C", "Copy path"),
+        Act::CopyDir => caption("Alt+Shift+C", "Copy folder"),
+        Act::Properties => caption("Alt+Enter", "Properties"),
+        Act::Filter => caption("Ctrl+S", "Filter"),
+        Act::Search => caption("Ctrl+Shift+S", "Search"),
         other => CATALOG
             .iter()
             .find(|item| item.act == other)
-            .map(|item| format!("{} {}", item.keys, item.label))
+            .map(|item| caption(item.keys, item.label))
             .unwrap_or_default(),
     }
 }
@@ -329,6 +356,7 @@ const CATALOG: &[Item] = &[
     Item { act: Act::PlacesLeft, keys: "Alt+F1", label: "Left places", group: Group::Navigate },
     Item { act: Act::PlacesRight, keys: "Alt+F2", label: "Right places", group: Group::Navigate },
     Item { act: Act::Hotlist, keys: "Ctrl+D", label: "Hotlist", group: Group::Navigate },
+    Item { act: Act::Path, keys: "Ctrl+L", label: "Path", group: Group::Navigate },
     Item { act: Act::Open, keys: "Enter", label: "Open", group: Group::Navigate },
     Item { act: Act::Mark, keys: "Insert", label: "Mark", group: Group::Navigate },
     Item { act: Act::MarkStay, keys: "Space", label: "Mark, stay", group: Group::Navigate },
@@ -343,6 +371,7 @@ const CATALOG: &[Item] = &[
     Item { act: Act::Search, keys: "Ctrl+Shift+S", label: "Search", group: Group::View },
     Item { act: Act::Hidden, keys: "Ctrl+H", label: "Hidden", group: Group::View },
     Item { act: Act::QuickView, keys: "Ctrl+Q", label: "Quick view", group: Group::View },
+    Item { act: Act::Syntax, keys: "Ctrl+Y", label: "Syntax", group: Group::View },
     Item { act: Act::Terminal, keys: "F9", label: "Terminal in other panel", group: Group::View },
     Item { act: Act::NewShell, keys: "Ctrl+F9", label: "New shell", group: Group::View },
     Item { act: Act::CloseShell, keys: "Ctrl+W", label: "Close shell", group: Group::View },
@@ -451,5 +480,25 @@ mod tests {
         assert!(is_text("main.rs"));
         assert!(!is_text("song.mp3"));
         assert!(!is_text("notes.rar"));
+    }
+
+    #[test]
+    fn caption_puts_keys_after_label_except_fkeys() {
+        assert_eq!(caption("F3", "View"), "F3 View");
+        assert_eq!(caption("Alt+F5", "Pack"), format!("{} Pack", format_keys("Alt+F5")));
+        assert_eq!(caption("Alt+Enter", "Properties"), format!("Properties {}", format_keys("Alt+Enter")));
+        assert_eq!(caption("Ctrl+S", "Filter"), format!("Filter {}", format_keys("Ctrl+S")));
+    }
+
+    #[test]
+    fn format_keys_shortens_modifiers() {
+        let shown = format_keys("Ctrl+Shift+C");
+        assert!(!shown.contains("Ctrl"));
+        assert!(shown.contains('⇧'));
+        if cfg!(target_os = "macos") {
+            assert!(shown.contains('⌃'));
+        } else {
+            assert!(shown.contains("Ctl"));
+        }
     }
 }

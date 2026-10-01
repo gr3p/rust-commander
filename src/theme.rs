@@ -472,12 +472,15 @@ label.settings-on {{
   color: {accent};
 }}
 label.cmd-key {{
-  font-family: monospace;
+  font-family: "JetBrainsMono Nerd Font", "Noto Sans CJK SC", monospace;
   color: {accent};
 }}
 label.cmd-head {{
+  font-size: 16px;
   font-weight: 700;
-  padding-top: 14px;
+  color: {accent};
+  padding-top: 18px;
+  padding-bottom: 4px;
 }}
 button.command {{
   background: transparent;

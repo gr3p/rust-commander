@@ -77,18 +77,22 @@ impl From<unrar_ng::error::UnrarError> for Fail {
 
 pub fn unpack_mark(name: &str) -> &'static str {
     let bytes = name.as_bytes();
-    if bytes.len() >= 4 && bytes[bytes.len() - 4..].eq_ignore_ascii_case(b".zip") {
+    if suffix(bytes, b".zip") {
         "Z"
-    } else if bytes.len() >= 4 && bytes[bytes.len() - 4..].eq_ignore_ascii_case(b".tar") {
+    } else if suffix(bytes, b".tar") || suffix(bytes, b".tar.gz") || suffix(bytes, b".tgz") {
         "T"
     } else {
         ""
     }
 }
 
+fn suffix(bytes: &[u8], tail: &[u8]) -> bool {
+    bytes.len() >= tail.len() && bytes[bytes.len() - tail.len()..].eq_ignore_ascii_case(tail)
+}
+
 pub fn is_archive(path: &Path) -> bool {
     match extension(path) {
-        Some("zip" | "rar" | "tar") => true,
+        Some("zip" | "rar" | "tar" | "tgz") => true,
         _ => false,
     }
 }
@@ -97,7 +101,7 @@ pub fn list(path: &Path, password: Option<&str>) -> Result<Listed, Fail> {
     match extension(path) {
         Some("zip") => list_zip(path, password),
         Some("rar") => list_rar(path, password),
-        Some("tar") => list_tar(path),
+        Some("tar" | "tgz") => list_tar(path),
         _ => Err(Fail::Message("Not an archive".into())),
     }
 }
@@ -117,12 +121,16 @@ pub fn extract(
     match extension(path) {
         Some("zip") => extract_zip(path, dest, names, password, cancel, progress, conflict),
         Some("rar") => extract_rar(path, dest, names, password, cancel, progress, conflict),
-        Some("tar") => extract_tar(path, dest, names, cancel, progress, conflict),
+        Some("tar" | "tgz") => extract_tar(path, dest, names, cancel, progress, conflict),
         _ => Err(Fail::Message("Not an archive".into())),
     }
 }
 
 fn extension(path: &Path) -> Option<&str> {
+    let name = path.file_name()?.to_str()?;
+    if suffix(name.as_bytes(), b".tar.gz") {
+        return Some("tgz");
+    }
     let ext = path.extension()?.to_str()?;
     if ext.eq_ignore_ascii_case("zip") {
         Some("zip")
@@ -130,6 +138,8 @@ fn extension(path: &Path) -> Option<&str> {
         Some("rar")
     } else if ext.eq_ignore_ascii_case("tar") {
         Some("tar")
+    } else if ext.eq_ignore_ascii_case("tgz") {
+        Some("tgz")
     } else {
         None
     }
@@ -283,8 +293,15 @@ enum TarKind {
     Skip(&'static str),
 }
 
-fn open_tar(path: &Path) -> Result<tar::Archive<File>, Fail> {
-    let mut archive = tar::Archive::new(File::open(path)?);
+fn open_tar(path: &Path) -> Result<tar::Archive<Box<dyn Read>>, Fail> {
+    let file = File::open(path)?;
+    // gzip is only a stream around the same tar, so both share one reader.
+    let reader: Box<dyn Read> = if extension(path) == Some("tgz") {
+        Box::new(flate2::read::GzDecoder::new(file))
+    } else {
+        Box::new(file)
+    };
+    let mut archive = tar::Archive::new(reader);
     archive.set_preserve_permissions(false);
     archive.set_preserve_ownerships(false);
     archive.set_preserve_mtime(false);
@@ -323,7 +340,7 @@ enum Seen {
     Skip { name: String, kind: &'static str },
 }
 
-fn classify(entry: &tar::Entry<File>) -> Result<Option<Seen>, Fail> {
+fn classify(entry: &tar::Entry<Box<dyn Read>>) -> Result<Option<Seen>, Fail> {
     let Some(kind) = tar_kind(entry.header().entry_type()) else { return Ok(None) };
     let path = entry.path()?;
     let Some(raw) = path.to_str() else { return Ok(None) };
@@ -1217,9 +1234,46 @@ mod tests {
         assert_eq!(unpack_mark("Movie.rar"), "");
         assert_eq!(unpack_mark("notes.ZIP"), "Z");
         assert_eq!(unpack_mark("notes.TAR"), "T");
+        assert_eq!(unpack_mark("notes.tar.gz"), "T");
+        assert_eq!(unpack_mark("notes.TGZ"), "T");
         assert_eq!(unpack_mark("notes.txt"), "");
+        assert_eq!(unpack_mark("notes.gz"), "");
         assert!(is_archive(Path::new("notes.tar")));
-        assert!(!is_archive(Path::new("notes.tar.gz")));
+        assert!(is_archive(Path::new("notes.tar.gz")));
+        assert!(is_archive(Path::new("Notes.TAR.GZ")));
+        assert!(is_archive(Path::new("notes.tgz")));
+        assert!(!is_archive(Path::new("notes.gz")));
+    }
+
+    #[test]
+    fn unpacks_tar_gz() {
+        let dir = tmp("tgz");
+        let archive = dir.join("sample.tar.gz");
+        let enc = flate2::write::GzEncoder::new(File::create(&archive).unwrap(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(enc);
+        let mut file = tar::Header::new_gnu();
+        file.set_size(5);
+        file.set_mode(0o644);
+        builder.append_data(&mut file, "ok.txt", &b"hello"[..]).unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let dest = dir.join("out");
+        fs::create_dir(&dest).unwrap();
+        let cancel = AtomicBool::new(false);
+        let report = extract(&archive, &dest, None, None, &cancel, &mut |_| {}, &mut no_conflict).unwrap();
+        assert_eq!(report.files, 1);
+        assert_eq!(fs::read_to_string(dest.join("ok.txt")).unwrap(), "hello");
+        let listed = list(&archive, None).unwrap();
+        assert_eq!(listed.members.len(), 1);
+        assert_eq!(listed.members[0].name, "ok.txt");
+
+        let tgz = dir.join("sample.tgz");
+        fs::copy(&archive, &tgz).unwrap();
+        let dest2 = dir.join("out2");
+        fs::create_dir(&dest2).unwrap();
+        extract(&tgz, &dest2, None, None, &cancel, &mut |_| {}, &mut no_conflict).unwrap();
+        assert_eq!(fs::read_to_string(dest2.join("ok.txt")).unwrap(), "hello");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn tar_header(name: &str, body: &[u8]) -> Vec<u8> {
