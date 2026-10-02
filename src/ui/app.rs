@@ -164,6 +164,8 @@ pub struct App {
     queued: Option<Queued>,
     queue: Option<queue::QueueUi>,
     lister: Option<ListerUi>,
+    lister_gen: u64,
+    lister_draw: u64,
     image: Option<ImageUi>,
     image_token: u64,
     image_gen: u64,
@@ -316,6 +318,8 @@ impl SimpleComponent for App {
             queued: None,
             queue: None,
             lister: None,
+            lister_gen: 0,
+            lister_draw: 0,
             image: None,
             image_token: 0,
             image_gen: 0,
@@ -461,6 +465,8 @@ impl App {
                 lister::apply_preview(&mut self.preview, generation, body);
             }
             Msg::ImageReady { generation, body } => self.show_image(generation, body),
+            Msg::ListerOpened { generation, opened } => self.show_lister(generation, opened, sender),
+            Msg::ListerText { generation, text } => self.show_lister_text(generation, text),
             Msg::ImageClosed(token) => {
                 if self.image.as_ref().is_some_and(|ui| ui.token == token) {
                     self.image_gen = self.image_gen.wrapping_add(1);
@@ -599,19 +605,19 @@ impl App {
         if self.lister.is_some() && !ctrl && !alt {
             match key {
                 Key::Escape => self.close_lister(),
-                Key::_1 => self.lister_set_mode(ViewMode::Text),
-                Key::_2 => self.lister_set_mode(ViewMode::Binary),
-                Key::_3 => self.lister_set_mode(ViewMode::Hex),
+                Key::_1 => self.lister_set_mode(ViewMode::Text, sender),
+                Key::_2 => self.lister_set_mode(ViewMode::Binary, sender),
+                Key::_3 => self.lister_set_mode(ViewMode::Hex, sender),
                 Key::a | Key::A => self.set_charset(Charset::Ansi, sender),
                 // S is ASCII/DOS in Total Commander. D does the same.
                 Key::s | Key::S | Key::d | Key::D => self.set_charset(Charset::Ascii, sender),
                 // j scrolls. Shift+J is pretty JSON.
                 Key::J => self.set_charset(Charset::Json, sender),
-                Key::F2 => self.lister_scroll(0),
-                Key::Down | Key::j => self.lister_scroll(64),
-                Key::Up | Key::k => self.lister_scroll(-64),
-                Key::Page_Down => self.lister_scroll(4096),
-                Key::Page_Up => self.lister_scroll(-4096),
+                Key::F2 => self.lister_scroll(0, sender),
+                Key::Down | Key::j => self.lister_scroll(64, sender),
+                Key::Up | Key::k => self.lister_scroll(-64, sender),
+                Key::Page_Down => self.lister_scroll(4096, sender),
+                Key::Page_Up => self.lister_scroll(-4096, sender),
                 _ => {}
             }
             return;
@@ -1568,7 +1574,9 @@ impl App {
         if !self.point_at(PaneId::Left, "note.txt") {
             errors.push("missing note".into());
         }
-        self.open_lister(sender);
+        if let Some(path) = self.file_under_cursor() {
+            self.show_lister(self.lister_gen, view::read_lister(&path, self.charset), sender);
+        }
         let lister_text = self.lister.as_ref().map(|ui| {
             let buf = ui.view.buffer();
             buf.text(&buf.start_iter(), &buf.end_iter(), false).to_string()

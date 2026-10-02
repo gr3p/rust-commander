@@ -22,6 +22,7 @@ pub enum Charset {
 
 const JSON_MAX: u64 = 1024 * 1024;
 
+#[derive(Clone, Debug)]
 pub struct Reader {
     path: PathBuf,
     pub len: u64,

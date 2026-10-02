@@ -156,7 +156,7 @@ fn create_zip(
     for source in sources {
         walk(source, cwd, &mut entries)?;
     }
-    let total: u64 = entries.iter().filter_map(|(_, _, len)| *len).sum();
+    let total: u64 = entries.iter().filter_map(|(_, _, len)| *len).fold(0, u64::saturating_add);
     let mut file = File::create(dest)?;
     let mut zip = zip::ZipWriter::new(&mut file);
     let opts = if level == 0 {

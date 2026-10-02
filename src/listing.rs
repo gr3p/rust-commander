@@ -60,7 +60,22 @@ pub fn read_dir_while(path: &Path, stop: impl Fn() -> bool) -> io::Result<Vec<En
         let meta = match item.metadata() {
             Ok(meta) => meta,
             Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(err),
+            // A dead network mount or a folder without x permission: show the name, not an error for the whole folder.
+            Err(_) => {
+                let kind = item.file_type().ok();
+                let mut flags = 0;
+                if kind.is_some_and(|kind| kind.is_dir()) {
+                    flags |= DIR;
+                }
+                if kind.is_some_and(|kind| kind.is_symlink()) {
+                    flags |= LINK;
+                }
+                if name.starts_with('.') {
+                    flags |= HIDDEN;
+                }
+                out.push(Entry { name: name.into(), raw, size: 0, mtime: 0, mode: 0, flags });
+                continue;
+            }
         };
         let is_link = meta.file_type().is_symlink();
         let is_dir = if is_link {
@@ -105,18 +120,20 @@ pub fn visible_indices(
 ) -> Vec<usize> {
     let filter = filter.to_lowercase();
     let pattern = (filter.contains('*') || filter.contains('?')).then(|| filter.chars().collect::<Vec<_>>());
-    let mut idxs: Vec<usize> = entries
+    // Lowercased once per entry, not twice per comparison.
+    let mut keyed: Vec<(usize, String)> = entries
         .iter()
         .enumerate()
         .filter(|(_, e)| e.name.as_ref() != "..")
         .filter(|(_, e)| show_hidden || !e.is_hidden())
-        .filter(|(_, e)| {
+        .filter_map(|(i, e)| {
             let name = e.name.to_lowercase();
-            pattern.as_ref().map_or_else(|| name.contains(&filter), |pattern| wildcard_match(pattern, &name))
+            let keep = pattern.as_ref().map_or_else(|| name.contains(&filter), |pattern| wildcard_match(pattern, &name));
+            keep.then_some((i, name))
         })
-        .map(|(i, _)| i)
         .collect();
-    idxs.sort_by(|&a, &b| cmp_entries(&entries[a], &entries[b], sort, ascending));
+    keyed.sort_by(|(a, a_low), (b, b_low)| cmp_entries(&entries[*a], a_low, &entries[*b], b_low, sort, ascending));
+    let mut idxs: Vec<usize> = keyed.into_iter().map(|(i, _)| i).collect();
     if entries.first().is_some_and(|e| e.name.as_ref() == "..") {
         idxs.insert(0, 0);
     }
@@ -149,23 +166,20 @@ fn wildcard_match(pattern: &[char], name: &str) -> bool {
     pattern_pos == pattern.len()
 }
 
-fn cmp_entries(a: &Entry, b: &Entry, sort: SortKey, ascending: bool) -> std::cmp::Ordering {
+fn cmp_entries(a: &Entry, a_low: &str, b: &Entry, b_low: &str, sort: SortKey, ascending: bool) -> std::cmp::Ordering {
     let dir = b.is_dir().cmp(&a.is_dir());
     if dir != std::cmp::Ordering::Equal {
         return dir;
     }
+    let name = || a_low.cmp(b_low);
     let ord = match sort {
-        SortKey::Name => cmp_name(&a.name, &b.name),
-        SortKey::Ext => extension(&a.name).cmp(extension(&b.name)).then(cmp_name(&a.name, &b.name)),
-        SortKey::Time => a.mtime.cmp(&b.mtime).then(cmp_name(&a.name, &b.name)),
-        SortKey::Size => a.size.cmp(&b.size).then(cmp_name(&a.name, &b.name)),
-        SortKey::Attr => (a.mode & 0o7777).cmp(&(b.mode & 0o7777)).then(cmp_name(&a.name, &b.name)),
+        SortKey::Name => name(),
+        SortKey::Ext => extension(&a.name).cmp(extension(&b.name)).then_with(name),
+        SortKey::Time => a.mtime.cmp(&b.mtime).then_with(name),
+        SortKey::Size => a.size.cmp(&b.size).then_with(name),
+        SortKey::Attr => (a.mode & 0o7777).cmp(&(b.mode & 0o7777)).then_with(name),
     };
     if ascending { ord } else { ord.reverse() }
-}
-
-fn cmp_name(a: &str, b: &str) -> std::cmp::Ordering {
-    a.to_lowercase().cmp(&b.to_lowercase())
 }
 
 pub fn extension(name: &str) -> &str {

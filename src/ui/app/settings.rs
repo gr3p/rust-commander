@@ -458,7 +458,7 @@ impl App {
             super::view::paint_syntax(&preview, &name, self.cfg.syntax_highlight);
         }
         self.paint_preview();
-        self.lister_redraw();
+        self.paint_lister_syntax();
     }
 
     pub(in crate::ui::app) fn toggle_mode_buttons(&mut self) {

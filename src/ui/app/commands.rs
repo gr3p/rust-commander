@@ -210,9 +210,9 @@ impl App {
                     self.step_quick_image(1);
                 }
             }
-            Act::ListerText => self.lister_set_mode(ViewMode::Text),
-            Act::ListerBinary => self.lister_set_mode(ViewMode::Binary),
-            Act::ListerHex => self.lister_set_mode(ViewMode::Hex),
+            Act::ListerText => self.lister_set_mode(ViewMode::Text, sender),
+            Act::ListerBinary => self.lister_set_mode(ViewMode::Binary, sender),
+            Act::ListerHex => self.lister_set_mode(ViewMode::Hex, sender),
             Act::ListerAnsi => self.set_charset(Charset::Ansi, sender),
             Act::ListerAscii => self.set_charset(Charset::Ascii, sender),
         }

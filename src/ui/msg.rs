@@ -49,6 +49,8 @@ pub enum Msg {
     Preview { generation: u64, body: rust_commander::lister::PreviewBody },
     ImageReady { generation: u64, body: rust_commander::lister::PreviewBody },
     ImageClosed(u64),
+    ListerOpened { generation: u64, opened: Result<(rust_commander::lister::Reader, String), String> },
+    ListerText { generation: u64, text: String },
     ReloadTheme,
     PickPlace(usize, std::path::PathBuf),
     Mount(usize, std::path::PathBuf),

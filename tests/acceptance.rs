@@ -155,6 +155,8 @@ const FS: &[&str] = &[
     "bad_config_value_keeps_bookmarks",
     "copy_keeps_mode_and_time",
     "non_utf8_name_is_kept",
+    "cancelled_folder_copy_stays_private",
+    "unreadable_entry_keeps_listing",
 ];
 
 fn dispatch(name: &str, dir: &Path) -> Result<(), String> {
@@ -186,6 +188,8 @@ fn dispatch(name: &str, dir: &Path) -> Result<(), String> {
         "bad_config_value_keeps_bookmarks" => bad_config_value_keeps_bookmarks(dir),
         "copy_keeps_mode_and_time" => copy_keeps_mode_and_time(dir),
         "non_utf8_name_is_kept" => non_utf8_name_is_kept(dir),
+        "cancelled_folder_copy_stays_private" => cancelled_folder_copy_stays_private(dir),
+        "unreadable_entry_keeps_listing" => unreadable_entry_keeps_listing(dir),
         other => Err(format!("unknown case {other}")),
     }
 }
@@ -1299,6 +1303,55 @@ fn non_utf8_name_is_kept(dir: &Path) -> Result<(), String> {
     fs::create_dir(&dest).map_err(s)?;
     copy(&[(path, dest.join(name))])?;
     eq(fs::read(dest.join(name)).map_err(s)?, b"latin1".to_vec(), "copied")
+}
+
+fn cancelled_folder_copy_stays_private(dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let src = dir.join("private");
+    fs::create_dir(&src).map_err(s)?;
+    for name in ["a", "b", "c"] {
+        fs::write(src.join(name), b"secret").map_err(s)?;
+    }
+    fs::set_permissions(&src, fs::Permissions::from_mode(0o700)).map_err(s)?;
+    let dest = dir.join("copy");
+    let cancel = AtomicBool::new(false);
+    let mut mid_copy = None;
+    ops::transfer(
+        &[(src, dest.clone())],
+        Kind::Copy,
+        &cancel,
+        &AtomicBool::new(false),
+        &mut |p| {
+            if p.done == 1 {
+                mid_copy = fs::metadata(&dest).ok().map(|meta| meta.permissions().mode() & 0o777);
+                cancel.store(true, Ordering::Relaxed);
+            }
+        },
+        &mut |_, _| Choice::Cancel,
+    )
+    .map_err(s)?;
+    eq(mid_copy, Some(0o700), "mode while copying")?;
+    eq(fs::metadata(&dest).map_err(s)?.permissions().mode() & 0o777, 0o700, "mode after cancel")
+}
+
+fn unreadable_entry_keeps_listing(dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let locked = dir.join("locked");
+    fs::create_dir(&locked).map_err(s)?;
+    fs::create_dir(locked.join("sub")).map_err(s)?;
+    fs::write(locked.join("note"), b"x").map_err(s)?;
+    // Names readable, but no x: every stat inside fails, as on a dead network mount.
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o600)).map_err(s)?;
+    let listed = listing::read_dir(&locked);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).map_err(s)?;
+    let mut names: Vec<(String, bool)> = listed
+        .map_err(s)?
+        .into_iter()
+        .filter(|e| e.name.as_ref() != "..")
+        .map(|e| (e.name.to_string(), e.is_dir()))
+        .collect();
+    names.sort();
+    eq(names, vec![("note".into(), false), ("sub".into(), true)], "entries")
 }
 
 fn copy(items: &[(PathBuf, PathBuf)]) -> Result<(), String> {

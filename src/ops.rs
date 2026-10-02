@@ -178,34 +178,47 @@ fn one(
                 Err(err) => return Err(err),
             }
         }
-        fs::create_dir_all(dest)?;
-        let mut children: Vec<PathBuf> = fs::read_dir(src)?
-            .map(|e| e.map(|e| e.path()))
-            .collect::<io::Result<_>>()?;
-        children.sort();
-        for child in children {
-            let name = child.file_name().unwrap_or_default();
-            if let Stop::Cancel = one(
-                &child,
-                &dest.join(name),
-                kind,
-                policy,
-                cancel,
-                pause,
-                done,
-                total,
-                progress,
-                conflict,
-            )? {
-                return Ok(Stop::Cancel);
+        if !merge {
+            use std::os::unix::fs::DirBuilderExt;
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
             }
+            // Private until it gets the source mode, so a copy that stops halfway never exposes it.
+            fs::DirBuilder::new().mode(0o700).create(dest)?;
         }
+        let copied = (|| -> io::Result<Stop> {
+            let mut children: Vec<PathBuf> = fs::read_dir(src)?
+                .map(|e| e.map(|e| e.path()))
+                .collect::<io::Result<_>>()?;
+            children.sort();
+            for child in children {
+                let name = child.file_name().unwrap_or_default();
+                if let Stop::Cancel = one(
+                    &child,
+                    &dest.join(name),
+                    kind,
+                    policy,
+                    cancel,
+                    pause,
+                    done,
+                    total,
+                    progress,
+                    conflict,
+                )? {
+                    return Ok(Stop::Cancel);
+                }
+            }
+            Ok(Stop::Continue)
+        })();
         if !merge {
             // Set last, so a read-only folder can still take its children and they do not bump its time.
             let _ = fs::set_permissions(dest, meta.permissions());
-            if let Ok(time) = meta.modified() {
+            if let (Ok(Stop::Continue), Ok(time)) = (&copied, meta.modified()) {
                 let _ = File::open(dest).and_then(|dir| dir.set_modified(time));
             }
+        }
+        if !matches!(copied?, Stop::Continue) {
+            return Ok(Stop::Cancel);
         }
         if kind == Kind::Move {
             let _ = fs::remove_dir(src);

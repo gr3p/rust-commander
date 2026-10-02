@@ -195,7 +195,8 @@ fn extract_zip(
         }
         plan.push((index, name, file.is_dir(), file.size()));
     }
-    let total = plan.iter().filter(|item| !item.2).map(|item| item.3).sum();
+    // Sizes come from the archive, so a crafted one must not wrap the total.
+    let total = plan.iter().filter(|item| !item.2).map(|item| item.3).fold(0u64, u64::saturating_add);
     ensure_room(dest, total)?;
     let file_total = plan.iter().filter(|item| !item.2).count() as u64;
     let mut file_index = 0u64;
@@ -684,7 +685,7 @@ fn extract_rar(
         return Err(Fail::NeedPassword);
     }
     let chosen = |member: &&Member| !member.dir && names.is_none_or(|set| set.contains(&member.name));
-    let total = listed.members.iter().filter(chosen).map(|m| m.size).sum();
+    let total = listed.members.iter().filter(chosen).map(|m| m.size).fold(0u64, u64::saturating_add);
     ensure_room(dest, total)?;
     let file_total = listed.members.iter().filter(chosen).count() as u64;
     let mut file_index = 0u64;

@@ -164,20 +164,37 @@ impl App {
         imageview::image_paths(dir, entries, &order)
     }
 
+    // The file is read on a thread, so a hung network mount cannot freeze the window.
     pub(in crate::ui::app) fn open_lister(&mut self, sender: &ComponentSender<Self>) {
         self.close_image();
         let Some(path) = self.file_under_cursor() else { return };
-        let Ok(mut reader) = lister::Reader::open(&path) else {
-            self.status = format!("Cannot open {}", path.display());
+        self.lister_gen = self.lister_gen.wrapping_add(1);
+        let generation = self.lister_gen;
+        let charset = self.charset;
+        let tx = sender.input_sender().clone();
+        std::thread::spawn(move || {
+            let opened = read_lister(&path, charset);
+            tx.emit(Msg::ListerOpened { generation, opened });
+        });
+    }
+
+    pub(in crate::ui::app) fn show_lister(
+        &mut self,
+        generation: u64,
+        opened: Result<(lister::Reader, String), String>,
+        sender: &ComponentSender<Self>,
+    ) {
+        if generation != self.lister_gen {
             return;
-        };
-        let text = match lister::render_reader(&mut reader, ViewMode::Text, self.charset) {
-            Ok(text) => text,
-            Err(_) => {
-                self.status = format!("Cannot open {}", path.display());
+        }
+        let (reader, text) = match opened {
+            Ok(opened) => opened,
+            Err(err) => {
+                self.status = err;
                 return;
             }
         };
+        let path = reader.path().to_path_buf();
         self.close_lister();
         let window = gtk::Window::new();
         window.set_title(Some(&path.display().to_string()));
@@ -321,14 +338,14 @@ impl App {
         }
     }
 
-    pub(in crate::ui::app) fn lister_set_mode(&mut self, mode: ViewMode) {
+    pub(in crate::ui::app) fn lister_set_mode(&mut self, mode: ViewMode, sender: &ComponentSender<Self>) {
         if let Some(lister) = self.lister.as_mut() {
             lister.mode = mode;
         }
-        self.lister_redraw();
+        self.lister_redraw(sender);
     }
 
-    pub(in crate::ui::app) fn lister_scroll(&mut self, delta: i64) {
+    pub(in crate::ui::app) fn lister_scroll(&mut self, delta: i64, sender: &ComponentSender<Self>) {
         let json = self.charset == Charset::Json;
         if let Some(lister) = self.lister.as_mut() {
             if json && lister.mode == ViewMode::Text {
@@ -341,19 +358,37 @@ impl App {
                 lister.reader.offset = lister.reader.offset.min(lister.reader.len);
             }
         }
-        self.lister_redraw();
+        self.lister_redraw(sender);
     }
 
-    pub(in crate::ui::app) fn lister_redraw(&mut self) {
+    pub(in crate::ui::app) fn lister_redraw(&mut self, sender: &ComponentSender<Self>) {
         let charset = self.charset;
-        let Some(lister) = self.lister.as_mut() else { return };
+        let Some(lister) = self.lister.as_ref() else { return };
         let mode = lister.mode;
-        let name = lister.reader.file_name().to_string();
-        if let Ok(text) = lister::render_reader(&mut lister.reader, mode, charset) {
-            lister.view.buffer().set_text(&text);
-            let on = self.cfg.syntax_highlight && mode == ViewMode::Text && charset == Charset::Utf8;
-            paint_syntax(&lister.view, &name, on);
+        let mut reader = lister.reader.clone();
+        self.lister_draw = self.lister_draw.wrapping_add(1);
+        let generation = self.lister_draw;
+        let tx = sender.input_sender().clone();
+        std::thread::spawn(move || {
+            if let Ok(text) = lister::render_reader(&mut reader, mode, charset) {
+                tx.emit(Msg::ListerText { generation, text });
+            }
+        });
+    }
+
+    pub(in crate::ui::app) fn show_lister_text(&mut self, generation: u64, text: String) {
+        if generation != self.lister_draw {
+            return;
         }
+        let Some(lister) = self.lister.as_ref() else { return };
+        lister.view.buffer().set_text(&text);
+        self.paint_lister_syntax();
+    }
+
+    pub(in crate::ui::app) fn paint_lister_syntax(&self) {
+        let Some(lister) = self.lister.as_ref() else { return };
+        let on = self.cfg.syntax_highlight && lister.mode == ViewMode::Text && self.charset == Charset::Utf8;
+        paint_syntax(&lister.view, lister.reader.file_name(), on);
     }
 
     pub(in crate::ui::app) fn set_charset(&mut self, charset: Charset, sender: &ComponentSender<Self>) {
@@ -368,7 +403,7 @@ impl App {
             Charset::Ascii => "ASCII".into(),
             Charset::Json => "JSON".into(),
         };
-        self.lister_redraw();
+        self.lister_redraw(sender);
         if let Some(ui) = &self.lister {
             paint_charset(&ui.modes, charset);
         }
@@ -427,11 +462,21 @@ impl App {
             });
             return;
         }
-        let text = match lister::Reader::open(&path) {
-            Ok(mut reader) => lister::render_reader(&mut reader, ViewMode::Text, charset).unwrap_or_else(|err| err.to_string()),
-            Err(err) => err.to_string(),
-        };
-        self.preview.set_body(PreviewBody::Text(text));
+        let tx = sender.input_sender().clone();
+        let live = Arc::clone(&self.preview_live);
+        live.store(generation, Ordering::Relaxed);
+        std::thread::spawn(move || {
+            if live.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            let text = match lister::Reader::open(&path) {
+                Ok(mut reader) => lister::render_reader(&mut reader, ViewMode::Text, charset).unwrap_or_else(|err| err.to_string()),
+                Err(err) => err.to_string(),
+            };
+            if live.load(Ordering::Relaxed) == generation {
+                tx.emit(Msg::Preview { generation, body: PreviewBody::Text(text) });
+            }
+        });
     }
 
     pub(in crate::ui::app) fn paint_preview(&mut self) {
@@ -577,6 +622,13 @@ impl App {
     pub(in crate::ui::app) fn cursor_is_file(&self) -> bool {
         self.state.cursor_entry(self.state.active).is_some_and(|entry| !entry.is_dir())
     }
+}
+
+pub(in crate::ui::app) fn read_lister(path: &Path, charset: Charset) -> Result<(lister::Reader, String), String> {
+    let cannot = || format!("Cannot open {}", path.display());
+    let mut reader = lister::Reader::open(path).map_err(|_| cannot())?;
+    let text = lister::render_reader(&mut reader, ViewMode::Text, charset).map_err(|_| cannot())?;
+    Ok((reader, text))
 }
 
 pub(in crate::ui::app) fn preview_body(path: &Path, max_edge: u32) -> PreviewBody {

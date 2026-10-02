@@ -35,7 +35,7 @@ impl App {
         }
         let Some(pipes) = self.open_job(Work::Delete) else { return };
         let JobOut { cancel, progress_tx, done_tx, .. } = pipes;
-        std::thread::spawn(move || {
+        spawn_worker(move || {
             let total = paths.len() as u64;
             for (done, path) in paths.iter().enumerate() {
                 if cancel.load(Ordering::Relaxed) {
@@ -62,7 +62,8 @@ impl App {
             let mut show = false;
             let mut fraction: Option<Option<f64>> = None;
             let mut amount = None;
-            while let Ok(progress) = job.progress_rx.try_recv() {
+            // Only the newest progress is shown. Each one carries the totals so far.
+            if let Some(progress) = job.progress_rx.try_iter().last() {
                 if matches!(job.work, Work::Verify) {
                     let (status, issues) = split_check(&progress.note);
                     line = Some(if status.is_empty() {
@@ -619,7 +620,7 @@ impl App {
         rust_commander::log::info(&format!("pack {}", dest.display()));
         self.ensure_progress();
         let _ = sender;
-        std::thread::spawn(move || {
+        spawn_worker(move || {
             let result = rust_commander::pack::pack(format, bin.as_deref(), &sources, &cwd, &dest, &opts, &pipes.cancel, &mut |progress| {
                 let _ = pipes.progress_tx.send(progress.clone());
             });
@@ -657,7 +658,7 @@ impl App {
         let sources = self.state.selected_paths(self.state.active);
         let Some(pipes) = self.open_job(Work::Sfv) else { return };
         let _ = sender;
-        std::thread::spawn(move || {
+        spawn_worker(move || {
             let result = rust_commander::sfv::create(&root, &sources, &dest, &pipes.cancel, &mut |progress| {
                 let _ = pipes.progress_tx.send(progress.clone());
             });
@@ -1032,7 +1033,7 @@ pub(in crate::ui::app) fn run_transfer(
     pipes: JobOut,
 ) {
     let JobOut { cancel, progress_tx, conflict_tx, answer_rx, done_tx } = pipes;
-    std::thread::spawn(move || {
+    spawn_worker(move || {
         let result = ops::transfer(
             &items,
             kind,
@@ -1050,6 +1051,11 @@ pub(in crate::ui::app) fn run_transfer(
         );
         let _ = done_tx.send(result.map_err(|e| e.to_string()));
     });
+}
+
+// Copy, delete, pack and SFV recurse once per folder level, and PATH_MAX allows about 2000 levels.
+fn spawn_worker(work: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new().stack_size(64 << 20).spawn(work).expect("cannot start a worker thread");
 }
 
 pub(in crate::ui::app) fn conflict_window(
@@ -1151,7 +1157,9 @@ pub(in crate::ui::app) fn gio_trash(path: &Path) -> std::io::Result<()> {
                     if meta.file_type().is_symlink() {
                         std::os::unix::fs::symlink(std::fs::read_link(path)?, &dest)?;
                     } else if meta.is_file() {
-                        if let Err(err) = std::fs::copy(path, &dest) {
+                        // On disk before the original goes, so a crash cannot lose both.
+                        let copied = std::fs::copy(path, &dest).and_then(|_| std::fs::File::open(&dest)?.sync_all());
+                        if let Err(err) = copied {
                             let _ = std::fs::remove_file(&dest);
                             return Err(err);
                         }
