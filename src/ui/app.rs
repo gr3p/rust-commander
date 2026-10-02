@@ -1645,6 +1645,15 @@ impl App {
         if self.search.is_none() {
             errors.push("search shortcut".into());
         }
+        self.on_search_event(self.search_gen, rust_commander::search::Event::Matches(vec![left.join("note.txt")]));
+        self.close_search();
+        if self.search_state() != Some((false, 1)) {
+            errors.push("closed search lost its results".into());
+        }
+        self.on_key(Key::S, ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK, sender);
+        if self.search_state() != Some((true, 1)) {
+            errors.push("reopened search lost its results".into());
+        }
         self.close_search();
 
         self.state.active = PaneId::Left;

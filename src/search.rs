@@ -22,6 +22,7 @@ pub const MAX_RESULTS: usize = 10_000;
 
 pub fn run(options: Options, cancelled: impl Fn() -> bool, mut emit: impl FnMut(Event)) {
     let needle = if options.case_sensitive { options.query.clone() } else { options.query.to_lowercase() };
+    let pattern = (needle.contains('*') || needle.contains('?')).then(|| needle.chars().collect::<Vec<_>>());
     let mut stack = vec![options.root];
     let mut errors = 0;
     let mut found = 0;
@@ -64,10 +65,12 @@ pub fn run(options: Options, cancelled: impl Fn() -> bool, mut emit: impl FnMut(
             if kind.is_dir() && options.recursive {
                 stack.push(path.clone());
             }
-            let matches_name = if options.case_sensitive {
-                name.contains(&needle)
-            } else {
-                name.to_lowercase().contains(&needle)
+            let matches_name = {
+                let shown = if options.case_sensitive { name.clone() } else { name.to_lowercase().into() };
+                match &pattern {
+                    Some(pattern) => crate::listing::wildcard_match(pattern, &shown),
+                    None => shown.contains(&needle),
+                }
             };
             if (options.files_only && kind.is_dir()) || !matches_name {
                 continue;

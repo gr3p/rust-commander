@@ -1,4 +1,7 @@
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -21,7 +24,7 @@ pub(super) struct SearchUi {
     hidden: gtk::CheckButton,
     files_only: gtk::CheckButton,
     case_sensitive: gtk::CheckButton,
-    list: gtk::ListBox,
+    model: gtk::StringList,
     status: gtk::Label,
     start: gtk::Button,
     cancel: gtk::Button,
@@ -32,8 +35,12 @@ pub(super) struct SearchUi {
 
 impl App {
     pub(in crate::ui::app) fn open_search(&mut self, sender: &ComponentSender<Self>) {
-        if let Some(ui) = &self.search {
+        // The window is only hidden when closed, so the last query, options and results are still there.
+        if let Some(ui) = self.search.as_mut() {
+            ui.source = self.state.active;
             ui.window.present();
+            ui.query.grab_focus();
+            ui.query.select_region(0, -1);
             return;
         }
         let window = gtk::Window::new();
@@ -45,7 +52,7 @@ impl App {
         let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
         content.set_margin_all(12);
         let query = gtk::Entry::new();
-        query.set_placeholder_text(Some("File or folder name"));
+        query.set_placeholder_text(Some("File or folder name, or a pattern like *.jpg"));
         let root = gtk::Entry::new();
         root.set_text(&self.state.tab(self.state.active).path.display().to_string());
         let root_row = labeled_row("Search in", &root);
@@ -109,10 +116,58 @@ impl App {
         location_heading.set_xalign(0.0);
         headings.append(&location_heading);
         content.append(&headings);
-        let list = gtk::ListBox::new();
-        list.set_selection_mode(gtk::SelectionMode::Single);
+        let model = gtk::StringList::new(&[]);
+        let selection = gtk::SingleSelection::new(Some(model.clone()));
+        selection.set_autoselect(false);
+        selection.set_can_unselect(true);
+        // Rows are made only for what is on screen, so ten thousand results cost no more than twenty.
+        let shown: Shown = Rc::new(RefCell::new(HashMap::new()));
+        let factory = gtk::SignalListItemFactory::new();
+        factory.connect_setup(|_, item| {
+            let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            row.set_margin_all(4);
+            let name = gtk::Label::new(None);
+            name.set_xalign(0.0);
+            name.set_width_chars(26);
+            name.set_max_width_chars(26);
+            name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            let location = gtk::Label::new(None);
+            location.set_xalign(0.0);
+            location.set_hexpand(true);
+            location.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+            row.append(&name);
+            row.append(&location);
+            item.set_child(Some(&row));
+        });
+        let shown_bind = Rc::clone(&shown);
+        factory.connect_bind(move |_, item| {
+            let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
+            let Some(path) = item.item().and_then(|object| object.downcast::<gtk::StringObject>().ok()) else { return };
+            let Some(row) = item.child() else { return };
+            let path = path.string();
+            let (dir, name) = path.rsplit_once('/').unwrap_or(("", path.as_str()));
+            let labels = (row.first_child().and_downcast::<gtk::Label>(), row.last_child().and_downcast::<gtk::Label>());
+            if let (Some(name_label), Some(dir_label)) = labels {
+                name_label.set_text(name);
+                dir_label.set_text(if dir.is_empty() { "/" } else { dir });
+            }
+            row.set_tooltip_text(Some(path.as_str()));
+            shown_bind.borrow_mut().insert(item.position(), row.downgrade());
+        });
+        let shown_unbind = Rc::clone(&shown);
+        factory.connect_unbind(move |_, item| {
+            if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
+                shown_unbind.borrow_mut().remove(&item.position());
+            }
+        });
+        let list = gtk::ListView::new(Some(selection.clone()), Some(factory));
+        list.add_css_class("search-results");
+        list.set_single_click_activate(true);
         let tx = sender.input_sender().clone();
-        list.connect_row_activated(move |_, row| tx.emit(Msg::SearchGo(row.index() as usize)));
+        let picking = Rc::new(Cell::new(false));
+        let (picking_row, selection_row, shown_row) = (Rc::clone(&picking), selection.clone(), Rc::clone(&shown));
+        list.connect_activate(move |_, position| pick_result(&selection_row, &shown_row, position, &tx, &picking_row));
         let scroll = gtk::ScrolledWindow::new();
         scroll.set_child(Some(&list));
         scroll.set_vexpand(true);
@@ -124,10 +179,11 @@ impl App {
         let go = gtk::Button::with_label("Go to result");
         go.set_sensitive(false);
         let tx = sender.input_sender().clone();
-        let selection = list.clone();
-        crate::ui::shell::on_click(&go, move || {
-            if let Some(row) = selection.selected_row() {
-                tx.emit(Msg::SearchGo(row.index() as usize));
+        go.connect_clicked(move |go| {
+            crate::ui::shell::blink_button(go);
+            let position = selection.selected();
+            if position != gtk::INVALID_LIST_POSITION {
+                pick_result(&selection, &shown, position, &tx, &picking);
             }
         });
         let close = gtk::Button::with_label("Close");
@@ -140,7 +196,7 @@ impl App {
         let tx = sender.input_sender().clone();
         window.connect_close_request(move |_| {
             tx.emit(Msg::CloseSearch);
-            gtk::glib::Propagation::Proceed
+            gtk::glib::Propagation::Stop
         });
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -162,7 +218,7 @@ impl App {
         query.grab_focus();
         self.search = Some(SearchUi {
             window, source: self.state.active, query, root, recursive, hidden, files_only,
-            case_sensitive, list, status, start, cancel, go, results: Vec::new(), stop: None,
+            case_sensitive, model, status, start, cancel, go, results: Vec::new(), stop: None,
         });
     }
 
@@ -181,9 +237,7 @@ impl App {
         if let Some(stop) = ui.stop.take() {
             stop.store(true, Ordering::Relaxed);
         }
-        while let Some(row) = ui.list.first_child() {
-            ui.list.remove(&row);
-        }
+        ui.model.splice(0, ui.model.n_items(), &[]);
         ui.results.clear();
         ui.go.set_sensitive(false);
         ui.status.set_text("Searching...");
@@ -228,24 +282,10 @@ impl App {
         let Some(ui) = self.search.as_mut() else { return };
         match event {
             Event::Matches(paths) => {
-                for path in paths {
-                    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-                    row.set_margin_all(4);
-                    let name = gtk::Label::new(path.file_name().map(|name| name.to_string_lossy()).as_deref());
-                    name.set_xalign(0.0);
-                    name.set_width_chars(26);
-                    name.set_max_width_chars(26);
-                    name.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                    let location = gtk::Label::new(Some(&path.parent().unwrap_or(&path).display().to_string()));
-                    location.set_xalign(0.0);
-                    location.set_hexpand(true);
-                    location.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-                    row.append(&name);
-                    row.append(&location);
-                    row.set_tooltip_text(Some(&path.display().to_string()));
-                    ui.list.append(&row);
-                    ui.results.push(path);
-                }
+                let texts: Vec<String> = paths.iter().map(|path| path.display().to_string()).collect();
+                let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+                ui.model.splice(ui.model.n_items(), 0, &texts);
+                ui.results.extend(paths);
                 ui.go.set_sensitive(!ui.results.is_empty());
                 ui.status.set_text(&format!("Searching... {} results", ui.results.len()));
             }
@@ -264,6 +304,11 @@ impl App {
                 ui.status.set_text(&format!("{status}: {} results{skipped}", ui.results.len()));
             }
         }
+    }
+
+    // (window shown, kept results)
+    pub(super) fn search_state(&self) -> Option<(bool, usize)> {
+        self.search.as_ref().map(|ui| (ui.window.is_visible(), ui.results.len()))
     }
 
     pub(super) fn go_to_search_result(&mut self, index: usize, sender: &ComponentSender<Self>) {
@@ -288,14 +333,33 @@ impl App {
         self.focus_list();
     }
 
+    // Hides the window and keeps query, options and results for the next time. A running search is stopped.
     pub(super) fn close_search(&mut self) {
-        if let Some(ui) = self.search.take() {
-            if let Some(stop) = ui.stop {
-                stop.store(true, Ordering::Relaxed);
-            }
-            self.search_gen = self.search_gen.wrapping_add(1);
-            ui.window.close();
+        self.cancel_search();
+        if let Some(ui) = &self.search {
+            ui.window.set_visible(false);
         }
+    }
+}
+
+// Row widgets that exist right now, by list position. Only the visible ones do.
+type Shown = Rc<RefCell<HashMap<u32, gtk::glib::WeakRef<gtk::Widget>>>>;
+
+// The row blinks first, so the pick is seen before the window goes away.
+fn pick_result(selection: &gtk::SingleSelection, shown: &Shown, position: u32, tx: &relm4::Sender<Msg>, picking: &Rc<Cell<bool>>) {
+    if picking.replace(true) {
+        return;
+    }
+    selection.set_selected(position);
+    let (tx, picking) = (tx.clone(), Rc::clone(picking));
+    let go = move || {
+        picking.set(false);
+        tx.emit(Msg::SearchGo(position as usize));
+    };
+    let row = shown.borrow().get(&position).and_then(|child| child.upgrade()).and_then(|child| child.parent());
+    match row {
+        Some(row) => crate::ui::shell::blink_then(&row, go),
+        None => go(),
     }
 }
 

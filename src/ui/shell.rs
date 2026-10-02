@@ -412,6 +412,16 @@ pub fn blink_button(button: &gtk::Button) {
     blink_widget(button.upcast_ref());
 }
 
+/// Blinks the widget, then runs `action` once the blink has been seen.
+pub fn blink_then(widget: &gtk::Widget, action: impl FnOnce() + 'static) {
+    if !FLASH_ENABLED.load(Ordering::Relaxed) {
+        action();
+        return;
+    }
+    blink_widget(widget);
+    gtk::glib::timeout_add_local_once(Duration::from_millis(240), action);
+}
+
 pub fn blink_widget(widget: &gtk::Widget) {
     if !FLASH_ENABLED.load(Ordering::Relaxed) {
         return;

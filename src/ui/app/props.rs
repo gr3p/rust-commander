@@ -38,10 +38,10 @@ impl App {
         let (mime, _) = gtk::gio::content_type_guess(Some(&path), None::<&[u8]>);
         let notebook = gtk::Notebook::new();
         notebook.set_vexpand(true);
-        notebook.append_page(&facts_page(&path, &facts, mime.as_str()), Some(&gtk::Label::new(Some("Properties"))));
+        notebook.append_page(&scrolled(&facts_page(&path, &facts, mime.as_str())), Some(&gtk::Label::new(Some("Properties"))));
         let (attr_page, octal, owner, group, uids, gids) = attr_page(&facts);
-        notebook.append_page(&attr_page, Some(&gtk::Label::new(Some("Attributes"))));
-        notebook.append_page(&details_page(&path, &name, mime.as_str()), Some(&gtk::Label::new(Some("Details"))));
+        notebook.append_page(&scrolled(&attr_page), Some(&gtk::Label::new(Some("Attributes"))));
+        notebook.append_page(&scrolled(&details_page(&path, &name, mime.as_str())), Some(&gtk::Label::new(Some("Details"))));
         let error = gtk::Label::new(None);
         error.set_xalign(0.0);
         error.set_wrap(true);
@@ -95,6 +95,19 @@ impl App {
         win.present();
         self.dialog = Some(win);
     }
+}
+
+// A tiling window manager may give the dialog less height than the pages need; the buttons must stay visible.
+fn scrolled(page: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
+    scroll.set_propagate_natural_height(true);
+    scroll.set_vexpand(true);
+    page.set_margin_start(14);
+    page.set_margin_end(14);
+    page.set_margin_bottom(12);
+    scroll.set_child(Some(page));
+    scroll
 }
 
 fn facts_page(path: &std::path::Path, facts: &Facts, mime: &str) -> gtk::Grid {

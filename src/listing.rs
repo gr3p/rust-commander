@@ -140,7 +140,8 @@ pub fn visible_indices(
     idxs
 }
 
-fn wildcard_match(pattern: &[char], name: &str) -> bool {
+// `*` and `?` match the whole name; the pattern and name are compared as given, so lowercase both for a case-blind match.
+pub fn wildcard_match(pattern: &[char], name: &str) -> bool {
     let name: Vec<char> = name.chars().collect();
     let (mut pattern_pos, mut name_pos) = (0, 0);
     let (mut star, mut retry_pos) = (None, 0);

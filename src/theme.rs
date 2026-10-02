@@ -384,6 +384,19 @@ listview row:selected {{
   background: {sel};
   color: {bright};
 }}
+listview.search-results,
+listview.search-results > row {{
+  background: transparent;
+  color: {fg};
+}}
+listview.search-results > row:hover {{
+  background: alpha({sel}, 0.5);
+}}
+listview.search-results > row:selected,
+listview.search-results > row:selected:hover {{
+  background: {sel};
+  color: {bright};
+}}
 .fbar, .status {{
   background: {bg};
   color: {fg};
@@ -548,6 +561,8 @@ button.flash:active,
 button.fkey.flash,
 button.hot.flash,
 .settings-row.flash,
+listview.search-results > row.flash,
+listview.search-results > row.flash:selected,
 box.flash,
 label.flash,
 colorbutton.flash > button {{

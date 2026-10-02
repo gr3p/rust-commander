@@ -809,7 +809,15 @@ fn search_nested_names(dir: &Path) -> Result<(), String> {
     let (found, _) = collect(options("nested"));
     eq(found, vec![dir.join("nested")], "directory match")?;
     let (found, _) = collect(Options { files_only: true, ..options("nested") });
-    eq(found.len(), 0, "files only")
+    eq(found.len(), 0, "files only")?;
+    let (found, _) = collect(options("*.TXT"));
+    eq(found, vec![dir.join("nested/report.txt")], "wildcard extension")?;
+    let (found, _) = collect(Options { case_sensitive: true, ..options("*.TXT") });
+    eq(found.len(), 0, "wildcard case-sensitive")?;
+    let (found, _) = collect(options("rep?rt.*"));
+    eq(found, vec![dir.join("nested/report.txt")], "wildcard question mark")?;
+    let (found, _) = collect(options("*.tx"));
+    eq(found.len(), 0, "wildcard matches the whole name")
 }
 
 fn search_cancelled(dir: &Path) -> Result<(), String> {
