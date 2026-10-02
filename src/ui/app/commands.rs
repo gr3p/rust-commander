@@ -33,6 +33,8 @@ impl App {
             dir,
             lister: self.lister.is_some(),
             image_view: self.image.is_some() || (self.state.quick_view && self.cursor_is_image()),
+            quick_view: self.state.quick_view,
+            editing: self.shell.editing.get(),
         }
     }
 
@@ -167,11 +169,7 @@ impl App {
             Act::SortAttr => self.set_sort(SortKey::Attr),
             Act::CopyPaths => self.copy_selected_paths(),
             Act::CopyDir => self.copy_panel_dir(),
-            Act::Filter => {
-                let ui = &self.shell.panes[self.state.active.index()];
-                ui.filter.set_visible(true);
-                ui.filter.grab_focus();
-            }
+            Act::Filter => self.filter_shortcut(),
             Act::Search => self.open_search(sender),
             Act::Hidden => self.toggle_hidden(),
             Act::Syntax => self.toggle_syntax(),
@@ -215,6 +213,16 @@ impl App {
             Act::ListerHex => self.lister_set_mode(ViewMode::Hex, sender),
             Act::ListerAnsi => self.set_charset(Charset::Ansi, sender),
             Act::ListerAscii => self.set_charset(Charset::Ascii, sender),
+            Act::ListerJson => self.set_charset(Charset::Json, sender),
+            Act::QuickEdit => self.toggle_quick_edit(sender),
+            Act::Save => self.save_quick(),
+            Act::Discard => self.discard_quick(sender),
+            Act::LeaveEdit => {
+                self.leave_quick_edit(sender);
+            }
+            Act::CopyImage => self.copy_preview_image(sender),
+            Act::Drive => self.status = "Press Ctrl+1 to Ctrl+9".into(),
+            Act::Commands => self.toggle_commands(sender),
         }
     }
 }

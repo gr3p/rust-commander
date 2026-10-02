@@ -1202,6 +1202,12 @@ fn bookmark_roundtrip_config(dir: &Path) -> Result<(), String> {
     if !loaded.mode_buttons {
         return Err("mode buttons default".into());
     }
+    if !loaded.command_bar {
+        return Err("command bar default".into());
+    }
+    if loaded.cursor_alpha != 70 {
+        return Err("cursor alpha default".into());
+    }
     if loaded.file_icons {
         return Err("file icons default".into());
     }

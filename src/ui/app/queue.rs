@@ -233,6 +233,8 @@ fn queue_window(parent: &gtk::Window, tx: relm4::Sender<Msg>) -> QueueUi {
         tx.emit(Msg::QueueClosed);
         gtk::glib::Propagation::Proceed
     });
+    let win_esc = window.clone();
+    crate::ui::shell::on_escape(&window, move || win_esc.close());
     row.append(&pause_button);
     row.append(&remove);
     row.append(&cancel);

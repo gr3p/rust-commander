@@ -130,6 +130,7 @@ struct SettingsUi {
     columns: gtk::Label,
     hidden: gtk::Label,
     hints: gtk::Label,
+    commands: gtk::Label,
     icons: gtk::Label,
     flash: gtk::Label,
     syntax: gtk::Label,
@@ -253,6 +254,7 @@ impl SimpleComponent for App {
         let cfg = config::load();
         let shell = shell::build(&root, sender.input_sender(), &cfg.icon_pack);
         shell::set_flash_enabled(cfg.flash_feedback);
+        shell.mode_bar.set_visible(cfg.command_bar);
         let (left, right) = if smoke {
             smoke_dirs()
         } else {
@@ -491,6 +493,7 @@ impl App {
             Msg::ToggleAutoColumns => self.toggle_auto_columns(),
             Msg::ToggleHidden => self.toggle_hidden(),
             Msg::ToggleModeButtons => self.toggle_mode_buttons(),
+            Msg::ToggleCommandBar => self.toggle_command_bar(),
             Msg::ToggleFileIcons => self.toggle_file_icons(),
             Msg::ToggleSyntax => self.toggle_syntax(),
             Msg::ToggleFlashFeedback => self.toggle_flash_feedback(),
@@ -524,6 +527,8 @@ impl App {
             Msg::BackgroundImage(path) => self.set_background_image(path),
             Msg::BackgroundColor(color) => self.set_background_color(color),
             Msg::BackgroundAlpha(alpha) => self.set_background_alpha(alpha),
+            Msg::CursorColor(color) => self.set_cursor_color(color),
+            Msg::CursorAlpha(alpha) => self.set_cursor_alpha(alpha),
             Msg::CloseSettings => self.close_settings(),
             Msg::ArchiveListed(result) => self.on_archive_listed(result, sender),
             Msg::UnpackPick(dest, names) => self.on_unpack_pick(dest, names, sender),
@@ -588,6 +593,14 @@ impl App {
             }
             return;
         }
+        // Tab leaves the filter for the file list on the same side. An empty filter closes on the way out.
+        if !ctrl && !alt && !shift && matches!(key, Key::Tab | Key::ISO_Left_Tab) {
+            if let Some(index) = self.focused_filter() {
+                self.state.active = PaneId::from_index(index);
+                self.focus_list();
+                return;
+            }
+        }
         if self.image.is_some() && !ctrl && !alt {
             match key {
                 Key::Escape => self.close_image(),
@@ -650,9 +663,7 @@ impl App {
                     if shift {
                         self.open_search(sender);
                     } else {
-                        let ui = &self.shell.panes[self.state.active.index()];
-                        ui.filter.set_visible(true);
-                        ui.filter.grab_focus();
+                        self.filter_shortcut();
                     }
                 }
                 Key::h | Key::H => self.toggle_hidden(),
@@ -1125,6 +1136,8 @@ impl App {
         let scroll = gtk::ScrolledWindow::new();
         scroll.set_child(Some(&list));
         win.set_child(Some(&scroll));
+        let win_esc = win.clone();
+        shell::on_escape(&win, move || win_esc.close());
         win.present();
         self.dialog = Some(win);
     }
@@ -1757,10 +1770,40 @@ impl App {
         self.close_image();
         self.close_lister();
         self.state.quick_view = false;
-        self.state.pane_mut(self.state.active).filter.clear();
-        self.shell.panes[self.state.active.index()].filter.set_text("");
-        self.shell.panes[self.state.active.index()].filter.set_visible(false);
-        self.touch(self.state.active);
+        let id = self.state.active;
+        let open = gtk::prelude::WidgetExt::is_visible(&self.shell.panes[id.index()].filter);
+        self.state.pane_mut(id).filter.clear();
+        self.shell.panes[id.index()].filter.set_text("");
+        self.shell.panes[id.index()].filter.set_visible(false);
+        if open {
+            self.focus_list();
+        }
+        self.touch(id);
+    }
+
+    // Ctrl+S opens the filter. A second press closes it only while it is empty.
+    // With text, the same key moves between the filter and the file list.
+    fn filter_shortcut(&mut self) {
+        let id = self.state.active;
+        let ui = &self.shell.panes[id.index()];
+        let empty = ui.filter.text().is_empty() && self.state.pane(id).filter.is_empty();
+        let open = gtk::prelude::WidgetExt::is_visible(&ui.filter);
+        let focused = ui.filter.has_focus();
+        if open && empty {
+            ui.filter.set_visible(false);
+            self.focus_list();
+            return;
+        }
+        if open && focused {
+            self.focus_list();
+            return;
+        }
+        ui.filter.set_visible(true);
+        ui.filter.grab_focus();
+    }
+
+    fn focused_filter(&self) -> Option<usize> {
+        self.shell.panes.iter().position(|ui| self.focus_inside(&ui.filter))
     }
 
     fn focus_path(&mut self) {

@@ -222,6 +222,8 @@ pub fn add_dialog(parent: &gtk::Window, title: &str, path: &str, sender: &relm4:
     let ok_entry = ok.clone();
     entry.connect_activate(move |_| ok_entry.emit_clicked());
     let tx_cancel = sender.clone();
+    let tx_esc = sender.clone();
+    super::shell::on_escape(&win, move || tx_esc.emit(Msg::CancelAsk));
     super::shell::on_click(&cancel, move || tx_cancel.emit(Msg::CancelAsk));
     row.append(&ok);
     row.append(&cancel);
@@ -289,6 +291,8 @@ pub fn configure(parent: &gtk::Window, marks: Vec<Bookmark>, sender: &relm4::Sen
         state_ok.sender.emit(Msg::HotlistStored(state_ok.draft.borrow().clone()));
     });
     let tx_cancel = sender.clone();
+    let tx_esc = sender.clone();
+    super::shell::on_escape(&win, move || tx_esc.emit(Msg::CancelAsk));
     super::shell::on_click(&cancel, move || tx_cancel.emit(Msg::CancelAsk));
     save_row.append(&ok);
     save_row.append(&cancel);

@@ -64,6 +64,8 @@ impl App {
         win.set_child(Some(&column));
         win.set_default_widget(Some(&ok));
         let win_cancel = win.clone();
+        let win_esc = win.clone();
+        crate::ui::shell::on_escape(&win, move || win_esc.close());
         crate::ui::shell::on_click(&cancel, move || win_cancel.close());
         let error_ok = error.clone();
         let tx_ok = tx.clone();

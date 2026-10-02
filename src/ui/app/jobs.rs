@@ -423,6 +423,8 @@ impl App {
         let ok_entry = ok.clone();
         entry.connect_activate(move |_| ok_entry.emit_clicked());
         let cancel = gtk::Button::with_label("Cancel");
+        let tx_esc = tx.clone();
+        crate::ui::shell::on_escape(&win, move || tx_esc.emit(Msg::CancelAsk));
         crate::ui::shell::on_click(&cancel, move || tx.emit(Msg::CancelAsk));
         row.append(&ok);
         row.append(&cancel);
@@ -544,6 +546,8 @@ impl App {
         let ok_repeat = ok.clone();
         repeat.connect_activate(move |_| ok_repeat.emit_clicked());
         let cancel = gtk::Button::with_label("Cancel");
+        let tx_esc = tx.clone();
+        crate::ui::shell::on_escape(&win, move || tx_esc.emit(Msg::CancelAsk));
         crate::ui::shell::on_click(&cancel, move || tx.emit(Msg::CancelAsk));
         row.append(&ok);
         row.append(&cancel);
@@ -788,6 +792,8 @@ impl App {
         label.set_selectable(true);
         let ok = gtk::Button::with_label("OK");
         let win_ok = win.clone();
+        let win_esc = win.clone();
+        crate::ui::shell::on_escape(&win, move || win_esc.close());
         crate::ui::shell::on_click(&ok, move || win_ok.close());
         column.append(&label);
         column.append(&ok);
@@ -858,6 +864,8 @@ impl App {
             row.append(&queue);
         }
         let cancel = gtk::Button::with_label("Cancel");
+        let tx_esc = tx.clone();
+        crate::ui::shell::on_escape(&win, move || tx_esc.emit(Msg::CancelAsk));
         crate::ui::shell::on_click(&cancel, move || tx.emit(Msg::CancelAsk));
         row.append(&cancel);
         column.append(&entry);
@@ -880,6 +888,8 @@ impl App {
         let tx_ok = tx.clone();
         crate::ui::shell::on_click(&ok, move || tx_ok.emit(Msg::Submit(String::new())));
         let cancel = gtk::Button::with_label("Cancel");
+        let tx_esc = tx.clone();
+        crate::ui::shell::on_escape(&win, move || tx_esc.emit(Msg::CancelAsk));
         crate::ui::shell::on_click(&cancel, move || tx.emit(Msg::CancelAsk));
         row.append(&ok);
         row.append(&cancel);
@@ -930,6 +940,8 @@ impl App {
             }
             gtk::glib::Propagation::Proceed
         });
+        let win_esc = win.clone();
+        crate::ui::shell::on_escape(&win, move || win_esc.close());
         let broken = if matches!(self.job.as_ref().map(|job| job.work), Some(Work::Verify)) {
             let heading = gtk::Label::new(Some("Broken 0"));
             heading.set_xalign(0.0);
@@ -1099,6 +1111,8 @@ pub(in crate::ui::app) fn conflict_window(
         }
         gtk::glib::Propagation::Proceed
     });
+    let win_esc = win.clone();
+    crate::ui::shell::on_escape(&win, move || win_esc.close());
     column.append(&row);
     win.set_child(Some(&column));
     win

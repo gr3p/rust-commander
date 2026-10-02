@@ -105,10 +105,18 @@ pub enum Act {
     ListerHex,
     ListerAnsi,
     ListerAscii,
+    ListerJson,
+    QuickEdit,
+    Save,
+    Discard,
+    LeaveEdit,
+    CopyImage,
+    Drive,
+    Commands,
 }
 
 impl Act {
-    pub const ALL: [Act; 61] = [
+    pub const ALL: [Act; 69] = [
         Act::Refresh,
         Act::View,
         Act::Edit,
@@ -170,6 +178,14 @@ impl Act {
         Act::ListerHex,
         Act::ListerAnsi,
         Act::ListerAscii,
+        Act::ListerJson,
+        Act::QuickEdit,
+        Act::Save,
+        Act::Discard,
+        Act::LeaveEdit,
+        Act::CopyImage,
+        Act::Drive,
+        Act::Commands,
     ];
 }
 
@@ -184,6 +200,8 @@ pub struct Cue {
     pub dir: bool,
     pub lister: bool,
     pub image_view: bool,
+    pub quick_view: bool,
+    pub editing: bool,
 }
 
 impl Cue {
@@ -198,6 +216,8 @@ impl Cue {
             dir: false,
             lister: false,
             image_view: false,
+            quick_view: false,
+            editing: false,
         }
     }
 }
@@ -289,8 +309,13 @@ pub fn applies(act: Act, cue: &Cue) -> bool {
         Act::Properties | Act::CopyAs | Act::Rename => cue.file || cue.dir,
         Act::View | Act::Edit => cue.file,
         Act::Queue => false,
-        Act::ImageFit | Act::ImageStep => cue.image_view || cue.image,
-        Act::ListerText | Act::ListerBinary | Act::ListerHex | Act::ListerAnsi | Act::ListerAscii => cue.lister,
+        Act::Filter | Act::Hotlist => !cue.editing,
+        Act::Save | Act::Discard | Act::LeaveEdit => cue.editing,
+        Act::QuickEdit => cue.quick_view && cue.file && !cue.image && !cue.editing,
+        Act::ImageFit | Act::ImageStep => cue.image_view,
+        Act::CopyImage => cue.image_view,
+        Act::ListerText | Act::ListerBinary | Act::ListerHex => cue.lister,
+        Act::ListerAnsi | Act::ListerAscii | Act::ListerJson => cue.lister || cue.quick_view,
         _ => true,
     }
 }
@@ -339,6 +364,7 @@ const CATALOG: &[Item] = &[
     Item { act: Act::SelectAll, keys: "Ctrl+A", label: "Select all", group: Group::Files },
     Item { act: Act::Properties, keys: "Alt+Enter", label: "Properties", group: Group::Files },
     Item { act: Act::Settings, keys: "F12", label: "Settings", group: Group::Files },
+    Item { act: Act::Commands, keys: "F1", label: "Commands", group: Group::Files },
     Item { act: Act::Pack, keys: "Alt+F5", label: "Pack", group: Group::Archive },
     Item { act: Act::PackHere, keys: "Ctrl+Shift+F5", label: "Pack here", group: Group::Archive },
     Item { act: Act::Unpack, keys: "Alt+F9", label: "Unpack to other panel", group: Group::Archive },
@@ -355,6 +381,7 @@ const CATALOG: &[Item] = &[
     Item { act: Act::Mirror, keys: "Ctrl+Left/Right", label: "Mirror folder", group: Group::Navigate },
     Item { act: Act::PlacesLeft, keys: "Alt+F1", label: "Left places", group: Group::Navigate },
     Item { act: Act::PlacesRight, keys: "Alt+F2", label: "Right places", group: Group::Navigate },
+    Item { act: Act::Drive, keys: "Ctrl+1…9", label: "Drive", group: Group::Navigate },
     Item { act: Act::Hotlist, keys: "Ctrl+D", label: "Hotlist", group: Group::Navigate },
     Item { act: Act::Path, keys: "Ctrl+L", label: "Path", group: Group::Navigate },
     Item { act: Act::Open, keys: "Enter", label: "Open", group: Group::Navigate },
@@ -366,11 +393,16 @@ const CATALOG: &[Item] = &[
     Item { act: Act::SortSize, keys: "Ctrl+F6", label: "Sort by size", group: Group::Navigate },
     Item { act: Act::SortAttr, keys: "Ctrl+F7", label: "Sort by attributes", group: Group::Navigate },
     Item { act: Act::CopyPaths, keys: "Ctrl+Shift+C", label: "Copy path", group: Group::Clipboard },
+    Item { act: Act::CopyImage, keys: "Ctrl+C", label: "Copy image", group: Group::Clipboard },
     Item { act: Act::CopyDir, keys: "Alt+Shift+C", label: "Copy folder path", group: Group::Clipboard },
     Item { act: Act::Filter, keys: "Ctrl+S", label: "Filter", group: Group::View },
     Item { act: Act::Search, keys: "Ctrl+Shift+S", label: "Search", group: Group::View },
     Item { act: Act::Hidden, keys: "Ctrl+H", label: "Hidden", group: Group::View },
     Item { act: Act::QuickView, keys: "Ctrl+Q", label: "Quick view", group: Group::View },
+    Item { act: Act::QuickEdit, keys: "Ctrl+E", label: "Quick edit", group: Group::View },
+    Item { act: Act::Save, keys: "Ctrl+S", label: "Save", group: Group::View },
+    Item { act: Act::Discard, keys: "Ctrl+D", label: "Discard", group: Group::View },
+    Item { act: Act::LeaveEdit, keys: "Ctrl+V", label: "Leave edit", group: Group::View },
     Item { act: Act::Syntax, keys: "Ctrl+Y", label: "Syntax", group: Group::View },
     Item { act: Act::Terminal, keys: "F9", label: "Terminal in other panel", group: Group::View },
     Item { act: Act::NewShell, keys: "Ctrl+F9", label: "New shell", group: Group::View },
@@ -385,6 +417,7 @@ const CATALOG: &[Item] = &[
     Item { act: Act::ListerHex, keys: "3", label: "Hex", group: Group::View },
     Item { act: Act::ListerAnsi, keys: "A", label: "Ansi", group: Group::View },
     Item { act: Act::ListerAscii, keys: "S / D", label: "Ascii", group: Group::View },
+    Item { act: Act::ListerJson, keys: "Shift+J", label: "JSON", group: Group::View },
 ];
 
 #[cfg(test)]

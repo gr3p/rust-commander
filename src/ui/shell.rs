@@ -386,6 +386,22 @@ pub fn blink_drive(button: &gtk::Button) {
 }
 
 /// Blinks the button and runs `action` once the blink is over, so it stays visible even when the action closes the window.
+pub fn on_escape(win: &gtk::Window, action: impl Fn() + 'static) {
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    keys.connect_key_pressed(move |_, key, _, mods| {
+        if mods.contains(gtk::gdk::ModifierType::CONTROL_MASK) || mods.contains(gtk::gdk::ModifierType::ALT_MASK) {
+            return gtk::glib::Propagation::Proceed;
+        }
+        if key == gtk::gdk::Key::Escape {
+            action();
+            return gtk::glib::Propagation::Stop;
+        }
+        gtk::glib::Propagation::Proceed
+    });
+    win.add_controller(keys);
+}
+
 pub fn on_click(button: &gtk::Button, action: impl Fn() + 'static) {
     let action = Rc::new(action);
     let pending = Rc::new(Cell::new(false));
@@ -766,6 +782,14 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     filter.connect_changed(move |entry| {
         tx.emit(super::msg::Msg::FilterChanged(index, entry.text().to_string()));
     });
+    let focus = gtk::EventControllerFocus::new();
+    let filter_leave = filter.clone();
+    focus.connect_leave(move |_| {
+        if filter_leave.text().is_empty() {
+            filter_leave.set_visible(false);
+        }
+    });
+    filter.add_controller(focus);
     let store = gio::ListStore::new::<EntryObject>();
     let selection = gtk::SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(false);

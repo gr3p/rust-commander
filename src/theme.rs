@@ -277,9 +277,18 @@ pub fn list_background(p: &Palette, color: &str, image: &str, strength: u8, stre
 
 fn selected_rows(p: &Palette) -> String {
     format!(
-        "frame.pane columnview > listview > row:selected,\nframe.pane columnview > listview > row:selected > cell {{\n  background: {sel};\n  color: {bright};\n}}\n",
+        "frame.pane-active columnview > listview > row:selected,\nframe.pane-active columnview > listview > row:selected > cell {{\n  background: {sel};\n  color: {bright};\n}}\n",
         sel = p.selection,
         bright = p.bright,
+    )
+}
+
+// The filled bar belongs to the pane that has focus. The other pane keeps its place without that bar.
+pub fn cursor_bar(fallback: &str, color: &str, alpha: u8, text: &str) -> String {
+    let color = hex_color(color).unwrap_or(fallback);
+    let opacity = f64::from(alpha.min(100)) / 100.0;
+    format!(
+        "frame.pane columnview > listview > row:selected,\nframe.pane columnview > listview > row:selected > cell {{\n  background-color: transparent;\n  background-image: none;\n  color: {text};\n}}\nframe.pane-active columnview > listview > row:selected,\nframe.pane-active columnview > listview > row:selected > cell {{\n  background-color: alpha({color}, {opacity:.2});\n  background-image: none;\n}}\n"
     )
 }
 
@@ -502,11 +511,20 @@ button.command {{
   padding: 1px 4px;
   min-height: 0;
 }}
+button.command-on label {{
+  font-size: 15px;
+}}
 button.command:hover {{
   background: {sel};
 }}
-button.command:disabled {{
-  opacity: 0.38;
+button.command-idle label {{
+  color: {fg};
+}}
+button.command-idle label.cmd-key {{
+  color: {accent};
+}}
+button.command-idle:hover {{
+  background: transparent;
 }}
 dropdown.editor-pick > button {{
   background: {sel};

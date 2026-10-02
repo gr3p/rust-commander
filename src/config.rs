@@ -49,6 +49,8 @@ pub struct Config {
     pub rar: String,
     #[serde(default = "default_true")]
     pub mode_buttons: bool,
+    #[serde(default = "default_true")]
+    pub command_bar: bool,
     #[serde(default)]
     pub file_icons: bool,
     #[serde(default = "default_icon_pack")]
@@ -57,6 +59,10 @@ pub struct Config {
     pub flash_feedback: bool,
     #[serde(default = "default_true")]
     pub syntax_highlight: bool,
+    #[serde(default)]
+    pub cursor_color: String,
+    #[serde(default = "default_cursor_alpha")]
+    pub cursor_alpha: u8,
 }
 
 fn default_theme() -> String {
@@ -79,6 +85,10 @@ fn default_opaque() -> u8 {
     100
 }
 
+fn default_cursor_alpha() -> u8 {
+    70
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -97,10 +107,13 @@ impl Default for Config {
             seven_zip: String::new(),
             rar: String::new(),
             mode_buttons: true,
+            command_bar: true,
             file_icons: false,
             icon_pack: default_icon_pack(),
             flash_feedback: true,
             syntax_highlight: true,
+            cursor_color: String::new(),
+            cursor_alpha: default_cursor_alpha(),
         }
     }
 }

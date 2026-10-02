@@ -21,7 +21,7 @@ impl App {
     pub(in crate::ui::app) fn apply_css(&self, palette: &Palette) {
         let image = self.background_path();
         let sheet = format!(
-            "window, label, entry, button {{ font-family: \"JetBrainsMono Nerd Font\", \"JetBrains Mono\", \"Noto Sans CJK SC\", monospace; font-size: 13px; }}\ntextview, textview text {{ font-family: \"DejaVu Sans Mono\", \"JetBrains Mono\", monospace; font-size: 13px; }}\n{}{}",
+            "window, label, entry, button {{ font-family: \"JetBrainsMono Nerd Font\", \"JetBrains Mono\", \"Noto Sans CJK SC\", monospace; font-size: 13px; }}\ntextview, textview text {{ font-family: \"DejaVu Sans Mono\", \"JetBrains Mono\", monospace; font-size: 13px; }}\n{}{}{}",
             theme::stylesheet(palette),
             theme::list_background(
                 palette,
@@ -30,6 +30,7 @@ impl App {
                 self.cfg.background_alpha,
                 self.cfg.background_stretch,
             ),
+            theme::cursor_bar(&palette.accent, &self.cfg.cursor_color, self.cfg.cursor_alpha, &palette.foreground),
         );
         self.shell.css.load_from_data(&sheet);
         let name = theme::active_name(&self.cfg.theme, &config::active_theme_path());
@@ -185,6 +186,15 @@ impl App {
             tx_hints.emit(Msg::ToggleModeButtons);
         });
         hints_row.add_controller(click);
+        let (commands_bar_row, commands) = settings_row("Command bar", self.cfg.command_bar);
+        let tx_commands = tx.clone();
+        let flash = commands_bar_row.clone();
+        let click = gtk::GestureClick::new();
+        click.connect_released(move |_, _, _, _| {
+            crate::ui::shell::blink_widget(flash.upcast_ref());
+            tx_commands.emit(Msg::ToggleCommandBar);
+        });
+        commands_bar_row.add_controller(click);
         let (icons_row, icons) = settings_row("File icons", self.cfg.file_icons);
         let tx_icons = tx.clone();
         let flash = icons_row.clone();
@@ -218,6 +228,7 @@ impl App {
         column.append(&columns_row);
         column.append(&hidden_row);
         column.append(&hints_row);
+        column.append(&commands_bar_row);
         column.append(&icons_row);
         column.append(&syntax_row);
         column.append(&flash_row);
@@ -290,10 +301,44 @@ impl App {
         strength.connect_value_changed(move |scale| tx_strength.emit(Msg::BackgroundAlpha(scale.value().round() as u8)));
         strength_row.append(&strength_name);
         strength_row.append(&strength);
+        let cursor_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        cursor_row.add_css_class("settings-row");
+        let cursor_name = gtk::Label::new(Some("Cursor color"));
+        cursor_name.set_xalign(0.0);
+        cursor_name.set_hexpand(true);
+        let cursor_btn = gtk::ColorDialogButton::new(Some(gtk::ColorDialog::new()));
+        let cursor_flash = cursor_btn.clone();
+        let cursor_shown = if self.cfg.cursor_color.is_empty() { palette.accent.as_str() } else { self.cfg.cursor_color.as_str() };
+        if let Ok(rgba) = gtk::gdk::RGBA::parse(cursor_shown) {
+            cursor_btn.set_rgba(&rgba);
+        }
+        let tx_cursor = tx.clone();
+        cursor_btn.connect_rgba_notify(move |btn| {
+            crate::ui::shell::blink_widget(cursor_flash.upcast_ref());
+            tx_cursor.emit(Msg::CursorColor(hex_rgb(&btn.rgba())));
+        });
+        cursor_row.append(&cursor_name);
+        cursor_row.append(&cursor_btn);
+        let cursor_alpha_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        cursor_alpha_row.add_css_class("settings-row");
+        let cursor_alpha_name = gtk::Label::new(Some("Cursor opacity"));
+        cursor_alpha_name.set_xalign(0.0);
+        let cursor_alpha = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
+        cursor_alpha.set_value(f64::from(self.cfg.cursor_alpha));
+        cursor_alpha.set_digits(0);
+        cursor_alpha.set_hexpand(true);
+        cursor_alpha.set_draw_value(true);
+        cursor_alpha.set_value_pos(gtk::PositionType::Right);
+        let tx_cursor_alpha = tx.clone();
+        cursor_alpha.connect_value_changed(move |scale| tx_cursor_alpha.emit(Msg::CursorAlpha(scale.value().round() as u8)));
+        cursor_alpha_row.append(&cursor_alpha_name);
+        cursor_alpha_row.append(&cursor_alpha);
         column.append(&color_row);
         column.append(&image_row);
         column.append(&stretch_row);
         column.append(&strength_row);
+        column.append(&cursor_row);
+        column.append(&cursor_alpha_row);
         column.append(&tool_row("7-Zip", rust_commander::pack::SEVEN_ZIP_HINT, &self.cfg.seven_zip, "/usr/bin/7z", tx.clone(), true));
         column.append(&tool_row("RAR", rust_commander::pack::RAR_HINT, &self.cfg.rar, "/usr/bin/rar", tx.clone(), false));
         column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
@@ -324,6 +369,7 @@ impl App {
             columns,
             hidden,
             hints,
+            commands,
             icons,
             syntax,
             flash: flash_switch,
@@ -461,6 +507,13 @@ impl App {
         self.paint_lister_syntax();
     }
 
+    pub(in crate::ui::app) fn toggle_command_bar(&mut self) {
+        self.cfg.command_bar = !self.cfg.command_bar;
+        let _ = config::save(&self.cfg);
+        self.shell.mode_bar.set_visible(self.cfg.command_bar);
+        self.paint_settings_switch();
+    }
+
     pub(in crate::ui::app) fn toggle_mode_buttons(&mut self) {
         self.cfg.mode_buttons = !self.cfg.mode_buttons;
         let _ = config::save(&self.cfg);
@@ -505,6 +558,7 @@ impl App {
         paint_switch(&ui.columns, self.cfg.auto_columns);
         paint_switch(&ui.hidden, self.state.show_hidden);
         paint_switch(&ui.hints, self.cfg.mode_buttons);
+        paint_switch(&ui.commands, self.cfg.command_bar);
         paint_switch(&ui.icons, self.cfg.file_icons);
         paint_switch(&ui.syntax, self.cfg.syntax_highlight);
         paint_switch(&ui.flash, self.cfg.flash_feedback);
@@ -590,6 +644,25 @@ impl App {
             return;
         }
         self.cfg.background_color = color;
+        let _ = config::save(&self.cfg);
+        self.restyle();
+    }
+
+    pub(in crate::ui::app) fn set_cursor_color(&mut self, color: String) {
+        if self.cfg.cursor_color == color {
+            return;
+        }
+        self.cfg.cursor_color = color;
+        let _ = config::save(&self.cfg);
+        self.restyle();
+    }
+
+    pub(in crate::ui::app) fn set_cursor_alpha(&mut self, alpha: u8) {
+        let alpha = alpha.min(100);
+        if self.cfg.cursor_alpha == alpha {
+            return;
+        }
+        self.cfg.cursor_alpha = alpha;
         let _ = config::save(&self.cfg);
         self.restyle();
     }
@@ -872,12 +945,16 @@ fn command_button(
     button.set_child(Some(&row));
     let act = item.act;
     let on = rust_commander::commands::applies(act, &cue);
-    button.set_sensitive(on);
     if on {
+        button.add_css_class("command-on");
         crate::ui::shell::on_click(&button, move || {
             win.close();
-            tx.emit(Msg::Run(act));
+            if act != rust_commander::commands::Act::Commands {
+                tx.emit(Msg::Run(act));
+            }
         });
+    } else {
+        button.add_css_class("command-idle");
     }
     button
 }
