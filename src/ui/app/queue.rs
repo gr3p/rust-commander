@@ -24,6 +24,7 @@ pub(in crate::ui::app) struct QueueUi {
     running: Option<(String, Job)>,
     pause: Arc<AtomicBool>,
     conflict: Option<gtk::Window>,
+    closed: gtk::glib::SignalHandlerId,
 }
 
 struct Task {
@@ -180,10 +181,11 @@ impl App {
             paint(queue);
             return;
         }
-        // Taken first, so the close handler finds no queue.
-        let window = queue.window.clone();
-        self.queue = None;
-        window.close();
+        // Its close handler goes first, so a late QueueClosed can never tear down a newer queue.
+        if let Some(QueueUi { window, closed, .. }) = self.queue.take() {
+            window.disconnect(closed);
+            window.close();
+        }
     }
 }
 
@@ -229,7 +231,7 @@ fn queue_window(parent: &gtk::Window, tx: relm4::Sender<Msg>) -> QueueUi {
     let tx_cancel = tx.clone();
     crate::ui::shell::on_click(&cancel, move || tx_cancel.emit(Msg::QueueCancel));
     // Closing the window cancels the running job and drops the rest.
-    window.connect_close_request(move |_| {
+    let closed = window.connect_close_request(move |_| {
         tx.emit(Msg::QueueClosed);
         gtk::glib::Propagation::Proceed
     });
@@ -252,5 +254,6 @@ fn queue_window(parent: &gtk::Window, tx: relm4::Sender<Msg>) -> QueueUi {
         running: None,
         pause: Arc::new(AtomicBool::new(false)),
         conflict: None,
+        closed,
     }
 }

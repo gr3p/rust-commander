@@ -8,7 +8,6 @@ use relm4::gtk::prelude::*;
 use relm4::prelude::*;
 use relm4::RelmWidgetExt;
 
-use rust_commander::config::{self};
 use rust_commander::ops::{self, Choice, Kind, Report};
 use rust_commander::state::PaneId;
 
@@ -37,16 +36,33 @@ impl App {
         let JobOut { cancel, progress_tx, done_tx, .. } = pipes;
         spawn_worker(move || {
             let total = paths.len() as u64;
+            let mut gone = 0u64;
             for (done, path) in paths.iter().enumerate() {
                 if cancel.load(Ordering::Relaxed) {
                     let _ = done_tx.send(Ok(Report { cancelled: true, files: done as u64 }));
                     return;
                 }
                 let _ = progress_tx.send(ops::Progress { done: done as u64, total, current: path.clone(), note: String::new() });
-                let result = ops::delete_paths(std::slice::from_ref(path), permanent, &mut |path| gio_trash(path));
-                if let Err(err) = result {
-                    let _ = done_tx.send(Err(format!("{}: {err}", path.display())));
-                    return;
+                // Entry by entry, so one big folder still shows progress and Cancel stops it.
+                let result = if permanent {
+                    ops::remove_tree(path, &cancel, &mut |entry| {
+                        gone += 1;
+                        let note = format!("{gone} deleted  {}", entry.display());
+                        let _ = progress_tx.send(ops::Progress { done: done as u64, total, current: entry.to_path_buf(), note });
+                    })
+                } else {
+                    gio_trash(path)
+                };
+                match result {
+                    Err(_) if cancel.load(Ordering::Relaxed) => {
+                        let _ = done_tx.send(Ok(Report { cancelled: true, files: done as u64 }));
+                        return;
+                    }
+                    Err(err) => {
+                        let _ = done_tx.send(Err(format!("{}: {err}", path.display())));
+                        return;
+                    }
+                    Ok(()) => {}
                 }
             }
             let _ = done_tx.send(Ok(Report { cancelled: false, files: total }));
@@ -59,7 +75,6 @@ impl App {
             let Some(job) = self.job.as_mut() else { return };
             let mut line = None;
             let mut broken: Option<(u64, String)> = None;
-            let mut show = false;
             let mut fraction: Option<Option<f64>> = None;
             let mut amount = None;
             // Only the newest progress is shown. Each one carries the totals so far.
@@ -96,7 +111,6 @@ impl App {
                 } else if matches!(job.work, Work::Verify) && progress.total > 0 {
                     amount = Some(format!("{} / {}", progress.done, progress.total));
                 }
-                show = job.started.elapsed() > Duration::from_millis(200);
             }
             let conflict = if job.conflict_open { None } else { job.conflict_rx.try_recv().ok() };
             if conflict.is_some() {
@@ -107,6 +121,8 @@ impl App {
                 Err(mpsc::TryRecvError::Disconnected) => Some(Err("stopped".into())),
                 Err(mpsc::TryRecvError::Empty) => None,
             };
+            // By time, not by message: a job that counts or deletes one big folder sends almost none.
+            let show = done.is_none() && !job.conflict_open && job.started.elapsed() > Duration::from_millis(200);
             (line, broken, show, fraction, amount, conflict, done)
         };
         let (line, broken, show, fraction, amount, conflict, done) = polled;
@@ -183,6 +199,8 @@ impl App {
                     Work::Unpack if err.starts_with("Skipped ") => "Unpack",
                     Work::Unpack => "Unpack failed",
                     Work::Pack => "Pack failed",
+                    // The SFV was written; only some names could not go into it.
+                    Work::Sfv if err.starts_with("Skipped ") => "SFV created",
                     Work::Sfv => "SFV failed",
                     Work::Verify | Work::Transfer | Work::Delete => "Failed",
                 };
@@ -770,7 +788,8 @@ impl App {
         } else {
             self.cfg.rar = path;
         }
-        let _ = config::save(&self.cfg);
+        // Called on every keystroke in the field.
+        self.save_soon();
     }
 
     pub(in crate::ui::app) fn show_error(&mut self, title: &str, text: &str) {
@@ -1151,7 +1170,7 @@ pub(in crate::ui::app) fn gio_trash(path: &Path) -> std::io::Result<()> {
         };
         let moved = (|| {
             write!(note, "[Trash Info]\nPath={}\nDeletionDate={when}\n", uri.trim_start_matches("file://"))?;
-            match std::fs::rename(path, &dest) {
+            match ops::rename_noreplace(path, &dest) {
                 Err(err) if err.raw_os_error() == Some(libc::EXDEV) => {
                     let meta = std::fs::symlink_metadata(path)?;
                     if meta.file_type().is_symlink() {
@@ -1166,13 +1185,20 @@ pub(in crate::ui::app) fn gio_trash(path: &Path) -> std::io::Result<()> {
                     } else {
                         return Err(err);
                     }
-                    std::fs::remove_file(path)
+                    // Without its .trashinfo the copy would stay in the trash for good.
+                    std::fs::remove_file(path).inspect_err(|_| {
+                        let _ = std::fs::remove_file(&dest);
+                    })
                 }
                 other => other,
             }
         })();
         if moved.is_err() {
             let _ = std::fs::remove_file(&info_path);
+        }
+        // The name was taken after the check above.
+        if moved.as_ref().is_err_and(|err| err.kind() == std::io::ErrorKind::AlreadyExists) {
+            continue;
         }
         return moved;
     }

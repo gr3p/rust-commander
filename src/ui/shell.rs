@@ -60,6 +60,8 @@ pub struct Shell {
     pub shells: Vec<PanelShell>,
     pub shell_current: Option<u64>,
     pub shell_seq: u64,
+    // For widgets built later, such as tab buttons.
+    pub sender: relm4::Sender<super::msg::Msg>,
 }
 
 pub struct Hint {
@@ -254,6 +256,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
         shells: Vec::new(),
         shell_current: None,
         shell_seq: 1,
+        sender: sender.clone(),
     }
 }
 
@@ -593,20 +596,23 @@ fn edit_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
     use gtk::gdk::Key;
     let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
     let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
-    // Escape and Ctrl+V leave edit. Ctrl+Q leaves quick view once the text is saved.
-    // Ctrl+D discards. Ctrl+S saves. Ctrl+Y toggles syntax. Ctrl+L edits the path. Ctrl+E stays out of the text. F1 opens commands.
+    // Escape and Ctrl+E leave edit. Ctrl+V pastes. Ctrl+Q leaves quick view once the text is saved.
+    // Ctrl+D discards. Ctrl+S saves. Ctrl+Y toggles syntax. Ctrl+L edits the path. F1 opens commands.
     (!ctrl && !alt && key == Key::F1)
         || key == Key::Escape
-        || (ctrl && !alt && matches!(key, Key::s | Key::S | Key::v | Key::V | Key::e | Key::E | Key::d | Key::D | Key::q | Key::Q | Key::y | Key::Y | Key::l | Key::L))
+        || (ctrl && !alt && matches!(key, Key::s | Key::S | Key::e | Key::E | Key::d | Key::D | Key::q | Key::Q | Key::y | Key::Y | Key::l | Key::L))
 }
 
 fn terminal_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
     use gtk::gdk::Key;
     let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+    let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
     let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
     // Escape stays in the shell (vim, fzf). F9 toggles back to the file list. F1 opens commands.
+    // Ctrl+W is delete-word in readline, so only Ctrl+Shift+W closes the shell.
     (!ctrl && !alt && matches!(key, Key::F1 | Key::F9))
-        || (ctrl && !alt && matches!(key, Key::q | Key::Q | Key::w | Key::W | Key::F9))
+        || (ctrl && !alt && matches!(key, Key::q | Key::Q | Key::F9))
+        || (ctrl && shift && !alt && matches!(key, Key::w | Key::W))
         || (alt && !ctrl && is_digit_key(key))
 }
 
@@ -622,10 +628,13 @@ fn is_digit_key(key: gtk::gdk::Key) -> bool {
 fn entry_input(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
     use gtk::gdk::Key;
     let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+    let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
     let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
     !is_command(key, mods)
-        || (!alt && matches!(key, Key::Left | Key::Right | Key::KP_Left | Key::KP_Right | Key::Home | Key::End | Key::KP_Home | Key::KP_End | Key::Delete))
+        || (!alt && matches!(key, Key::Left | Key::Right | Key::KP_Left | Key::KP_Right | Key::Home | Key::End | Key::KP_Home | Key::KP_End | Key::Delete | Key::KP_Delete | Key::BackSpace))
         || (ctrl && !alt && matches!(key, Key::a | Key::A | Key::c | Key::C | Key::v | Key::V | Key::x | Key::X | Key::z | Key::Z))
+        // Shift+Insert pastes and Ctrl+Insert copies, as in any GTK entry.
+        || ((shift || ctrl) && !alt && matches!(key, Key::Insert | Key::KP_Insert))
 }
 
 fn is_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
@@ -842,22 +851,29 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     preview_kind.set_vexpand(true);
     let menu = image_menu(sender);
     menu.set_parent(&frame);
+    let terminal_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    terminal_slot.set_hexpand(true);
+    terminal_slot.set_vexpand(true);
     let watch = gtk::EventControllerLegacy::new();
     watch.set_propagation_phase(gtk::PropagationPhase::Capture);
     let tx = sender.clone();
     let active_pane = active_pane.clone();
     let frame_hit = frame.clone();
     let preview_root: gtk::Widget = preview_kind.clone().upcast();
+    let terminal_root: gtk::Widget = terminal_slot.clone().upcast();
     let picture_focus = picture.clone();
     let preview_page = preview_kind.clone();
     watch.connect_event(move |_, event| {
         if event.event_type() != gtk::gdk::EventType::ButtonPress {
             return gtk::glib::Propagation::Proceed;
         }
+        let hit = event.position().and_then(|(x, y)| frame_hit.pick(x, y, gtk::PickFlags::DEFAULT));
+        // The shell lives on the pane that is not active. A click there must not move it away.
+        if hit.as_ref().is_some_and(|hit| under(hit, &terminal_root)) {
+            return gtk::glib::Propagation::Proceed;
+        }
         // The preview is not a file pane. A click there must not hide it.
-        let in_preview = event.position().is_some_and(|(x, y)| {
-            frame_hit.pick(x, y, gtk::PickFlags::DEFAULT).is_some_and(|hit| under(&hit, &preview_root))
-        });
+        let in_preview = hit.as_ref().is_some_and(|hit| under(hit, &preview_root));
         if !in_preview {
             active_pane.set(index);
             tx.emit(super::msg::Msg::FocusPane(index));
@@ -878,9 +894,6 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
         gtk::glib::Propagation::Proceed
     });
     frame.add_controller(watch);
-    let terminal_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    terminal_slot.set_hexpand(true);
-    terminal_slot.set_vexpand(true);
     let stack = gtk::Stack::new();
     stack.add_named(&scroll, Some("list"));
     stack.add_named(&preview_kind, Some("preview"));
@@ -941,6 +954,9 @@ mod tests {
         }
         assert!(entry_input(Key::Left, ModifierType::empty()));
         assert!(entry_input(Key::v, ModifierType::CONTROL_MASK));
+        assert!(entry_input(Key::BackSpace, ModifierType::CONTROL_MASK));
+        assert!(entry_input(Key::Insert, ModifierType::SHIFT_MASK));
+        assert!(!entry_input(Key::Insert, ModifierType::empty()));
         assert!(!entry_input(Key::s, ModifierType::CONTROL_MASK));
         assert!(!entry_input(Key::S, ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK));
         assert!(!entry_input(Key::Escape, ModifierType::empty()));
@@ -956,5 +972,12 @@ mod tests {
         assert!(edit_command(Key::l, ModifierType::CONTROL_MASK));
         assert!(!edit_command(Key::d, ModifierType::empty()));
         assert!(!edit_command(Key::q, ModifierType::empty()));
+        assert!(!edit_command(Key::v, ModifierType::CONTROL_MASK));
+    }
+
+    #[test]
+    fn shell_keeps_ctrl_w() {
+        assert!(!super::terminal_command(Key::w, ModifierType::CONTROL_MASK));
+        assert!(super::terminal_command(Key::W, ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK));
     }
 }

@@ -17,11 +17,14 @@ else
     fi
 fi
 
-cargo test --offline --no-run --test acceptance --message-format=json > /tmp/rust-commander-acceptance.json
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+trap 'exit 1' INT TERM
+cargo test --offline --no-run --test acceptance --message-format=json > "$tmp"
 bin=$(python3 -c '
-import json
+import json, sys
 path=""
-for line in open("/tmp/rust-commander-acceptance.json"):
+for line in open(sys.argv[1]):
     try:
         obj=json.loads(line)
     except json.JSONDecodeError:
@@ -30,7 +33,10 @@ for line in open("/tmp/rust-commander-acceptance.json"):
     if exe and obj.get("target",{}).get("name")=="acceptance":
         path=exe
 print(path)
-')
+' "$tmp")
+# exec below skips the EXIT trap.
+rm -f "$tmp"
+trap - EXIT
 if [ -z "$bin" ] || [ ! -x "$bin" ]; then
     echo "acceptance binary was not built" >&2
     exit 1

@@ -1,9 +1,11 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 pub const WINDOW: usize = 64 * 1024;
 pub const EDIT_MAX: u64 = 1024 * 1024;
+const ROW: u64 = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewMode {
@@ -54,24 +56,36 @@ impl Reader {
     }
 
     pub fn read_window(&mut self) -> io::Result<Vec<u8>> {
-        let mut buf = vec![0u8; WINDOW];
-        let start = self.offset.min(self.len);
-        let mut file = File::open(&self.path)?;
-        file.seek(SeekFrom::Start(start))?;
-        let n = file.read(&mut buf)?;
-        self.bytes_read += n as u64;
-        buf.truncate(n);
+        let mut file = open_regular(&self.path)?;
+        // The file may have grown or shrunk since it was opened.
+        self.len = file.metadata()?.len();
+        self.offset = self.offset.min(self.last_offset());
+        file.seek(SeekFrom::Start(self.offset))?;
+        // One read() can come back short on FUSE or SMB.
+        let mut buf = Vec::with_capacity(WINDOW);
+        file.take(WINDOW as u64).read_to_end(&mut buf)?;
+        self.bytes_read += buf.len() as u64;
         Ok(buf)
     }
 
+    // 0 is F2, a reload, so the size is looked at again.
     pub fn scroll(&mut self, delta: i64) {
-        let next = self.offset as i64 + delta;
-        let next = next.max(0) as u64;
-        self.offset = next.min(self.len);
+        if delta == 0 {
+            if let Some(meta) = fs::metadata(&self.path).ok().filter(|meta| meta.is_file()) {
+                self.len = meta.len();
+            }
+        }
+        let next = (self.offset as i64).saturating_add(delta).max(0) as u64;
+        self.offset = next.min(self.last_offset());
+    }
+
+    // The last full window, on a row so hex (16) and binary (64) rows keep their file offsets.
+    fn last_offset(&self) -> u64 {
+        self.len.saturating_sub(WINDOW as u64).next_multiple_of(ROW)
     }
 
     fn read_all(&mut self) -> io::Result<Vec<u8>> {
-        let file = File::open(&self.path)?;
+        let file = open_regular(&self.path)?;
         let mut buf = Vec::new();
         file.take(JSON_MAX + 1).read_to_end(&mut buf)?;
         self.bytes_read += buf.len() as u64;
@@ -91,8 +105,42 @@ pub fn render_reader(reader: &mut Reader, mode: ViewMode, charset: Charset) -> i
         return Ok(render(ViewMode::Text, Charset::Json, &bytes, 0));
     }
     let bytes = reader.read_window()?;
-    let chosen = choose_charset(reader.file_name(), &bytes, charset);
+    let head = reader.offset > 0;
+    let tail = reader.offset + (bytes.len() as u64) < reader.len;
+    let text = utf8_window(&bytes, head, tail);
+    let chosen = choose_charset(reader.file_name(), text, charset);
+    if mode == ViewMode::Text && chosen == Charset::Utf8 {
+        return Ok(render(mode, chosen, text, reader.offset));
+    }
     Ok(render(mode, chosen, &bytes, reader.offset))
+}
+
+// A window starts and ends at any byte. Drop the part of a character cut at either edge.
+fn utf8_window(bytes: &[u8], head: bool, tail: bool) -> &[u8] {
+    let cont = |b: u8| (0x80..=0xBF).contains(&b);
+    let skip = if head { bytes.iter().take(3).take_while(|&&b| cont(b)).count() } else { 0 };
+    let bytes = &bytes[skip..];
+    if !tail {
+        return bytes;
+    }
+    // A character that is cut short starts in the last 3 bytes.
+    let from = bytes.len().saturating_sub(3);
+    let Some(lead) = bytes[from..].iter().rposition(|&b| !cont(b)).map(|i| from + i) else {
+        return bytes;
+    };
+    match std::str::from_utf8(&bytes[lead..]) {
+        Err(err) if err.error_len().is_none() => &bytes[..lead + err.valid_up_to()],
+        _ => bytes,
+    }
+}
+
+// O_NONBLOCK, so a FIFO with a file's name does not hang the open. Only a regular file is read.
+pub fn open_regular(path: &Path) -> io::Result<File> {
+    let file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a file"));
+    }
+    Ok(file)
 }
 
 fn json_too_large() -> String {
@@ -106,14 +154,17 @@ pub struct TextForm {
 }
 
 pub fn read_for_edit(path: &Path, charset: Charset) -> Result<(String, TextForm), String> {
-    let meta = fs::metadata(path).map_err(|err| err.to_string())?;
-    if !meta.is_file() {
-        return Err("not a file".into());
+    let file = open_regular(path).map_err(|err| err.to_string())?;
+    let too_large = || "File too large to edit".to_string();
+    if file.metadata().map_err(|err| err.to_string())?.len() > EDIT_MAX {
+        return Err(too_large());
     }
-    if meta.len() > EDIT_MAX {
-        return Err("File too large to edit".into());
+    // It can grow after the stat.
+    let mut bytes = Vec::new();
+    file.take(EDIT_MAX + 1).read_to_end(&mut bytes).map_err(|err| err.to_string())?;
+    if bytes.len() as u64 > EDIT_MAX {
+        return Err(too_large());
     }
-    let bytes = fs::read(path).map_err(|err| err.to_string())?;
     let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
     let text = match std::str::from_utf8(&bytes) {
         Ok(text) if choose_charset(name, &bytes, charset) == Charset::Utf8 => text,
@@ -156,7 +207,8 @@ pub fn choose_charset(name: &str, bytes: &[u8], charset: Charset) -> Charset {
     if charset != Charset::Utf8 {
         return charset;
     }
-    if std::str::from_utf8(bytes).is_ok() {
+    // A character cut off at the end of the window is still UTF-8.
+    if std::str::from_utf8(bytes).map_or_else(|err| err.error_len().is_none(), |_| true) {
         return Charset::Utf8;
     }
     if crate::listing::extension(name).eq_ignore_ascii_case("nfo") {
@@ -463,14 +515,14 @@ fn page_char(charset: Charset, b: u8) -> char {
     }
     // 0x80..=0xFF. Undefined Windows-1252 bytes are '.'. ASCII is CP437, the .nfo page.
     let table = match charset {
-        Charset::Ansi => CP1252,
-        _ => CP437,
+        Charset::Ansi => &CP1252,
+        _ => &CP437,
     };
-    table.chars().nth((b - 0x80) as usize).unwrap_or('.')
+    table[(b - 0x80) as usize]
 }
 
-const CP1252: &str = "\u{20ac}\u{002e}\u{201a}\u{0192}\u{201e}\u{2026}\u{2020}\u{2021}\u{02c6}\u{2030}\u{0160}\u{2039}\u{0152}\u{002e}\u{017d}\u{002e}\u{002e}\u{2018}\u{2019}\u{201c}\u{201d}\u{2022}\u{2013}\u{2014}\u{02dc}\u{2122}\u{0161}\u{203a}\u{0153}\u{002e}\u{017e}\u{0178}\u{00a0}\u{00a1}\u{00a2}\u{00a3}\u{00a4}\u{00a5}\u{00a6}\u{00a7}\u{00a8}\u{00a9}\u{00aa}\u{00ab}\u{00ac}\u{00ad}\u{00ae}\u{00af}\u{00b0}\u{00b1}\u{00b2}\u{00b3}\u{00b4}\u{00b5}\u{00b6}\u{00b7}\u{00b8}\u{00b9}\u{00ba}\u{00bb}\u{00bc}\u{00bd}\u{00be}\u{00bf}\u{00c0}\u{00c1}\u{00c2}\u{00c3}\u{00c4}\u{00c5}\u{00c6}\u{00c7}\u{00c8}\u{00c9}\u{00ca}\u{00cb}\u{00cc}\u{00cd}\u{00ce}\u{00cf}\u{00d0}\u{00d1}\u{00d2}\u{00d3}\u{00d4}\u{00d5}\u{00d6}\u{00d7}\u{00d8}\u{00d9}\u{00da}\u{00db}\u{00dc}\u{00dd}\u{00de}\u{00df}\u{00e0}\u{00e1}\u{00e2}\u{00e3}\u{00e4}\u{00e5}\u{00e6}\u{00e7}\u{00e8}\u{00e9}\u{00ea}\u{00eb}\u{00ec}\u{00ed}\u{00ee}\u{00ef}\u{00f0}\u{00f1}\u{00f2}\u{00f3}\u{00f4}\u{00f5}\u{00f6}\u{00f7}\u{00f8}\u{00f9}\u{00fa}\u{00fb}\u{00fc}\u{00fd}\u{00fe}\u{00ff}";
-const CP437: &str = "\u{00c7}\u{00fc}\u{00e9}\u{00e2}\u{00e4}\u{00e0}\u{00e5}\u{00e7}\u{00ea}\u{00eb}\u{00e8}\u{00ef}\u{00ee}\u{00ec}\u{00c4}\u{00c5}\u{00c9}\u{00e6}\u{00c6}\u{00f4}\u{00f6}\u{00f2}\u{00fb}\u{00f9}\u{00ff}\u{00d6}\u{00dc}\u{00a2}\u{00a3}\u{00a5}\u{20a7}\u{0192}\u{00e1}\u{00ed}\u{00f3}\u{00fa}\u{00f1}\u{00d1}\u{00aa}\u{00ba}\u{00bf}\u{2310}\u{00ac}\u{00bd}\u{00bc}\u{00a1}\u{00ab}\u{00bb}\u{2591}\u{2592}\u{2593}\u{2502}\u{2524}\u{2561}\u{2562}\u{2556}\u{2555}\u{2563}\u{2551}\u{2557}\u{255d}\u{255c}\u{255b}\u{2510}\u{2514}\u{2534}\u{252c}\u{251c}\u{2500}\u{253c}\u{255e}\u{255f}\u{255a}\u{2554}\u{2569}\u{2566}\u{2560}\u{2550}\u{256c}\u{2567}\u{2568}\u{2564}\u{2565}\u{2559}\u{2558}\u{2552}\u{2553}\u{256b}\u{256a}\u{2518}\u{250c}\u{2588}\u{2584}\u{258c}\u{2590}\u{2580}\u{03b1}\u{00df}\u{0393}\u{03c0}\u{03a3}\u{03c3}\u{00b5}\u{03c4}\u{03a6}\u{0398}\u{03a9}\u{03b4}\u{221e}\u{03c6}\u{03b5}\u{2229}\u{2261}\u{00b1}\u{2265}\u{2264}\u{2320}\u{2321}\u{00f7}\u{2248}\u{00b0}\u{2219}\u{00b7}\u{221a}\u{207f}\u{00b2}\u{25a0}\u{00a0}";
+const CP1252: [char; 128] = ['\u{20ac}', '\u{002e}', '\u{201a}', '\u{0192}', '\u{201e}', '\u{2026}', '\u{2020}', '\u{2021}', '\u{02c6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{002e}', '\u{017d}', '\u{002e}', '\u{002e}', '\u{2018}', '\u{2019}', '\u{201c}', '\u{201d}', '\u{2022}', '\u{2013}', '\u{2014}', '\u{02dc}', '\u{2122}', '\u{0161}', '\u{203a}', '\u{0153}', '\u{002e}', '\u{017e}', '\u{0178}', '\u{00a0}', '\u{00a1}', '\u{00a2}', '\u{00a3}', '\u{00a4}', '\u{00a5}', '\u{00a6}', '\u{00a7}', '\u{00a8}', '\u{00a9}', '\u{00aa}', '\u{00ab}', '\u{00ac}', '\u{00ad}', '\u{00ae}', '\u{00af}', '\u{00b0}', '\u{00b1}', '\u{00b2}', '\u{00b3}', '\u{00b4}', '\u{00b5}', '\u{00b6}', '\u{00b7}', '\u{00b8}', '\u{00b9}', '\u{00ba}', '\u{00bb}', '\u{00bc}', '\u{00bd}', '\u{00be}', '\u{00bf}', '\u{00c0}', '\u{00c1}', '\u{00c2}', '\u{00c3}', '\u{00c4}', '\u{00c5}', '\u{00c6}', '\u{00c7}', '\u{00c8}', '\u{00c9}', '\u{00ca}', '\u{00cb}', '\u{00cc}', '\u{00cd}', '\u{00ce}', '\u{00cf}', '\u{00d0}', '\u{00d1}', '\u{00d2}', '\u{00d3}', '\u{00d4}', '\u{00d5}', '\u{00d6}', '\u{00d7}', '\u{00d8}', '\u{00d9}', '\u{00da}', '\u{00db}', '\u{00dc}', '\u{00dd}', '\u{00de}', '\u{00df}', '\u{00e0}', '\u{00e1}', '\u{00e2}', '\u{00e3}', '\u{00e4}', '\u{00e5}', '\u{00e6}', '\u{00e7}', '\u{00e8}', '\u{00e9}', '\u{00ea}', '\u{00eb}', '\u{00ec}', '\u{00ed}', '\u{00ee}', '\u{00ef}', '\u{00f0}', '\u{00f1}', '\u{00f2}', '\u{00f3}', '\u{00f4}', '\u{00f5}', '\u{00f6}', '\u{00f7}', '\u{00f8}', '\u{00f9}', '\u{00fa}', '\u{00fb}', '\u{00fc}', '\u{00fd}', '\u{00fe}', '\u{00ff}'];
+const CP437: [char; 128] = ['\u{00c7}', '\u{00fc}', '\u{00e9}', '\u{00e2}', '\u{00e4}', '\u{00e0}', '\u{00e5}', '\u{00e7}', '\u{00ea}', '\u{00eb}', '\u{00e8}', '\u{00ef}', '\u{00ee}', '\u{00ec}', '\u{00c4}', '\u{00c5}', '\u{00c9}', '\u{00e6}', '\u{00c6}', '\u{00f4}', '\u{00f6}', '\u{00f2}', '\u{00fb}', '\u{00f9}', '\u{00ff}', '\u{00d6}', '\u{00dc}', '\u{00a2}', '\u{00a3}', '\u{00a5}', '\u{20a7}', '\u{0192}', '\u{00e1}', '\u{00ed}', '\u{00f3}', '\u{00fa}', '\u{00f1}', '\u{00d1}', '\u{00aa}', '\u{00ba}', '\u{00bf}', '\u{2310}', '\u{00ac}', '\u{00bd}', '\u{00bc}', '\u{00a1}', '\u{00ab}', '\u{00bb}', '\u{2591}', '\u{2592}', '\u{2593}', '\u{2502}', '\u{2524}', '\u{2561}', '\u{2562}', '\u{2556}', '\u{2555}', '\u{2563}', '\u{2551}', '\u{2557}', '\u{255d}', '\u{255c}', '\u{255b}', '\u{2510}', '\u{2514}', '\u{2534}', '\u{252c}', '\u{251c}', '\u{2500}', '\u{253c}', '\u{255e}', '\u{255f}', '\u{255a}', '\u{2554}', '\u{2569}', '\u{2566}', '\u{2560}', '\u{2550}', '\u{256c}', '\u{2567}', '\u{2568}', '\u{2564}', '\u{2565}', '\u{2559}', '\u{2558}', '\u{2552}', '\u{2553}', '\u{256b}', '\u{256a}', '\u{2518}', '\u{250c}', '\u{2588}', '\u{2584}', '\u{258c}', '\u{2590}', '\u{2580}', '\u{03b1}', '\u{00df}', '\u{0393}', '\u{03c0}', '\u{03a3}', '\u{03c3}', '\u{00b5}', '\u{03c4}', '\u{03a6}', '\u{0398}', '\u{03a9}', '\u{03b4}', '\u{221e}', '\u{03c6}', '\u{03b5}', '\u{2229}', '\u{2261}', '\u{00b1}', '\u{2265}', '\u{2264}', '\u{2320}', '\u{2321}', '\u{00f7}', '\u{2248}', '\u{00b0}', '\u{2219}', '\u{00b7}', '\u{221a}', '\u{207f}', '\u{00b2}', '\u{25a0}', '\u{00a0}'];
 
 #[derive(Clone, Debug)]
 pub enum PreviewBody {
@@ -563,6 +615,32 @@ mod tests {
         let big = dir.join("big.txt");
         fs::write(&big, vec![b'a'; EDIT_MAX as usize + 1]).unwrap();
         assert_eq!(read_for_edit(&big, Charset::Utf8).unwrap_err(), "File too large to edit");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn window_edges_drop_cut_characters() {
+        // a, then 2, 3 and 4 byte characters.
+        let text = "a\u{e9}\u{20ac}\u{1f600}".as_bytes();
+        assert_eq!(utf8_window(&text[2..], true, false), "\u{20ac}\u{1f600}".as_bytes());
+        assert_eq!(utf8_window(&text[..8], false, true), "a\u{e9}\u{20ac}".as_bytes());
+        assert_eq!(utf8_window(&text[..8], false, false), &text[..8]);
+        assert_eq!(choose_charset("x.nfo", &text[..8], Charset::Utf8), Charset::Utf8);
+    }
+
+    #[test]
+    fn scroll_stops_at_the_last_full_window() {
+        let dir = scratch("scroll");
+        let path = dir.join("big.bin");
+        fs::write(&path, vec![b'a'; WINDOW + 100]).unwrap();
+        let mut reader = Reader::open(&path).unwrap();
+        reader.scroll(1 << 30);
+        assert_eq!(reader.offset, 128);
+        assert_eq!(reader.read_window().unwrap().len(), WINDOW - 28);
+        fs::write(&path, vec![b'a'; 3 * WINDOW]).unwrap();
+        reader.scroll(0);
+        reader.scroll(1 << 30);
+        assert_eq!(reader.offset, 2 * WINDOW as u64);
         let _ = fs::remove_dir_all(&dir);
     }
 }

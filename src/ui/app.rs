@@ -45,6 +45,7 @@ enum Ask {
     Permanent(Vec<PathBuf>),
     Password,
     Overwrite,
+    Quit,
 }
 
 struct QuickEdit {
@@ -110,6 +111,7 @@ struct ListerUi {
     reader: lister::Reader,
     mode: ViewMode,
     modes: super::shell::CharsetBar,
+    generation: u64,
 }
 
 struct ImageUi {
@@ -192,9 +194,15 @@ pub struct App {
     settings: Option<SettingsUi>,
     command_list: Option<gtk::Window>,
     smoke: bool,
+    // A running job asks before the window closes. `quit_ok` is set once the user agreed.
+    busy: Rc<Cell<bool>>,
+    quit_ok: Rc<Cell<bool>>,
+    save_at: Option<Instant>,
 }
 
 pub fn run(smoke: bool) {
+    // SIGUSR1 kills by default. Catch it before anything slow, so a theme switch during start is harmless.
+    install_usr1();
     gtk::glib::log_set_writer_func(quiet_gdk_vulkan);
     rust_commander::log::info(&format!(
         "start version={} log={}",
@@ -296,8 +304,11 @@ impl SimpleComponent for App {
         }
         // Closing the window with a quick edit open gets the same unsaved-changes guard as Esc.
         let tx = sender.input_sender().clone();
+        let busy = Rc::new(Cell::new(false));
+        let quit_ok = Rc::new(Cell::new(false));
+        let (busy_close, quit_close) = (Rc::clone(&busy), Rc::clone(&quit_ok));
         root.connect_close_request(move |_| {
-            if editing.get() {
+            if !quit_close.get() && (editing.get() || busy_close.get()) {
                 tx.emit(Msg::CloseWindow);
                 return gtk::glib::Propagation::Stop;
             }
@@ -346,6 +357,9 @@ impl SimpleComponent for App {
             settings: None,
             command_list: None,
             smoke,
+            busy,
+            quit_ok,
+            save_at: None,
         };
         model.apply_css(&theme::load_named(&theme::active_name(
             &model.cfg.theme,
@@ -364,7 +378,6 @@ impl SimpleComponent for App {
             tx.emit(Msg::Poll);
             gtk::glib::ControlFlow::Continue
         });
-        install_usr1();
         let tx = sender.input_sender().clone();
         gtk::glib::timeout_add_local(Duration::from_millis(200), move || {
             if take_usr1() {
@@ -386,9 +399,14 @@ impl SimpleComponent for App {
         let idle_poll = matches!(msg, Msg::Poll);
         self.on_msg(msg, &sender);
         self.kick_preview(&sender);
+        self.busy.set(self.job.is_some() || self.queue.is_some());
         if !(idle_poll && self.job.is_none() && !self.dirty.iter().any(|pane| *pane)) {
             self.sync();
         }
+    }
+
+    fn shutdown(&mut self, _widgets: &mut Self::Widgets, _output: relm4::Sender<()>) {
+        self.flush_save();
     }
 }
 
@@ -424,7 +442,18 @@ impl App {
             Msg::FilterChanged(pane, text) => {
                 self.state.pane_mut(PaneId::from_index(pane)).filter = text;
                 self.state.tab_mut(PaneId::from_index(pane)).cursor = 0;
+                self.state.clamp_cursors();
                 self.touch(PaneId::from_index(pane));
+            }
+            Msg::SelectTab(pane, index) => {
+                let id = PaneId::from_index(pane);
+                self.shell.active.set(pane);
+                self.state.active = id;
+                self.state.select_tab(id, index);
+                self.state.clamp_cursors();
+                self.touch(id);
+                self.note_preview_target();
+                self.focus_list();
             }
             Msg::PathGo(pane, text) => self.go_typed_path(pane, &text, sender),
             Msg::CopyShownPath(pane) => self.copy_shown_path(pane),
@@ -454,6 +483,7 @@ impl App {
             Msg::Poll => {
                 self.poll_job(sender);
                 self.poll_queue(sender);
+                self.save_if_due();
             }
             Msg::Enqueue(text) => self.enqueue(&text, sender),
             Msg::QueuePause => self.toggle_queue_pause(),
@@ -467,6 +497,13 @@ impl App {
             Msg::ImageReady { generation, body } => self.show_image(generation, body),
             Msg::ListerOpened { generation, opened } => self.show_lister(generation, opened, sender),
             Msg::ListerText { generation, text } => self.show_lister_text(generation, text),
+            Msg::ListerClosed(generation) => {
+                if self.lister.as_ref().is_some_and(|ui| ui.generation == generation) {
+                    self.lister = None;
+                }
+            }
+            Msg::ListerKey(key, mods) => self.on_lister_key(key, mods, sender),
+            Msg::ImageKey(key, mods) => self.on_image_key(key, mods, sender),
             Msg::ImageClosed(token) => {
                 if self.image.as_ref().is_some_and(|ui| ui.token == token) {
                     self.image_gen = self.image_gen.wrapping_add(1);
@@ -512,11 +549,24 @@ impl App {
             Msg::RefreshActive => self.refresh_active(sender),
             Msg::PreviewImageCopied { generation, image } => self.finish_image_copy(generation, image),
             Msg::ShellExited(id) => self.on_shell_exited(id),
-            Msg::SelectShell(id) => self.select_shell(id),
+            Msg::SelectShell(id) => self.select_shell(id, sender),
             Msg::CloseWindow => {
-                if self.leave_quick_edit(sender) {
-                    self.shell.window.close();
+                if !self.leave_quick_edit(sender) {
+                    return;
                 }
+                if self.job.is_some() || self.queue.is_some() {
+                    // A conflict question is waiting. Closing it here would answer it.
+                    if let Some(dialog) = &self.dialog {
+                        dialog.present();
+                        self.status = "Answer the open dialog first".into();
+                        return;
+                    }
+                    self.ask = Some(Ask::Quit);
+                    self.ask_confirm("A job is still running. Quit and stop it?", sender.input_sender().clone());
+                    return;
+                }
+                self.quit_ok.set(true);
+                self.shell.window.close();
             }
             Msg::ImageStep(delta) => self.step_shown_image(delta, sender),
             Msg::PickBackground => self.pick_background(sender),
@@ -529,7 +579,9 @@ impl App {
             Msg::UnpackPick(dest, names) => self.on_unpack_pick(dest, names, sender),
             Msg::PackPick(dest, opts) => {
                 self.close_dialog();
-                self.confirm_pack(PathBuf::from(dest), opts, sender);
+                // A relative name is taken from the active folder, as for copy and unpack.
+                let dest = self.target_dir(&dest);
+                self.confirm_pack(dest, opts, sender);
             }
             Msg::SetSevenZip(path) => self.set_tool(true, path),
             Msg::SetRar(path) => self.set_tool(false, path),
@@ -588,38 +640,8 @@ impl App {
             }
             return;
         }
-        if self.image.is_some() && !ctrl && !alt {
-            match key {
-                Key::Escape => self.close_image(),
-                Key::s | Key::S => self.toggle_image_scale(sender),
-                Key::Left | Key::KP_Left | Key::Up | Key::KP_Up => self.step_image(-1, sender),
-                Key::Right | Key::KP_Right | Key::Down | Key::KP_Down => self.step_image(1, sender),
-                _ => {}
-            }
-            return;
-        }
         if self.shell.editing.get() && ctrl && !shift && !alt && matches!(key, Key::s | Key::S) {
             self.save_quick();
-            return;
-        }
-        if self.lister.is_some() && !ctrl && !alt {
-            match key {
-                Key::Escape => self.close_lister(),
-                Key::_1 => self.lister_set_mode(ViewMode::Text, sender),
-                Key::_2 => self.lister_set_mode(ViewMode::Binary, sender),
-                Key::_3 => self.lister_set_mode(ViewMode::Hex, sender),
-                Key::a | Key::A => self.set_charset(Charset::Ansi, sender),
-                // S is ASCII/DOS in Total Commander. D does the same.
-                Key::s | Key::S | Key::d | Key::D => self.set_charset(Charset::Ascii, sender),
-                // j scrolls. Shift+J is pretty JSON.
-                Key::J => self.set_charset(Charset::Json, sender),
-                Key::F2 => self.lister_scroll(0, sender),
-                Key::Down | Key::j => self.lister_scroll(64, sender),
-                Key::Up | Key::k => self.lister_scroll(-64, sender),
-                Key::Page_Down => self.lister_scroll(4096, sender),
-                Key::Page_Up => self.lister_scroll(-4096, sender),
-                _ => {}
-            }
             return;
         }
         // Ctrl+Alt+Fn is taken by the virtual terminals.
@@ -659,23 +681,22 @@ impl App {
                 Key::l | Key::L => self.focus_path(),
                 Key::y | Key::Y => self.toggle_syntax(),
                 Key::t | Key::T => self.open_new_tab(sender),
-                Key::w | Key::W => {
-                    if self.shell_has_focus() {
+                // Ctrl+W is delete-word in the shell, so only Ctrl+Shift+W closes it.
+                Key::w | Key::W if self.shell_has_focus() => {
+                    if shift {
                         self.close_current_shell();
-                    } else {
-                        let id = self.state.active;
-                        self.state.close_tab(id);
-                        self.touch(id);
                     }
+                }
+                Key::w | Key::W => {
+                    let id = self.state.active;
+                    self.state.close_tab(id);
+                    self.state.clamp_cursors();
+                    self.touch(id);
                 }
                 Key::d | Key::D if self.shell.editing.get() => self.discard_quick(sender),
                 Key::d | Key::D => self.toggle_hotlist(sender),
-                Key::e | Key::E if self.state.quick_view && !self.shell.editing.get() => {
-                    self.toggle_quick_edit(sender);
-                }
-                Key::v | Key::V if self.state.quick_view && self.shell.editing.get() => {
-                    self.leave_quick_edit(sender);
-                }
+                // Ctrl+E enters and leaves edit. Ctrl+V is paste inside the editor.
+                Key::e | Key::E if self.state.quick_view => self.toggle_quick_edit(sender),
                 Key::q | Key::Q => {
                     if self.shell.editing.get() && !self.leave_quick_edit(sender) {
                         return;
@@ -690,6 +711,7 @@ impl App {
                 Key::Tab | Key::ISO_Left_Tab => {
                     let id = self.state.active;
                     self.state.next_tab(id, shift);
+                    self.state.clamp_cursors();
                     self.touch(id);
                     self.note_preview_target();
                 }
@@ -700,7 +722,7 @@ impl App {
         }
         if alt {
             if let Some(slot) = drive_slot(key) {
-                self.show_shell_index(slot);
+                self.show_shell_index(slot, sender);
                 return;
             }
             match key {
@@ -725,7 +747,7 @@ impl App {
             Key::F5 => self.on_fkey(5, shift, sender),
             Key::F6 => self.on_fkey(6, shift, sender),
             Key::F7 => self.on_fkey(7, shift, sender),
-            Key::F8 | Key::Delete => self.on_fkey(8, shift, sender),
+            Key::F8 | Key::Delete | Key::KP_Delete => self.on_fkey(8, shift, sender),
             Key::F9 if shift => self.start_sfv(sender),
             Key::F9 => self.toggle_panel_terminal(sender),
             Key::ISO_Left_Tab | Key::Tab if self.shell.editing.get() => {}
@@ -734,7 +756,7 @@ impl App {
                 self.note_preview_target();
                 self.focus_list();
             }
-            Key::Insert => {
+            Key::Insert | Key::KP_Insert => {
                 let index = self.state.tab(self.state.active).cursor;
                 self.state.toggle_mark();
                 self.paint_mark(self.state.active, index);
@@ -747,7 +769,7 @@ impl App {
                 self.focus_list();
             }
             Key::BackSpace => self.go_up(sender),
-            Key::Return => self.activate_cursor(sender),
+            Key::Return | Key::KP_Enter => self.activate_cursor(sender),
             Key::Left | Key::KP_Left if self.state.quick_view => self.step_quick_image(-1),
             Key::Right | Key::KP_Right if self.state.quick_view => self.step_quick_image(1),
             Key::Up | Key::KP_Up => self.move_list(-1),
@@ -771,6 +793,57 @@ impl App {
                 self.leave_quick_edit(sender);
             }
             Key::Escape => self.dismiss(),
+            _ => {}
+        }
+    }
+
+    // Keys from the F3 window. They never reach the file panes.
+    fn on_lister_key(&mut self, key: Key, mods: ModifierType, sender: &ComponentSender<Self>) {
+        let ctrl = mods.contains(ModifierType::CONTROL_MASK);
+        let shift = mods.contains(ModifierType::SHIFT_MASK);
+        let alt = mods.contains(ModifierType::ALT_MASK);
+        if ctrl && !alt && matches!(key, Key::w | Key::W) {
+            self.close_lister();
+            return;
+        }
+        if ctrl || alt {
+            return;
+        }
+        match key {
+            Key::Escape => self.close_lister(),
+            Key::_1 | Key::KP_1 => self.lister_set_mode(ViewMode::Text, sender),
+            Key::_2 | Key::KP_2 => self.lister_set_mode(ViewMode::Binary, sender),
+            Key::_3 | Key::KP_3 => self.lister_set_mode(ViewMode::Hex, sender),
+            Key::a | Key::A => self.set_charset(Charset::Ansi, sender),
+            // S is ASCII/DOS in Total Commander. D does the same.
+            Key::s | Key::S | Key::d | Key::D => self.set_charset(Charset::Ascii, sender),
+            // j scrolls. Shift+J is pretty JSON; CapsLock alone gives J without Shift.
+            Key::J | Key::j if shift => self.set_charset(Charset::Json, sender),
+            Key::F2 => self.lister_scroll(0, sender),
+            Key::Down | Key::KP_Down | Key::j | Key::J => self.lister_scroll(64, sender),
+            Key::Up | Key::KP_Up | Key::k | Key::K => self.lister_scroll(-64, sender),
+            Key::Page_Down | Key::KP_Page_Down => self.lister_scroll(4096, sender),
+            Key::Page_Up | Key::KP_Page_Up => self.lister_scroll(-4096, sender),
+            _ => {}
+        }
+    }
+
+    // Keys from the image window.
+    fn on_image_key(&mut self, key: Key, mods: ModifierType, sender: &ComponentSender<Self>) {
+        let ctrl = mods.contains(ModifierType::CONTROL_MASK);
+        let alt = mods.contains(ModifierType::ALT_MASK);
+        if ctrl && !alt && matches!(key, Key::w | Key::W) {
+            self.close_image();
+            return;
+        }
+        if ctrl || alt {
+            return;
+        }
+        match key {
+            Key::Escape => self.close_image(),
+            Key::s | Key::S => self.toggle_image_scale(sender),
+            Key::Left | Key::KP_Left | Key::Up | Key::KP_Up => self.step_image(-1, sender),
+            Key::Right | Key::KP_Right | Key::Down | Key::KP_Down => self.step_image(1, sender),
             _ => {}
         }
     }
@@ -860,10 +933,20 @@ impl App {
                 self.spawn_transfer(items, Kind::Move, sender);
             }
             Some(Ask::CopyAs(src)) => {
-                let dest = src.parent().unwrap_or(Path::new(".")).join(text.trim());
+                // An empty name, `.` or `..` would copy the folder's contents into its parent.
+                let name = text.trim();
+                if name.is_empty() || !Path::new(name).components().all(|part| matches!(part, std::path::Component::Normal(_))) {
+                    self.status = format!("Invalid name: {name:?}");
+                    return;
+                }
+                let dest = src.parent().unwrap_or(Path::new(".")).join(name);
                 self.spawn_transfer(vec![(src, dest)], Kind::Copy, sender);
             }
             Some(Ask::Rename(path)) => {
+                // The prompt shows a lossy name. Unchanged text must not rename a non-UTF-8 file to it.
+                if path.file_name().is_some_and(|name| name.to_string_lossy() == text.trim()) {
+                    return;
+                }
                 match ops::rename_in_place(&path, text.trim()) {
                     Ok(_) => self.refresh_active(sender),
                     Err(err) => self.status = err.to_string(),
@@ -901,6 +984,13 @@ impl App {
             Some(Ask::Permanent(paths)) => self.spawn_delete(paths, true, sender),
             Some(Ask::Password) => self.retry_password(text, sender),
             Some(Ask::Overwrite) => self.confirm_overwrite(sender),
+            Some(Ask::Quit) => {
+                if let Some(job) = &self.job {
+                    job.cancel.store(true, Ordering::Relaxed);
+                }
+                self.quit_ok.set(true);
+                self.shell.window.close();
+            }
             None => {}
         }
     }
@@ -1088,7 +1178,7 @@ impl App {
         let argv = if viewer {
             rust_commander::external::viewer_argv(&self.cfg.viewer, &path)
         } else {
-            rust_commander::external::editor_argv(&self.cfg.editor, std::env::var("EDITOR").ok().as_deref(), &path)
+            rust_commander::external::editor_argv(&self.cfg.editor, rust_commander::external::editor_env().as_deref(), &path)
         };
         if argv.is_empty() {
             self.status = if viewer { "No viewer found".into() } else { "No editor found".into() };
@@ -1344,21 +1434,27 @@ impl App {
                 while let Some(child) = ui.tabs.first_child() {
                     ui.tabs.remove(&child);
                 }
-                for label in &labels {
-                    ui.tabs.append(&gtk::Button::with_label(label));
+                for (index, label) in labels.iter().enumerate() {
+                    let button = gtk::Button::with_label(label);
+                    button.set_focus_on_click(false);
+                    let tx = self.shell.sender.clone();
+                    button.connect_clicked(move |_| tx.emit(Msg::SelectTab(pane, index)));
+                    ui.tabs.append(&button);
                 }
+            }
+            let many_tabs = labels.len() > 1;
+            if gtk::prelude::WidgetExt::is_visible(&ui.tabs) != many_tabs {
+                ui.tabs.set_visible(many_tabs);
             }
             if pane_dirty {
                 rust_commander::log::info(&format!("list reload pane={pane} rows={}", rows.len()));
-                ui.store.remove_all();
-                for (entry, marked) in &rows {
-                    ui.store.append(&EntryObject::from_entry(
-                        entry,
-                        *marked,
-                        self.cfg.file_icons,
-                        crate::ui::iconpack::active(&self.cfg.icon_pack),
-                    ));
-                }
+                let icons = crate::ui::iconpack::active(&self.cfg.icon_pack);
+                let objects: Vec<EntryObject> = rows
+                    .iter()
+                    .map(|(entry, marked)| EntryObject::from_entry(entry, *marked, self.cfg.file_icons, icons))
+                    .collect();
+                // One splice instead of one change signal per row.
+                ui.store.splice(0, ui.store.n_items(), &objects);
                 self.dirty[pane] = false;
                 pending[pane] = Some(rows.iter().map(|(entry, _)| entry.clone()).collect());
             }
@@ -2103,11 +2199,12 @@ fn tabs_current(tabs: &gtk::Box) -> Vec<String> {
 
 fn install_usr1() {
     unsafe {
-        libc::signal(libc::SIGUSR1, on_usr1 as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGUSR1, on_usr1 as extern "C" fn(libc::c_int) as libc::sighandler_t);
     }
 }
 
-fn on_usr1(_: i32) {
+// Runs as a signal handler: only an atomic store is safe here.
+extern "C" fn on_usr1(_: libc::c_int) {
     USR1.store(true, Ordering::Relaxed);
 }
 

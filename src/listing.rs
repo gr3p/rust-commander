@@ -146,13 +146,14 @@ pub fn wildcard_match(pattern: &[char], name: &str) -> bool {
     let (mut pattern_pos, mut name_pos) = (0, 0);
     let (mut star, mut retry_pos) = (None, 0);
     while name_pos < name.len() {
-        if pattern_pos < pattern.len() && (pattern[pattern_pos] == '?' || pattern[pattern_pos] == name[name_pos]) {
-            pattern_pos += 1;
-            name_pos += 1;
-        } else if pattern.get(pattern_pos) == Some(&'*') {
+        // `*` first, or a `*` in the name would use it up as a plain character.
+        if pattern.get(pattern_pos) == Some(&'*') {
             star = Some(pattern_pos);
             pattern_pos += 1;
             retry_pos = name_pos;
+        } else if pattern_pos < pattern.len() && (pattern[pattern_pos] == '?' || pattern[pattern_pos] == name[name_pos]) {
+            pattern_pos += 1;
+            name_pos += 1;
         } else if let Some(star_pos) = star {
             retry_pos += 1;
             name_pos = retry_pos;
@@ -175,7 +176,7 @@ fn cmp_entries(a: &Entry, a_low: &str, b: &Entry, b_low: &str, sort: SortKey, as
     let name = || a_low.cmp(b_low);
     let ord = match sort {
         SortKey::Name => name(),
-        SortKey::Ext => extension(&a.name).cmp(extension(&b.name)).then_with(name),
+        SortKey::Ext => extension(a_low).cmp(extension(b_low)).then_with(name),
         SortKey::Time => a.mtime.cmp(&b.mtime).then_with(name),
         SortKey::Size => a.size.cmp(&b.size).then_with(name),
         SortKey::Attr => (a.mode & 0o7777).cmp(&(b.mode & 0o7777)).then_with(name),
@@ -338,5 +339,24 @@ pub fn entry_path(dir: &Path, entry: &Entry) -> std::path::PathBuf {
         dir.join(&**raw)
     } else {
         dir.join(entry.name.as_ref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn star_in_the_name_still_matches_star() {
+        let pattern: Vec<char> = "a*".chars().collect();
+        assert!(wildcard_match(&pattern, "a*b"));
+        assert!(!wildcard_match(&pattern, "b*a"));
+    }
+
+    #[test]
+    fn extension_sort_ignores_case() {
+        let file = |name: &str| Entry { name: name.into(), raw: None, size: 0, mtime: 0, mode: 0, flags: 0 };
+        let entries = [file("a.JPG"), file("b.bmp")];
+        assert_eq!(visible_indices(&entries, SortKey::Ext, true, true, ""), vec![1, 0]);
     }
 }

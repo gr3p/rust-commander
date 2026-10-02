@@ -1,8 +1,8 @@
-use std::fs;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use image::imageops::FilterType;
-use image::{DynamicImage, ImageReader, Limits};
+use image::{DynamicImage, ImageFormat, ImageReader, Limits};
 
 use crate::entry::Entry;
 use crate::listing;
@@ -45,15 +45,19 @@ pub fn step_index(len: usize, index: usize, delta: isize) -> Option<usize> {
     }
 }
 
+// A FIFO named *.png would block its decode thread for good, so only a regular file is opened.
 pub fn decode(path: &Path, max_edge: u32) -> Result<Rgba, String> {
-    let len = fs::metadata(path).map_err(|err| err.to_string())?.len();
+    let file = crate::lister::open_regular(path).map_err(|err| err.to_string())?;
+    let len = file.metadata().map_err(|err| err.to_string())?.len();
     if len > MAX_BYTES {
         return Err("Image too large".into());
     }
-    let mut reader = ImageReader::open(path)
-        .map_err(|err| err.to_string())?
-        .with_guessed_format()
-        .map_err(|err| err.to_string())?;
+    let mut reader = ImageReader::new(BufReader::new(file));
+    // As ImageReader::open: the extension first, the content wins when it is recognized.
+    if let Ok(format) = ImageFormat::from_path(path) {
+        reader.set_format(format);
+    }
+    let mut reader = reader.with_guessed_format().map_err(|err| err.to_string())?;
     let mut limits = Limits::default();
     limits.max_image_width = Some(16_384);
     limits.max_image_height = Some(16_384);

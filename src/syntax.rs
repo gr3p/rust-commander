@@ -67,8 +67,12 @@ fn language(name: &str, text: &str) -> Option<Lang> {
 
 fn shebang(text: &str) -> Option<Lang> {
     let line = text.lines().next()?.trim();
-    let rest = line.strip_prefix("#!")?;
-    let prog = rest.split_whitespace().last()?.rsplit('/').next()?;
+    // The interpreter, not its flags: `#!/bin/bash -e`, `#!/usr/bin/env -S python3 -u`.
+    let mut words = line.strip_prefix("#!")?.split_whitespace();
+    let mut prog = words.next()?.rsplit('/').next()?;
+    if prog == "env" {
+        prog = words.find(|word| !word.starts_with('-') && !word.contains('='))?.rsplit('/').next()?;
+    }
     if prog.starts_with("python") {
         Some(Lang::Python)
     } else if prog == "bash" || prog == "sh" {
@@ -221,6 +225,9 @@ mod tests {
         assert!(!got.iter().any(|(_, word)| word == "echo"));
         let script = painted("run", "#!/usr/bin/env python3\ndef x():\n    pass\n");
         assert!(script.contains(&(Kind::Keyword, "def".into())));
+        assert_eq!(shebang("#!/bin/bash -e\n"), Some(Lang::Bash));
+        assert_eq!(shebang("#!/usr/bin/env -S python3 -u\n"), Some(Lang::Python));
+        assert_eq!(shebang("#!/usr/bin/env perl -w\n"), None);
         assert!(painted("notes.txt", "def x():\n").is_empty());
     }
 }

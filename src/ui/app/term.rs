@@ -42,6 +42,9 @@ impl App {
             return;
         }
         let cwd = self.state.tab(self.state.active).path.clone();
+        if cwd.to_str().is_none() {
+            self.status = "The shell cannot start in a folder whose name is not UTF-8. It starts in your home folder.".into();
+        }
         let id = self.shell.shell_seq;
         self.shell.shell_seq += 1;
         let term = Terminal::new();
@@ -91,13 +94,17 @@ impl App {
         gtk::prelude::GtkWindowExt::focus(&self.shell.window).is_some_and(|widget| widget.has_css_class("panel-shell"))
     }
 
-    pub(in crate::ui::app) fn show_shell_index(&mut self, index: usize) {
+    pub(in crate::ui::app) fn show_shell_index(&mut self, index: usize, sender: &ComponentSender<Self>) {
         let Some(id) = self.shell.shells.get(index).map(|shell| shell.id) else { return };
-        self.select_shell(id);
+        self.select_shell(id, sender);
     }
 
-    pub(in crate::ui::app) fn select_shell(&mut self, id: u64) {
+    pub(in crate::ui::app) fn select_shell(&mut self, id: u64, sender: &ComponentSender<Self>) {
         if !self.shell.shells.iter().any(|shell| shell.id == id) {
+            return;
+        }
+        // The shell covers the quick editor, so unsaved text gets the same guard as F9.
+        if self.shell.editing.get() && !self.leave_quick_edit(sender) {
             return;
         }
         self.shell.shell_current = Some(id);
@@ -115,10 +122,13 @@ impl App {
         self.shell.shell_buttons.remove(&shell.button);
         if self.shell.shell_current == Some(id) {
             self.shell.shell_current = None;
-            self.state.panel_terminal = false;
-            // Shell lived on the other pane; land there after quit.
-            self.state.active = self.state.active.other();
-            self.focus_list();
+            // A hidden shell that exits must not swap the panes under the user.
+            if self.state.panel_terminal {
+                self.state.panel_terminal = false;
+                // Shell lived on the other pane; land there after quit.
+                self.state.active = self.state.active.other();
+                self.focus_list();
+            }
         }
     }
 
@@ -140,6 +150,14 @@ impl App {
         let Some(shell) = self.shell.shells.iter().find(|shell| shell.id == id) else { return };
         let slot = &self.shell.panes[pane].terminal_slot;
         let term = &shell.term;
+        // The slot shows one shell. Others stay alive, just unparented.
+        let mut child = slot.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            if &widget != term.upcast_ref::<gtk::Widget>() {
+                slot.remove(&widget);
+            }
+        }
         if term.parent().as_ref() == Some(slot.upcast_ref()) {
             return;
         }
@@ -188,12 +206,16 @@ impl App {
 
 fn spawn_shell(term: &Terminal, cwd: &Path, id: u64, tx: relm4::Sender<Msg>, pid_slot: Rc<Cell<Option<i32>>>) {
     let shell = super::shell_bin();
-    let cwd = cwd.to_string_lossy().into_owned();
-    let env_owned: Vec<String> = std::env::vars().map(|(key, value)| format!("{key}={value}")).collect();
+    // A lossy name would make the spawn fail on chdir. Fall back to home, as the status line says.
+    let cwd = cwd.to_str().map(str::to_owned).or_else(|| std::env::var("HOME").ok());
+    // `vars()` panics on a non-UTF-8 variable. Such variables cannot pass through `&str` anyway.
+    let env_owned: Vec<String> = std::env::vars_os()
+        .filter_map(|(key, value)| Some(format!("{}={}", key.into_string().ok()?, value.into_string().ok()?)))
+        .collect();
     let envv: Vec<&str> = env_owned.iter().map(|line| line.as_str()).collect();
     term.spawn_async(
         vte4::PtyFlags::DEFAULT,
-        Some(cwd.as_str()),
+        cwd.as_deref(),
         &[&shell],
         &envv,
         gtk::glib::SpawnFlags::DEFAULT,

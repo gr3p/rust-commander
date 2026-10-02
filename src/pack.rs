@@ -1,7 +1,8 @@
-use std::fs::{self, File};
+use std::ffi::OsString;
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -101,6 +102,10 @@ pub fn pack(
     if sources.is_empty() {
         return Err(Fail::Message("Nothing selected".into()));
     }
+    // A relative path would land in the program's working folder, and could start with '-' for 7z or rar.
+    if !dest.is_absolute() {
+        return Err(Fail::Message(format!("destination is not an absolute path: {}", dest.display())));
+    }
     let password = opts.password.as_deref().filter(|text| !text.is_empty());
     if password.is_some_and(|text| text.contains(['\n', '\r', '\0'])) {
         return Err(Fail::Message("Password cannot contain line breaks".into()));
@@ -172,6 +177,7 @@ fn create_zip(
     };
     let mut done = 0u64;
     let mut files = 0u64;
+    let mut buf = vec![0u8; 1024 * 1024];
     for (path, rel, len) in entries {
         if cancel.load(Ordering::Relaxed) {
             return Err(Fail::Cancelled);
@@ -193,7 +199,6 @@ fn create_zip(
             opts = opts.last_modified_time(time);
         }
         zip.start_file(name, opts)?;
-        let mut buf = vec![0u8; 1024 * 1024];
         loop {
             if cancel.load(Ordering::Relaxed) {
                 return Err(Fail::Cancelled);
@@ -280,7 +285,9 @@ fn run_tool(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(&Progress),
 ) -> Result<u64, Fail> {
-    let list = PathBuf::from(format!("{}.list", part.display()));
+    let mut list = part.as_os_str().to_owned();
+    list.push(".list");
+    let list = PathBuf::from(list);
     // Raw bytes, so a name that is not UTF-8 still names the file.
     let mut body = Vec::new();
     for source in sources {
@@ -289,11 +296,23 @@ fn run_tool(
         if bytes.is_empty() || bytes.contains(&b'\n') {
             return Err(Fail::Message(format!("cannot list {}", source.display())));
         }
+        // Both tools read * and ? in a list file as wildcards, which would pick up other files.
+        if bytes.contains(&b'*') || bytes.contains(&b'?') {
+            return Err(Fail::Message(format!("7z and rar cannot pack a name with * or ?: {}", rel.display())));
+        }
         body.extend_from_slice(bytes);
         body.push(b'\n');
     }
-    fs::write(&list, body)?;
     let run = (|| {
+        // Only we use this name, so a leftover from a crash can go.
+        let _ = fs::remove_file(&list);
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&list)?
+            .write_all(&body)?;
         let mut cmd = Command::new(bin);
         let stdin = if password.is_some() { Stdio::piped() } else { Stdio::null() };
         cmd.current_dir(cwd).stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -305,14 +324,17 @@ fn run_tool(
                 }
             }
             Format::Rar => {
-                cmd.args(["a", "-y", "-idcd"]).arg(format!("-m{}", rar_method(level)));
+                // -ol stores symlinks as links instead of packing what they point at.
+                cmd.args(["a", "-y", "-idcd", "-ol"]).arg(format!("-m{}", rar_method(level)));
                 if password.is_some() {
                     cmd.arg("-hp");
                 }
             }
             Format::Zip => {}
         }
-        cmd.arg(part).arg(format!("@{}", list.display()));
+        let mut at = OsString::from("@");
+        at.push(&list);
+        cmd.arg(part).arg(at);
         use std::os::unix::process::CommandExt;
         // New session without a controlling tty, so password prompts read stdin instead of /dev/tty.
         unsafe {
@@ -365,9 +387,13 @@ fn drive(
     drop(tx);
     let mut err = Vec::new();
     let mut killed = false;
+    let mut reaped = false;
     loop {
         if cancel.load(Ordering::Relaxed) && !killed {
-            kill_group(child);
+            // Once reaped, the group id is free for another process to take.
+            if !reaped {
+                kill_group(child);
+            }
             killed = true;
         }
         match rx.recv_timeout(Duration::from_millis(50)) {
@@ -376,9 +402,10 @@ fn drive(
                 report_percent(&bytes, part, progress);
                 err.extend(bytes);
             }
+            // Keep looping until the readers disconnect; wait() below returns the cached status.
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if child.try_wait()?.is_some() && rx.try_recv().is_err() {
-                    // Keep looping until the readers disconnect.
+                if !reaped {
+                    reaped = child.try_wait()?.is_some();
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,

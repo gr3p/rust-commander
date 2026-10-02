@@ -41,7 +41,7 @@ impl App {
         notebook.append_page(&scrolled(&facts_page(&path, &facts, mime.as_str())), Some(&gtk::Label::new(Some("Properties"))));
         let (attr_page, octal, owner, group, uids, gids) = attr_page(&facts);
         notebook.append_page(&scrolled(&attr_page), Some(&gtk::Label::new(Some("Attributes"))));
-        notebook.append_page(&scrolled(&details_page(&path, &name, mime.as_str())), Some(&gtk::Label::new(Some("Details"))));
+        notebook.append_page(&scrolled(&details_page(&path, &name, &facts, mime.as_str())), Some(&gtk::Label::new(Some("Details"))));
         let error = gtk::Label::new(None);
         error.set_xalign(0.0);
         error.set_wrap(true);
@@ -152,13 +152,14 @@ fn facts_page(path: &std::path::Path, facts: &Facts, mime: &str) -> gtk::Grid {
     grid
 }
 
-fn details_page(path: &std::path::Path, name: &str, mime: &str) -> gtk::Grid {
+fn details_page(path: &std::path::Path, name: &str, facts: &Facts, mime: &str) -> gtk::Grid {
     let grid = gtk::Grid::new();
     grid.set_column_spacing(18);
     grid.set_row_spacing(6);
     grid.set_margin_top(12);
     let mut rows = vec![("Media type".to_string(), mime.to_string())];
-    if rust_commander::imageview::is_image(name) {
+    // The name alone is no proof: a pipe called x.png would block the open.
+    if facts.regular && rust_commander::imageview::is_image(name) {
         if let Some((width, height)) = props::dimensions(path) {
             rows.push(("Width".into(), width.to_string()));
             rows.push(("Height".into(), height.to_string()));

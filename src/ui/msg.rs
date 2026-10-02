@@ -51,6 +51,11 @@ pub enum Msg {
     ImageClosed(u64),
     ListerOpened { generation: u64, opened: Result<(rust_commander::lister::Reader, String), String> },
     ListerText { generation: u64, text: String },
+    ListerClosed(u64),
+    // Keys from the F3 and image windows, kept apart from the main window's keys.
+    ListerKey(Key, ModifierType),
+    ImageKey(Key, ModifierType),
+    SelectTab(usize, usize),
     ReloadTheme,
     PickPlace(usize, std::path::PathBuf),
     Mount(usize, std::path::PathBuf),

@@ -23,6 +23,8 @@ pub struct Facts {
     pub changed: i64,
     pub created: Option<i64>,
     pub symlink: bool,
+    // A regular file, or a link to one. Only these are opened for image details.
+    pub regular: bool,
     pub dev: u64,
     pub ino: u64,
 }
@@ -52,6 +54,7 @@ pub fn read(path: &Path) -> io::Result<Facts> {
         changed: meta.ctime(),
         created: meta.created().ok().and_then(|time| unix_opt(time)),
         symlink,
+        regular: meta.is_file() || (symlink && fs::metadata(path).is_ok_and(|meta| meta.is_file())),
         dev: meta.dev(),
         ino: meta.ino(),
     })
@@ -100,8 +103,23 @@ pub fn apply(path: &Path, facts: &Facts, mode: u32, uid: u32, gid: u32) -> io::R
     Ok(())
 }
 
+// Runs on the UI thread. O_NONBLOCK and the type check after open keep a pipe or device from hanging it.
 pub fn dimensions(path: &Path) -> Option<(u32, u32)> {
-    image::ImageReader::open(path).ok()?.into_dimensions().ok()
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)
+        .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut reader = image::ImageReader::new(io::BufReader::new(file));
+    match image::ImageFormat::from_path(path) {
+        Ok(format) => reader.set_format(format),
+        Err(_) => reader = reader.with_guessed_format().ok()?,
+    }
+    reader.into_dimensions().ok()
 }
 
 pub fn mode_text(mode: u32) -> String {
@@ -304,6 +322,17 @@ mod tests {
         apply(&path, &facts, 0o4755, facts.uid, gid).unwrap();
         assert_eq!(mode(&path), 0o4755);
         assert_eq!(fs::metadata(&path).unwrap().gid(), gid);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pipe_named_like_an_image_does_not_block() {
+        let dir = scratch("fifo");
+        let path = dir.join("x.png");
+        let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        assert!(!read(&path).unwrap().regular);
+        assert_eq!(dimensions(&path), None);
         let _ = fs::remove_dir_all(&dir);
     }
 

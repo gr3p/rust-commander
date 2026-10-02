@@ -374,7 +374,7 @@ const CATALOG: &[Item] = &[
     Item { act: Act::Syntax, keys: "Ctrl+Y", label: "Syntax", group: Group::View },
     Item { act: Act::Terminal, keys: "F9", label: "Terminal in other panel", group: Group::View },
     Item { act: Act::NewShell, keys: "Ctrl+F9", label: "New shell", group: Group::View },
-    Item { act: Act::CloseShell, keys: "Ctrl+W", label: "Close shell", group: Group::View },
+    Item { act: Act::CloseShell, keys: "Ctrl+Shift+W", label: "Close shell", group: Group::View },
     Item { act: Act::SwitchShell, keys: "Alt+1…9", label: "Switch shell", group: Group::View },
     Item { act: Act::ExternalView, keys: "Alt+F3", label: "Viewer", group: Group::View },
     Item { act: Act::CloseView, keys: "Escape", label: "Close view", group: Group::View },

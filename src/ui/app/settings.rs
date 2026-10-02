@@ -143,6 +143,12 @@ impl App {
         win.set_modal(true);
         win.set_transient_for(Some(&self.shell.window));
         win.set_default_width(540);
+        // Closed by the window manager: forget it, so the next F12 opens a new one.
+        let tx_close = tx.clone();
+        win.connect_close_request(move |_| {
+            tx_close.emit(Msg::CloseSettings);
+            gtk::glib::Propagation::Proceed
+        });
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let scroll = gtk::ScrolledWindow::new();
         scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
@@ -414,8 +420,26 @@ impl App {
     }
 
     pub(in crate::ui::app) fn close_settings(&mut self) {
+        self.flush_save();
         if let Some(ui) = self.settings.take() {
             ui.window.close();
+        }
+    }
+
+    // The slider and the tool fields change on every step. Write once they rest.
+    pub(in crate::ui::app) fn save_soon(&mut self) {
+        self.save_at = Some(std::time::Instant::now() + std::time::Duration::from_millis(500));
+    }
+
+    pub(in crate::ui::app) fn flush_save(&mut self) {
+        if self.save_at.take().is_some() {
+            let _ = config::save(&self.cfg);
+        }
+    }
+
+    pub(in crate::ui::app) fn save_if_due(&mut self) {
+        if self.save_at.is_some_and(|at| std::time::Instant::now() >= at) {
+            self.flush_save();
         }
     }
 
@@ -435,6 +459,7 @@ impl App {
         self.state.show_hidden = !self.state.show_hidden;
         self.cfg.show_hidden = self.state.show_hidden;
         let _ = config::save(&self.cfg);
+        self.state.clamp_cursors();
         self.touch_both();
         self.paint_settings_switch();
     }
@@ -600,7 +625,7 @@ impl App {
             return;
         }
         self.cfg.background_alpha = alpha;
-        let _ = config::save(&self.cfg);
+        self.save_soon();
         self.restyle();
     }
 }

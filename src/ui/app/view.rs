@@ -15,6 +15,9 @@ use crate::ui::msg::Msg;
 
 use super::{App, ImageUi, ListerUi, QuickEdit};
 
+// A held arrow key passes images faster than this. Only the one the cursor stops on is decoded.
+const DECODE_DELAY: std::time::Duration = std::time::Duration::from_millis(80);
+
 impl App {
     pub(in crate::ui::app) fn open_viewer(&mut self, sender: &ComponentSender<Self>) {
         let image = self
@@ -65,7 +68,7 @@ impl App {
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let tx = sender.input_sender().clone();
         keys.connect_key_pressed(move |_, key, _, mods| {
-            tx.emit(Msg::Key(key, mods));
+            tx.emit(Msg::ImageKey(key, mods));
             gtk::glib::Propagation::Stop
         });
         window.add_controller(keys);
@@ -93,6 +96,7 @@ impl App {
         live.store(generation, Ordering::Relaxed);
         let tx = sender.input_sender().clone();
         std::thread::spawn(move || {
+            std::thread::sleep(DECODE_DELAY);
             if live.load(Ordering::Relaxed) != generation {
                 return;
             }
@@ -150,8 +154,8 @@ impl App {
         let files = self.image_files(id);
         let Some(index) = files.iter().position(|item| item == &path) else { return };
         let Some(next) = imageview::step_index(files.len(), index, delta) else { return };
-        let Some(name) = files[next].file_name().and_then(|name| name.to_str()) else { return };
-        let name = name.to_string();
+        // Entry names are lossy for non-UTF-8 files, so compare the same way.
+        let Some(name) = files[next].file_name().map(|name| name.to_string_lossy().into_owned()) else { return };
         if self.point_at(id, &name) {
             self.focus_list();
         }
@@ -223,12 +227,23 @@ impl App {
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let tx = sender.input_sender().clone();
         keys.connect_key_pressed(move |_, key, _, mods| {
-            tx.emit(Msg::Key(key, mods));
+            // The text view copies and selects on its own.
+            let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+            if ctrl && matches!(key, gtk::gdk::Key::c | gtk::gdk::Key::C | gtk::gdk::Key::a | gtk::gdk::Key::A | gtk::gdk::Key::Insert) {
+                return gtk::glib::Propagation::Proceed;
+            }
+            tx.emit(Msg::ListerKey(key, mods));
             gtk::glib::Propagation::Stop
         });
         window.add_controller(keys);
+        // Closed by the window manager: the main window must stop sending keys here.
+        let tx = sender.input_sender().clone();
+        window.connect_close_request(move |_| {
+            tx.emit(Msg::ListerClosed(generation));
+            gtk::glib::Propagation::Proceed
+        });
         window.present();
-        self.lister = Some(ListerUi { window, view, reader, mode: ViewMode::Text, modes });
+        self.lister = Some(ListerUi { window, view, reader, mode: ViewMode::Text, modes, generation });
     }
 
     pub(in crate::ui::app) fn toggle_quick_edit(&mut self, sender: &ComponentSender<Self>) {
@@ -451,6 +466,7 @@ impl App {
             live.store(generation, Ordering::Relaxed);
             let edge = if self.quick_fit { imageview::MAX_EDGE } else { u32::MAX };
             std::thread::spawn(move || {
+                std::thread::sleep(DECODE_DELAY);
                 if live.load(Ordering::Relaxed) != generation {
                     return;
                 }
@@ -640,7 +656,7 @@ pub(in crate::ui::app) fn preview_body(path: &Path, max_edge: u32) -> PreviewBod
 
 fn paint_edit(button: &gtk::Button, on: bool) {
     button.set_label(&if on {
-        rust_commander::commands::caption("Ctrl+V", "View")
+        rust_commander::commands::caption("Ctrl+E", "View")
     } else {
         rust_commander::commands::caption("Ctrl+E", "Edit")
     });

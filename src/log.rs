@@ -72,12 +72,14 @@ fn numbered(path: &Path, n: u32) -> PathBuf {
     PathBuf::from(name)
 }
 
+// No home at all is reported on stderr: this is the log.
 fn state_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("XDG_STATE_HOME") {
-        return PathBuf::from(dir).join("rust-commander");
-    }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    home.join(".local/state/rust-commander")
+    let dir = crate::config::xdg_dir("XDG_STATE_HOME", ".local/state").unwrap_or_else(|| {
+        static WARN: std::sync::Once = std::sync::Once::new();
+        WARN.call_once(|| eprintln!("rust-commander: no home directory; the log is kept in ./.local/state"));
+        PathBuf::from(".local/state")
+    });
+    dir.join("rust-commander")
 }
 
 fn stamp() -> String {

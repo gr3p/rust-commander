@@ -3,4 +3,8 @@ name=${1:-}
 dir=${XDG_CONFIG_HOME:-$HOME/.config}/rust-commander
 mkdir -p "$dir"
 printf '%s\n' "$name" > "$dir/active-theme"
-killall -USR1 rust-commander 2>/dev/null || true
+if command -v pkill >/dev/null 2>&1; then
+    pkill -USR1 -x rust-commander 2>/dev/null || true
+else
+    killall -USR1 rust-commander 2>/dev/null || true
+fi

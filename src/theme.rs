@@ -88,13 +88,9 @@ pub fn from_colors_toml(text: &str) -> Option<Palette> {
     })
 }
 
+// The value goes into GTK CSS, so only a real hex color is taken.
 fn color(table: &toml::Table, key: &str) -> Option<String> {
-    let s = table.get(key)?.as_str()?.trim().to_string();
-    if s.starts_with('#') && (s.len() == 7 || s.len() == 4) {
-        Some(s)
-    } else {
-        None
-    }
+    hex_color(table.get(key)?.as_str()?).map(str::to_string)
 }
 
 pub fn active_name(config_theme: &str, active_file: &Path) -> String {
@@ -230,9 +226,11 @@ pub fn css_file_url(path: &str) -> String {
     out
 }
 
+// #rgb or #rrggbb.
 fn hex_color(color: &str) -> Option<&str> {
     let color = color.trim();
-    if color.len() == 7 && color.starts_with('#') && color.bytes().skip(1).all(|b| b.is_ascii_hexdigit()) {
+    let digits = color.strip_prefix('#')?;
+    if matches!(digits.len(), 3 | 6) && digits.bytes().all(|b| b.is_ascii_hexdigit()) {
         Some(color)
     } else {
         None
@@ -601,4 +599,18 @@ entry:focus-within {{
         sel = p.selection,
         bright = p.bright,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_colors_must_be_hex() {
+        assert_eq!(hex_color(" #abc "), Some("#abc"));
+        assert_eq!(hex_color("#00;}*{"), None);
+        assert_eq!(hex_color("#12345g"), None);
+        let text = "background = \"#00;}*{\"\nforeground = \"#fff\"\naccent = \"#123456\"\nselection = \"#222\"\nmuted = \"#333\"\n";
+        assert!(from_colors_toml(text).is_none());
+    }
 }

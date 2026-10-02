@@ -54,15 +54,28 @@ pub fn transfer(
     progress: &mut dyn FnMut(&Progress),
     conflict: &mut dyn FnMut(&Path, &Path) -> Choice,
 ) -> io::Result<Report> {
-    let total: u64 = items.iter().map(|(src, _)| count_entries(src)).sum();
+    // A move within one disk is a single rename, so its tree is never counted.
+    let moved: Vec<bool> = items
+        .iter()
+        .map(|(src, dest)| kind == Kind::Move && !inside(src, dest) && rename_noreplace(src, dest).is_ok())
+        .collect();
+    let total: u64 = items
+        .iter()
+        .zip(&moved)
+        .map(|((src, _), &moved)| if moved { 1 } else { count_entries(src, cancel) })
+        .sum();
     let mut done = 0u64;
     let mut policy = Policy::Ask;
-    for (src, dest) in items {
+    for ((src, dest), &moved) in items.iter().zip(&moved) {
         if cancel.load(Ordering::Relaxed) {
             return Ok(Report {
                 cancelled: true,
                 files: done,
             });
+        }
+        if moved {
+            bump(&mut done, total, dest, progress)?;
+            continue;
         }
         if inside(src, dest) {
             return Err(io::Error::new(
@@ -71,7 +84,7 @@ pub fn transfer(
             ));
         }
         match one(src, dest, kind, &mut policy, cancel, pause, &mut done, total, progress, conflict) {
-            Ok(Stop::Continue) => {}
+            Ok(Stop::Continue | Stop::Again) => {}
             Ok(Stop::Cancel) => {
                 return Ok(Report {
                     cancelled: true,
@@ -96,6 +109,8 @@ pub fn transfer(
 enum Stop {
     Continue,
     Cancel,
+    // The target name was taken after the check, so the item starts over and asks about it.
+    Again,
 }
 
 fn one(
@@ -110,6 +125,28 @@ fn one(
     progress: &mut dyn FnMut(&Progress),
     conflict: &mut dyn FnMut(&Path, &Path) -> Choice,
 ) -> io::Result<Stop> {
+    for _ in 0..3 {
+        match place(src, dest, kind, policy, cancel, pause, done, total, progress, conflict)? {
+            Stop::Again => {}
+            stop => return Ok(stop),
+        }
+    }
+    Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} already exists", dest.display())))
+}
+
+fn place(
+    src: &Path,
+    dest: &Path,
+    kind: Kind,
+    policy: &mut Policy,
+    cancel: &AtomicBool,
+    pause: &AtomicBool,
+    done: &mut u64,
+    total: u64,
+    progress: &mut dyn FnMut(&Progress),
+    conflict: &mut dyn FnMut(&Path, &Path) -> Choice,
+) -> io::Result<Stop> {
+    use std::os::unix::fs::MetadataExt;
     hold(pause, cancel)?;
     if cancel.load(Ordering::Relaxed) {
         return Ok(Stop::Cancel);
@@ -120,7 +157,6 @@ fn one(
 
     let existing = fs::symlink_metadata(dest).ok();
     if let Some(old) = &existing {
-        use std::os::unix::fs::MetadataExt;
         if old.dev() == meta.dev() && old.ino() == meta.ino() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -129,6 +165,7 @@ fn one(
         }
     }
     let merge = is_dir && !is_link && dest.is_dir();
+    let mut replace = false;
     if existing.is_some() && !merge {
         if existing.as_ref().is_some_and(|old| old.is_dir()) {
             return Err(io::Error::new(
@@ -136,23 +173,13 @@ fn one(
                 format!("cannot replace folder {} with a file", dest.display()),
             ));
         }
-        let choice = match *policy {
-            Policy::Ask => conflict(src, dest),
-            Policy::Overwrite => Choice::Overwrite,
-            Policy::Skip => Choice::Skip,
-        };
-        match choice {
+        match decide(policy, conflict, src, dest) {
+            Choice::Overwrite => replace = true,
             Choice::Cancel => return Ok(Stop::Cancel),
-            Choice::Skip => return bump(done, total, src, progress),
-            Choice::SkipAll => {
-                *policy = Policy::Skip;
-                return bump(done, total, src, progress);
-            }
-            Choice::OverwriteAll => *policy = Policy::Overwrite,
-            Choice::Overwrite => {}
+            _ => return bump(done, total, src, progress),
         }
         // A file is replaced by the final rename, so a failed copy keeps the old one.
-        if is_link || is_dir {
+        if !meta.is_file() {
             fs::remove_file(dest)?;
         }
     }
@@ -162,7 +189,10 @@ fn one(
             fs::create_dir_all(parent)?;
         }
         let target = fs::read_link(src)?;
-        std::os::unix::fs::symlink(&target, dest)?;
+        match std::os::unix::fs::symlink(&target, dest) {
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => return Ok(Stop::Again),
+            other => other?,
+        }
         if kind == Kind::Move {
             fs::remove_file(src)?;
         }
@@ -171,9 +201,10 @@ fn one(
 
     if is_dir {
         if kind == Kind::Move && !dest.exists() {
-            let n = count_entries(src);
-            match fs::rename(src, dest) {
-                Ok(()) => return bump_n(done, total, dest, n.max(1), progress),
+            match rename_noreplace(src, dest) {
+                // Counted only to keep the progress in step with the total.
+                Ok(()) => return bump_n(done, total, dest, count_entries(dest, cancel).max(1), progress),
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => return Ok(Stop::Again),
                 Err(err) if err.raw_os_error() == Some(libc::EXDEV) => {}
                 Err(err) => return Err(err),
             }
@@ -184,7 +215,10 @@ fn one(
                 fs::create_dir_all(parent)?;
             }
             // Private until it gets the source mode, so a copy that stops halfway never exposes it.
-            fs::DirBuilder::new().mode(0o700).create(dest)?;
+            match fs::DirBuilder::new().mode(0o700).create(dest) {
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => return Ok(Stop::Again),
+                other => other?,
+            }
         }
         let copied = (|| -> io::Result<Stop> {
             let mut children: Vec<PathBuf> = fs::read_dir(src)?
@@ -221,7 +255,13 @@ fn one(
             return Ok(Stop::Cancel);
         }
         if kind == Kind::Move {
-            let _ = fs::remove_dir(src);
+            // Skipped entries keep the folder. Anything else that stops its removal is an error.
+            match fs::remove_dir(src) {
+                Err(err) if err.raw_os_error() != Some(libc::ENOTEMPTY) => {
+                    return Err(io::Error::new(err.kind(), format!("cannot remove {}: {err}", src.display())));
+                }
+                _ => {}
+            }
         }
         return bump(done, total, src, progress);
     }
@@ -230,29 +270,87 @@ fn one(
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
         }
-        match fs::rename(src, dest) {
+        let moved = if replace { fs::rename(src, dest) } else { rename_noreplace(src, dest) };
+        match moved {
             Ok(()) => return bump(done, total, src, progress),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => return Ok(Stop::Again),
             Err(err) if err.raw_os_error() == Some(libc::EXDEV) => {}
             Err(err) => return Err(err),
         }
     }
-    // Pipes, sockets and devices cannot be copied as data. Opening a pipe would block.
+    // Pipes are made anew. Sockets and devices cannot be copied as data, and opening a pipe would block.
     if !meta.is_file() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+        if !meta.file_type().is_fifo() {
+            // A socket (gpg-agent, a running server) must not stop a whole tree. It stays at the source.
+            crate::log::info(&format!("skip socket or device {}", src.display()));
+            return bump(done, total, src, progress);
+        }
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let c = std::ffi::CString::new(dest.as_os_str().as_bytes())?;
+        if unsafe { libc::mkfifo(c.as_ptr(), 0o600) } != 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::AlreadyExists {
+                return Ok(Stop::Again);
+            }
+            return Err(err);
+        }
+        let _ = fs::set_permissions(dest, fs::Permissions::from_mode(meta.mode() & 0o777));
+        if kind == Kind::Move {
+            fs::remove_file(src)?;
+        }
         return bump(done, total, src, progress);
     }
-    copy_file(src, dest, cancel, pause, |n| {
-        progress(&Progress {
-            done: *done,
-            total,
-            current: src.to_path_buf(),
-            note: String::new(),
-        });
-        let _ = n;
-    })?;
+    // Synced only when something is lost if the copy does not reach the disk: the source or an old target.
+    let kept = copy_file(
+        src,
+        dest,
+        replace,
+        kind == Kind::Move || replace,
+        cancel,
+        pause,
+        |_| {
+            progress(&Progress {
+                done: *done,
+                total,
+                current: src.to_path_buf(),
+                note: String::new(),
+            })
+        },
+        &mut || decide(policy, conflict, src, dest),
+    )?;
+    match kept {
+        Some(Choice::Cancel) => return Ok(Stop::Cancel),
+        Some(_) => return bump(done, total, src, progress),
+        None => {}
+    }
     if kind == Kind::Move {
         fs::remove_file(src)?;
     }
     bump(done, total, src, progress)
+}
+
+// Overwrite, Skip or Cancel. The "all" answers stick for the rest of the job.
+fn decide(policy: &mut Policy, conflict: &mut dyn FnMut(&Path, &Path) -> Choice, src: &Path, dest: &Path) -> Choice {
+    let choice = match *policy {
+        Policy::Ask => conflict(src, dest),
+        Policy::Overwrite => Choice::Overwrite,
+        Policy::Skip => Choice::Skip,
+    };
+    match choice {
+        Choice::OverwriteAll => {
+            *policy = Policy::Overwrite;
+            Choice::Overwrite
+        }
+        Choice::SkipAll => {
+            *policy = Policy::Skip;
+            Choice::Skip
+        }
+        other => other,
+    }
 }
 
 fn bump(
@@ -281,13 +379,18 @@ fn bump_n(
     Ok(Stop::Continue)
 }
 
+/// `None` once published. A target that appears meanwhile goes to `exists`, and a Skip or Cancel
+/// from it comes back with the copy discarded.
 fn copy_file(
     src: &Path,
     dest: &Path,
+    replace: bool,
+    sync: bool,
     cancel: &AtomicBool,
     pause: &AtomicBool,
     mut on_chunk: impl FnMut(u64),
-) -> io::Result<()> {
+    exists: &mut dyn FnMut() -> Choice,
+) -> io::Result<Option<Choice>> {
     use std::os::unix::fs::MetadataExt;
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
@@ -335,22 +438,47 @@ fn copy_file(
                 };
             }
         }
+        // A short copy must never replace a target or let a move delete its source.
+        let written = output.metadata()?.len();
+        if written < meta.len() {
+            return Err(io::Error::other(format!(
+                "{} was copied short: {written} of {} bytes",
+                src.display(),
+                meta.len()
+            )));
+        }
         // Mode and time follow the file. Setuid and setgid do not, since the copy gets a new owner.
         // Some file systems (vfat) refuse both, which must not fail the copy.
         let _ = output.set_permissions(fs::Permissions::from_mode(meta.permissions().mode() & 0o777));
         if let Ok(time) = meta.modified() {
             let _ = output.set_modified(time);
         }
-        output.sync_all()?;
-        drop(output);
-        // Another program may have taken the partial name. Only our own data is published.
-        if fs::symlink_metadata(&partial)?.ino() != ino {
-            return Err(replaced(&partial));
+        if sync {
+            output.sync_all()?;
         }
-        fs::rename(&partial, dest)?;
-        Ok(())
+        drop(output);
+        let mut replace = replace;
+        loop {
+            // Another program may have taken the partial name. Only our own data is published.
+            if fs::symlink_metadata(&partial)?.ino() != ino {
+                return Err(replaced(&partial));
+            }
+            let published = if replace { fs::rename(&partial, dest) } else { rename_noreplace(&partial, dest) };
+            match published {
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => match exists() {
+                    Choice::Overwrite => {
+                        if !sync {
+                            File::open(&partial)?.sync_all()?;
+                        }
+                        replace = true;
+                    }
+                    choice => return Ok(Some(choice)),
+                },
+                other => return other.map(|()| None),
+            }
+        }
     })();
-    if result.is_err() && mine.is_some_and(|ino| fs::symlink_metadata(&partial).is_ok_and(|m| m.ino() == ino)) {
+    if !matches!(result, Ok(None)) && mine.is_some_and(|ino| fs::symlink_metadata(&partial).is_ok_and(|m| m.ino() == ino)) {
         let _ = fs::remove_file(&partial);
     }
     result
@@ -404,6 +532,7 @@ fn copy_loop(
     use std::os::fd::AsRawFd;
     let mut off_in = start as libc::loff_t;
     let mut off_out = off_in;
+    let mut first = true;
     loop {
         if cancel.load(Ordering::Relaxed) {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
@@ -429,9 +558,14 @@ fn copy_loop(
             }
             return Err(err);
         }
+        // Some kernels, FUSE and procfs answer 0 at once for a file that has data.
+        if n == 0 && first {
+            return copy_read_write(input, output, off_in as u64, cancel, pause, on_chunk);
+        }
         if n == 0 {
             return Ok(None);
         }
+        first = false;
         on_chunk(n as u64);
     }
 }
@@ -471,13 +605,24 @@ fn try_reflink(src: &File, dst: &File) -> bool {
 }
 
 pub(crate) fn partial_path(dest: &Path) -> PathBuf {
-    let mut name = std::ffi::OsString::from(".rust-commander-partial-");
-    name.push(dest.file_name().unwrap_or(std::ffi::OsStr::new("file")));
-    dest.with_file_name(name)
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    const PREFIX: &[u8] = b".rust-commander-partial-";
+    let name = dest.file_name().unwrap_or(std::ffi::OsStr::new("file")).as_bytes();
+    let mut out = PREFIX.to_vec();
+    // NAME_MAX is 255 bytes. A longer name keeps its start plus a hash of the whole, so two stay apart.
+    if PREFIX.len() + name.len() > 255 {
+        let hash = name.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3));
+        out.extend_from_slice(&name[..255 - PREFIX.len() - 17]);
+        out.extend_from_slice(format!("~{hash:016x}").as_bytes());
+    } else {
+        out.extend_from_slice(name);
+    }
+    dest.with_file_name(std::ffi::OsString::from_vec(out))
 }
 
 /// Writes through a temp file and a rename, so a crash or a full disk keeps the old file.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
     use std::os::unix::fs::MetadataExt;
     let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let old = fs::metadata(&path).ok();
@@ -487,10 +632,11 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     }
     let temp = partial_path(&path);
     let _ = fs::remove_file(&temp);
+    // Private until it gets the old mode, which only goes on after the data.
     let opened = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o666)
+        .mode(if old.is_some() { 0o600 } else { 0o666 })
         .custom_flags(libc::O_NOFOLLOW)
         .open(&temp);
     let mut file = match opened {
@@ -498,11 +644,21 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         Err(err) if err.kind() == io::ErrorKind::PermissionDenied && old.is_some() => return fs::write(&path, bytes),
         Err(err) => return Err(err),
     };
+    // The temp gets the editor's group. A file shared through its group keeps it, or is written in place.
+    if let Some(old) = &old {
+        let gid = file.metadata().map(|meta| meta.gid()).ok();
+        if gid != Some(old.gid()) && unsafe { libc::fchown(file.as_raw_fd(), libc::uid_t::MAX, old.gid()) } != 0 {
+            drop(file);
+            let _ = fs::remove_file(&temp);
+            return fs::write(&path, bytes);
+        }
+    }
     let result = (|| {
+        file.write_all(bytes)?;
+        // After the data, since a write clears setuid and setgid.
         if let Some(old) = &old {
             file.set_permissions(old.permissions())?;
         }
-        file.write_all(bytes)?;
         file.sync_all()?;
         fs::rename(&temp, &path)
     })();
@@ -519,7 +675,7 @@ fn check_name(name: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn rename_noreplace(src: &Path, dest: &Path) -> io::Result<()> {
+pub fn rename_noreplace(src: &Path, dest: &Path) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let c_src = std::ffi::CString::new(src.as_os_str().as_bytes())?;
     let c_dest = std::ffi::CString::new(dest.as_os_str().as_bytes())?;
@@ -538,7 +694,8 @@ fn rename_noreplace(src: &Path, dest: &Path) -> io::Result<()> {
     fs::rename(src, dest)
 }
 
-fn count_entries(path: &Path) -> u64 {
+// Stops early on cancel. The job sees the flag right after.
+fn count_entries(path: &Path, cancel: &AtomicBool) -> u64 {
     let Ok(meta) = fs::symlink_metadata(path) else {
         return 1;
     };
@@ -548,30 +705,44 @@ fn count_entries(path: &Path) -> u64 {
     let mut n = 1u64;
     if let Ok(rd) = fs::read_dir(path) {
         for child in rd.flatten() {
-            n += count_entries(&child.path());
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            n += count_entries(&child.path(), cancel);
         }
     }
     n
 }
 
 pub fn inside(src: &Path, dest: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
     let src = normalize(src);
     let dest = normalize(dest);
     if dest.starts_with(&src) && dest != src {
         return true;
     }
-    // A pane entered through a symlinked folder hides the nesting from the text.
-    // Only the parent of src is resolved: a symlink src is copied as a link.
-    let (Some(parent), Some(name)) = (src.parent(), src.file_name()) else {
+    let Some(real) = real_path(&dest) else {
         return false;
     };
-    match (fs::canonicalize(parent), real_path(&dest)) {
-        (Ok(parent), Some(dest)) => {
+    // A pane entered through a symlinked folder hides the nesting from the text.
+    // Only the parent of src is resolved: a symlink src is copied as a link.
+    if let (Some(parent), Some(name)) = (src.parent(), src.file_name()) {
+        if let Ok(parent) = fs::canonicalize(parent) {
             let src = parent.join(name);
-            dest.starts_with(&src) && dest != src
+            if real.starts_with(&src) && real != src {
+                return true;
+            }
         }
-        _ => false,
     }
+    // A bind mount shows the same folder under a second path, so only the inode tells.
+    let Ok(meta) = fs::symlink_metadata(&src) else {
+        return false;
+    };
+    meta.is_dir()
+        && real
+            .ancestors()
+            .skip(1)
+            .any(|dir| fs::metadata(dir).is_ok_and(|m| (m.dev(), m.ino()) == (meta.dev(), meta.ino())))
 }
 
 // The real path of the deepest part that exists, with the rest appended as written.
@@ -644,15 +815,237 @@ pub fn delete_paths(
 ) -> io::Result<()> {
     for path in paths {
         if permanent {
-            let meta = fs::symlink_metadata(path)?;
-            if meta.is_dir() && !meta.file_type().is_symlink() {
-                fs::remove_dir_all(path)?;
-            } else {
-                fs::remove_file(path)?;
-            }
+            remove_tree(path, &AtomicBool::new(false), &mut |_| {})?;
         } else {
             trash(path)?;
         }
     }
     Ok(())
+}
+
+/// Deletes for good, entry by entry, so `cancel` stops it and `each` sees every path removed.
+/// A link is removed, never followed, and nothing on another file system is touched.
+pub fn remove_tree(path: &Path, cancel: &AtomicBool, each: &mut dyn FnMut(&Path)) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    if !fs::symlink_metadata(path)?.is_dir() {
+        fs::remove_file(path)?;
+        each(path);
+        return Ok(());
+    }
+    let top = open_dir(libc::AT_FDCWD, &std::ffi::CString::new(path.as_os_str().as_bytes())?)?;
+    let dev = dev_of(&top)?;
+    clear_dir(top, path, dev, cancel, each)?;
+    fs::remove_dir(path)?;
+    each(path);
+    Ok(())
+}
+
+// O_NOFOLLOW: a folder swapped for a link meanwhile fails here instead of being entered.
+fn open_dir(dir: std::os::fd::RawFd, name: &std::ffi::CStr) -> io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+    let fd = unsafe { libc::openat(dir, name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+}
+
+fn dev_of(fd: &std::os::fd::OwnedFd) -> io::Result<libc::dev_t> {
+    use std::os::fd::AsRawFd;
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(st.st_dev)
+}
+
+struct Stream(*mut libc::DIR);
+
+impl Drop for Stream {
+    fn drop(&mut self) {
+        unsafe { libc::closedir(self.0) };
+    }
+}
+
+fn clear_dir(
+    dir: std::os::fd::OwnedFd,
+    path: &Path,
+    dev: libc::dev_t,
+    cancel: &AtomicBool,
+    each: &mut dyn FnMut(&Path),
+) -> io::Result<()> {
+    use std::os::fd::{AsRawFd, IntoRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    let stream = unsafe { libc::fdopendir(dir.as_raw_fd()) };
+    if stream.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // The stream owns the descriptor from here and closes it.
+    let fd = dir.into_raw_fd();
+    let stream = Stream(stream);
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        unsafe { *libc::__errno_location() = 0 };
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            let err = io::Error::last_os_error();
+            return if err.raw_os_error() == Some(0) { Ok(()) } else { Err(err) };
+        }
+        let (name, kind) = unsafe { (std::ffi::CStr::from_ptr((&raw const (*entry).d_name).cast()), (*entry).d_type) };
+        if name == c"." || name == c".." {
+            continue;
+        }
+        let child = path.join(std::ffi::OsStr::from_bytes(name.to_bytes()));
+        remove_at(fd, name, kind == libc::DT_DIR || kind == libc::DT_UNKNOWN, &child, dev, cancel, each)
+            .map_err(|err| if err.kind() == io::ErrorKind::Interrupted { err } else { at_path(err, &child) })?;
+    }
+}
+
+fn remove_at(
+    dir: std::os::fd::RawFd,
+    name: &std::ffi::CStr,
+    maybe_dir: bool,
+    path: &Path,
+    dev: libc::dev_t,
+    cancel: &AtomicBool,
+    each: &mut dyn FnMut(&Path),
+) -> io::Result<()> {
+    if maybe_dir {
+        match open_dir(dir, name) {
+            Ok(sub) => {
+                if dev_of(&sub)? != dev {
+                    return Err(io::Error::other(format!("contains a mount point: {}", path.display())));
+                }
+                clear_dir(sub, path, dev, cancel, each)?;
+                if unsafe { libc::unlinkat(dir, name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                each(path);
+                return Ok(());
+            }
+            Err(err) if matches!(err.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP)) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err),
+        }
+    }
+    if unsafe { libc::unlinkat(dir, name.as_ptr(), 0) } != 0 {
+        let err = io::Error::last_os_error();
+        return match err.raw_os_error() {
+            Some(libc::EISDIR) if !maybe_dir => remove_at(dir, name, true, path, dev, cancel, each),
+            Some(libc::ENOENT) => Ok(()),
+            _ => Err(err),
+        };
+    }
+    each(path);
+    Ok(())
+}
+
+fn at_path(err: io::Error, path: &Path) -> io::Error {
+    // Errors from deeper down already name their path.
+    if err.raw_os_error().is_none() {
+        return err;
+    }
+    io::Error::new(err.kind(), format!("{}: {err}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rc-ops-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn run(items: &[(PathBuf, PathBuf)], kind: Kind, progress: &mut dyn FnMut(&Progress), choice: Choice) -> io::Result<Report> {
+        transfer(items, kind, &AtomicBool::new(false), &AtomicBool::new(false), progress, &mut |_, _| choice)
+    }
+
+    #[test]
+    fn long_names_get_a_partial_that_fits() {
+        let dir = Path::new("/tmp");
+        let a = partial_path(&dir.join("a".repeat(250)));
+        let b = partial_path(&dir.join(format!("{}b", "a".repeat(249))));
+        assert_eq!(a.file_name().unwrap().len(), 255);
+        assert_ne!(a, b);
+        assert_eq!(partial_path(&dir.join("x")), dir.join(".rust-commander-partial-x"));
+        assert_eq!(partial_path(&dir.join("a".repeat(231))).file_name().unwrap().len(), 255);
+    }
+
+    #[test]
+    fn target_that_appears_while_copying_is_asked_about() {
+        let dir = scratch("appears");
+        let (src, dest) = (dir.join("src"), dir.join("dest"));
+        fs::write(&src, b"new").unwrap();
+        let mut sneak = |_: &Progress| {
+            let _ = fs::OpenOptions::new().write(true).create_new(true).open(&dest).and_then(|mut f| f.write_all(b"old"));
+        };
+        run(&[(src.clone(), dest.clone())], Kind::Copy, &mut sneak, Choice::Skip).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"old");
+        assert!(src.exists());
+        let partials = fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains("partial")).count();
+        assert_eq!(partials, 0);
+        run(&[(src.clone(), dest.clone())], Kind::Copy, &mut |_| {}, Choice::Overwrite).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"new");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pipe_is_made_anew_and_socket_is_skipped() {
+        let dir = scratch("special");
+        let fifo = dir.join("fifo");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o640) }, 0);
+        fs::set_permissions(&fifo, fs::Permissions::from_mode(0o640)).unwrap();
+        let out = dir.join("out");
+        run(&[(fifo.clone(), out.join("fifo"))], Kind::Copy, &mut |_| {}, Choice::Overwrite).unwrap();
+        let made = fs::symlink_metadata(out.join("fifo")).unwrap();
+        assert!(made.file_type().is_fifo());
+        assert_eq!(made.mode() & 0o777, 0o640);
+        let _socket = std::os::unix::net::UnixListener::bind(dir.join("sock")).unwrap();
+        assert!(run(&[(dir.join("sock"), out.join("sock"))], Kind::Copy, &mut |_| {}, Choice::Overwrite).is_ok());
+        assert!(fs::symlink_metadata(out.join("sock")).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tree_goes_entry_by_entry_without_following_links() {
+        let dir = scratch("tree");
+        let keep = dir.join("keep");
+        fs::create_dir_all(&keep).unwrap();
+        fs::write(keep.join("precious"), b"p").unwrap();
+        let tree = dir.join("tree");
+        fs::create_dir_all(tree.join("a/b")).unwrap();
+        fs::write(tree.join("a/b/f"), b"f").unwrap();
+        fs::write(tree.join("g"), b"g").unwrap();
+        std::os::unix::fs::symlink(&keep, tree.join("a/link")).unwrap();
+        let cancel = AtomicBool::new(true);
+        let err = remove_tree(&tree, &cancel, &mut |_| {}).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+        assert!(tree.join("g").exists());
+        let mut seen = Vec::new();
+        remove_tree(&tree, &AtomicBool::new(false), &mut |path| seen.push(path.to_path_buf())).unwrap();
+        assert!(!tree.exists());
+        assert_eq!(seen.len(), 6);
+        assert_eq!(seen.last(), Some(&tree));
+        assert!(keep.join("precious").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quick_save_keeps_mode() {
+        let dir = scratch("save");
+        let path = dir.join("run.sh");
+        fs::write(&path, b"old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o4750)).unwrap();
+        write_atomic(&path, b"new").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o7777, 0o4750);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

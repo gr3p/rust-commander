@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -54,6 +55,8 @@ pub struct Tab {
     pub token: u64,
     // The tab stays in the old folder until the listing for `token` arrives.
     pending: Option<(PathBuf, Step)>,
+    // Changes with every new listing, so the visible-row cache knows the entries changed.
+    rev: u64,
 }
 
 impl Tab {
@@ -67,6 +70,7 @@ impl Tab {
             forward: Vec::new(),
             token: fresh_token(),
             pending: None,
+            rev: fresh_token(),
         }
     }
 
@@ -98,6 +102,18 @@ impl Tab {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct VisibleKey {
+    tab: usize,
+    rev: u64,
+    // Covers code that sets `entries` directly instead of through a listing.
+    entries: (usize, usize),
+    sort: SortKey,
+    ascending: bool,
+    show_hidden: bool,
+    filter: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct Pane {
     pub tabs: Vec<Tab>,
@@ -105,6 +121,8 @@ pub struct Pane {
     pub filter: String,
     pub sort: SortKey,
     pub ascending: bool,
+    // `visible` runs several times per key. Large folders are only sorted again when an input changes.
+    visible: RefCell<Option<(VisibleKey, Vec<usize>)>>,
 }
 
 impl Pane {
@@ -115,6 +133,7 @@ impl Pane {
             filter: String::new(),
             sort: SortKey::Name,
             ascending: true,
+            visible: RefCell::new(None),
         }
     }
 
@@ -170,13 +189,24 @@ impl AppState {
 
     pub fn visible(&self, id: PaneId) -> Vec<usize> {
         let pane = self.pane(id);
-        listing::visible_indices(
-            &pane.tab().entries,
-            pane.sort,
-            pane.ascending,
-            self.show_hidden,
-            &pane.filter,
-        )
+        let tab = pane.tab();
+        let key = VisibleKey {
+            tab: pane.active,
+            rev: tab.rev,
+            entries: (tab.entries.as_ptr() as usize, tab.entries.len()),
+            sort: pane.sort,
+            ascending: pane.ascending,
+            show_hidden: self.show_hidden,
+            filter: pane.filter.clone(),
+        };
+        if let Some((cached, vis)) = pane.visible.borrow().as_ref() {
+            if *cached == key {
+                return vis.clone();
+            }
+        }
+        let vis = listing::visible_indices(&tab.entries, pane.sort, pane.ascending, self.show_hidden, &pane.filter);
+        *pane.visible.borrow_mut() = Some((key, vis.clone()));
+        vis
     }
 
     pub fn cursor_entry(&self, id: PaneId) -> Option<&Entry> {
@@ -337,15 +367,23 @@ impl AppState {
             return false;
         };
         let _ = tab_index;
-        if let Some((path, step)) = tab.pending.take() {
+        // Going up lands on the folder you came from.
+        let land = tab.pending.take().and_then(|(path, step)| {
+            let old = tab.path.clone();
             tab.commit(path, step);
-        }
+            let first = old.strip_prefix(&tab.path).ok()?.components().next()?;
+            Some(tab.path.join(first))
+        });
         tab.entries = entries;
-        let vis_len = listing::visible_indices(&tab.entries, sort, ascending, show_hidden, &filter).len();
-        if vis_len == 0 {
+        tab.rev = fresh_token();
+        let vis = listing::visible_indices(&tab.entries, sort, ascending, show_hidden, &filter);
+        if let Some(pos) = land.and_then(|land| vis.iter().position(|&i| listing::entry_path(&tab.path, &tab.entries[i]) == land)) {
+            tab.cursor = pos;
+        }
+        if vis.is_empty() {
             tab.cursor = 0;
-        } else if tab.cursor >= vis_len {
-            tab.cursor = vis_len - 1;
+        } else if tab.cursor >= vis.len() {
+            tab.cursor = vis.len() - 1;
         }
         true
     }
@@ -355,9 +393,25 @@ impl AppState {
         let Some(tab) = self.pane_mut(id).tabs.iter_mut().find(|tab| tab.token == token) else {
             return false;
         };
-        tab.pending = None;
+        // A history entry that cannot load is dropped, so the older ones stay reachable.
+        match tab.pending.take() {
+            Some((_, Step::Back)) => drop(tab.back.pop()),
+            Some((_, Step::Forward)) => drop(tab.forward.pop()),
+            _ => {}
+        }
         tab.token = fresh_token();
         true
+    }
+
+    // Hidden files, the filter or a tab switch can shrink the list under the cursor.
+    pub fn clamp_cursors(&mut self) {
+        let show_hidden = self.show_hidden;
+        for pane in &mut self.panes {
+            for tab in &mut pane.tabs {
+                let len = listing::visible_indices(&tab.entries, pane.sort, pane.ascending, show_hidden, &pane.filter).len();
+                tab.cursor = tab.cursor.min(len.saturating_sub(1));
+            }
+        }
     }
 
     pub fn new_tab(&mut self, id: PaneId) -> (usize, PathBuf, u64) {
@@ -377,6 +431,13 @@ impl AppState {
         pane.tabs.remove(pane.active);
         if pane.active >= pane.tabs.len() {
             pane.active = pane.tabs.len() - 1;
+        }
+    }
+
+    pub fn select_tab(&mut self, id: PaneId, index: usize) {
+        let pane = self.pane_mut(id);
+        if index < pane.tabs.len() {
+            pane.active = index;
         }
     }
 
@@ -486,5 +547,55 @@ mod tests {
         state.pane_mut(PaneId::Left).filter = "a".into();
         assert!(!state.toggle_visible_marks());
         assert!(state.tab(PaneId::Left).marked.is_empty());
+    }
+
+    fn dir(name: &str) -> Entry {
+        Entry { mode: 0o755, flags: crate::entry::DIR, ..file(name) }
+    }
+
+    #[test]
+    fn up_lands_on_the_folder_you_came_from() {
+        let mut state = AppState::new("/a/b".into(), "/right".into());
+        let (id, _, token) = state.up().unwrap();
+        state.apply_listing(id, 0, token, vec![Entry::dotdot(), dir("x"), dir("b"), dir("y")]);
+        assert_eq!(state.tab(id).path, PathBuf::from("/a"));
+        assert_eq!(state.cursor_entry(id).map(|e| e.name.to_string()), Some("b".into()));
+    }
+
+    #[test]
+    fn failed_back_step_drops_the_entry() {
+        let mut state = AppState::new("/one".into(), "/right".into());
+        let token = state.navigate(PaneId::Left, "/two".into(), true);
+        state.apply_listing(PaneId::Left, 0, token, vec![Entry::dotdot()]);
+        let token = state.navigate(PaneId::Left, "/three".into(), true);
+        state.apply_listing(PaneId::Left, 0, token, vec![Entry::dotdot()]);
+        let (_, token) = state.go_back(PaneId::Left).unwrap();
+        state.cancel_load(PaneId::Left, token);
+        assert_eq!(state.go_back(PaneId::Left).map(|(path, _)| path), Some(PathBuf::from("/one")));
+    }
+
+    #[test]
+    fn visible_follows_new_listings_and_sort() {
+        let mut state = AppState::new("/left".into(), "/right".into());
+        let token = state.tab(PaneId::Left).token;
+        state.apply_listing(PaneId::Left, 0, token, vec![Entry::dotdot(), file("b"), file("a")]);
+        assert_eq!(state.visible(PaneId::Left), vec![0, 2, 1]);
+        state.pane_mut(PaneId::Left).ascending = false;
+        assert_eq!(state.visible(PaneId::Left), vec![0, 1, 2]);
+        let token = state.refresh(PaneId::Left).1;
+        state.apply_listing(PaneId::Left, 0, token, vec![Entry::dotdot(), file("c")]);
+        assert_eq!(state.visible(PaneId::Left), vec![0, 1]);
+    }
+
+    #[test]
+    fn hiding_files_clamps_the_cursor() {
+        let mut state = AppState::new("/left".into(), "/right".into());
+        state.show_hidden = true;
+        let hidden = |name| Entry { flags: crate::entry::HIDDEN, ..file(name) };
+        state.tab_mut(PaneId::Left).entries = vec![Entry::dotdot(), file("a"), hidden(".b"), hidden(".c")];
+        state.set_cursor(3);
+        state.show_hidden = false;
+        state.clamp_cursors();
+        assert!(state.cursor_entry(PaneId::Left).is_some());
     }
 }

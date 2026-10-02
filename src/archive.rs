@@ -5,7 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::raw::c_int;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -126,23 +126,16 @@ pub fn extract(
     }
 }
 
-fn extension(path: &Path) -> Option<&str> {
-    let name = path.file_name()?.to_str()?;
-    if suffix(name.as_bytes(), b".tar.gz") {
+// Bytes, so a name that is not UTF-8 is still recognised.
+fn extension(path: &Path) -> Option<&'static str> {
+    let name = path.file_name()?.as_bytes();
+    if suffix(name, b".tar.gz") {
         return Some("tgz");
     }
-    let ext = path.extension()?.to_str()?;
-    if ext.eq_ignore_ascii_case("zip") {
-        Some("zip")
-    } else if ext.eq_ignore_ascii_case("rar") {
-        Some("rar")
-    } else if ext.eq_ignore_ascii_case("tar") {
-        Some("tar")
-    } else if ext.eq_ignore_ascii_case("tgz") {
-        Some("tgz")
-    } else {
-        None
-    }
+    // As Path::extension: a leading dot starts a hidden name, not an extension.
+    let dot = name.iter().rposition(|&b| b == b'.').filter(|&at| at > 0)?;
+    let ext = &name[dot + 1..];
+    ["zip", "rar", "tar", "tgz"].into_iter().find(|known| ext.eq_ignore_ascii_case(known.as_bytes()))
 }
 
 fn list_zip(path: &Path, password: Option<&str>) -> Result<Listed, Fail> {
@@ -181,16 +174,23 @@ fn extract_zip(
 ) -> Result<Report, Fail> {
     let mut archive = zip::ZipArchive::new(File::open(path)?)?;
     let mut plan = Vec::new();
+    let mut skipped = Vec::new();
     for index in 0..archive.len() {
         let file = archive.by_index_raw(index)?;
         if file.encrypted() && password.is_none() {
             return Err(Fail::NeedPassword);
         }
-        if file.is_symlink() {
+        let Some(name) = zip_name(&file) else {
+            if names.is_none() && !root_only(Path::new(file.name())) {
+                skipped.push(format!("{} (unsafe or undecodable name)", file.name()));
+            }
+            continue;
+        };
+        if names.is_some_and(|set| !set.contains(&name)) {
             continue;
         }
-        let Some(name) = zip_name(&file) else { continue };
-        if names.is_some_and(|set| !set.contains(&name)) {
+        if file.is_symlink() {
+            skipped.push(format!("{name} (symlink)"));
             continue;
         }
         plan.push((index, name, file.is_dir(), file.size()));
@@ -244,7 +244,7 @@ fn extract_zip(
             Err(err) => return Err(err),
         }
     }
-    finish(files, damaged)
+    finish(files, damaged, skipped)
 }
 
 fn zip_at<'a, R: Read + io::Seek>(
@@ -298,7 +298,8 @@ fn open_tar(path: &Path) -> Result<tar::Archive<Box<dyn Read>>, Fail> {
     let file = File::open(path)?;
     // gzip is only a stream around the same tar, so both share one reader.
     let reader: Box<dyn Read> = if extension(path) == Some("tgz") {
-        Box::new(flate2::read::GzDecoder::new(file))
+        // A .tar.gz may hold several gzip members back to back.
+        Box::new(flate2::read::MultiGzDecoder::new(file))
     } else {
         Box::new(file)
     };
@@ -344,8 +345,12 @@ enum Seen {
 fn classify(entry: &tar::Entry<Box<dyn Read>>) -> Result<Option<Seen>, Fail> {
     let Some(kind) = tar_kind(entry.header().entry_type()) else { return Ok(None) };
     let path = entry.path()?;
-    let Some(raw) = path.to_str() else { return Ok(None) };
-    let Some(name) = slash(raw) else { return Ok(None) };
+    let Some(name) = path.to_str().and_then(slash) else {
+        if root_only(&path) {
+            return Ok(None);
+        }
+        return Ok(Some(Seen::Skip { name: path.to_string_lossy().into_owned(), kind: "unsafe or undecodable name" }));
+    };
     Ok(Some(match kind {
         TarKind::File => Seen::File { name, size: entry.size() },
         TarKind::Dir => Seen::Dir { name },
@@ -461,15 +466,19 @@ fn skipped_report(files: u64, skipped: Vec<String>) -> Result<Report, Fail> {
         return Ok(Report { cancelled: false, files });
     }
     let word = if skipped.len() == 1 { "entry" } else { "entries" };
-    let mut text = format!("Skipped {} special {word}, {files} unpacked OK", skipped.len());
-    for line in skipped.iter().take(20) {
+    let text = format!("Skipped {} special {word}, {files} unpacked OK", skipped.len());
+    Err(Fail::Message(with_lines(text, &skipped)))
+}
+
+fn with_lines(mut text: String, lines: &[String]) -> String {
+    for line in lines.iter().take(20) {
         text.push_str("\n  ");
         text.push_str(line);
     }
-    if skipped.len() > 20 {
-        text.push_str(&format!("\n  ... {} more", skipped.len() - 20));
+    if lines.len() > 20 {
+        text.push_str(&format!("\n  ... {} more", lines.len() - 20));
     }
-    Err(Fail::Message(text))
+    text
 }
 
 fn list_rar(path: &Path, password: Option<&str>) -> Result<Listed, Fail> {
@@ -481,14 +490,8 @@ fn list_rar(path: &Path, password: Option<&str>) -> Result<Listed, Fail> {
         if header.is_encrypted() {
             listed.needs_password = true;
         }
-        if header.is_directory() {
-            push_rar(&mut listed, &header, true);
-            continue;
-        }
-        if rar_symlink(header.file_attr) {
-            continue;
-        }
-        push_rar(&mut listed, &header, false);
+        // The crate hides the host OS and link type, so links are listed here; extract_rar skips and reports them.
+        push_rar(&mut listed, &header, header.is_directory());
     }
     Ok(listed)
 }
@@ -519,19 +522,13 @@ fn file_line(index: u64, total_files: u64, name: &str) -> String {
     }
 }
 
-fn finish(files: u64, damaged: Vec<String>) -> Result<Report, Fail> {
+fn finish(files: u64, mut damaged: Vec<String>, skipped: Vec<String>) -> Result<Report, Fail> {
     if damaged.is_empty() {
-        return Ok(Report { cancelled: false, files });
+        return skipped_report(files, skipped);
     }
-    let mut text = format!("Archive is damaged: {} failed, {files} unpacked OK", damaged.len());
-    for line in damaged.iter().take(20) {
-        text.push_str("\n  ");
-        text.push_str(line);
-    }
-    if damaged.len() > 20 {
-        text.push_str(&format!("\n  ... {} more", damaged.len() - 20));
-    }
-    Err(Fail::Message(text))
+    let text = format!("Archive is damaged: {} failed, {files} unpacked OK", damaged.len());
+    damaged.extend(skipped);
+    Err(Fail::Message(with_lines(text, &damaged)))
 }
 
 // Shared through the unrar callback's user data, so every field uses interior mutability.
@@ -719,6 +716,7 @@ fn extract_rar(
     let mut written = 0u64;
     let mut files = 0u64;
     let mut damaged = Vec::new();
+    let mut skipped = Vec::new();
     let mut policy = Policy::Ask;
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -739,13 +737,24 @@ fn extract_rar(
         let flags = header.flags;
         let dir = flags & unrar_ng_sys::RHDF_DIRECTORY != 0;
         let size = ((header.unp_size_high as u64) << 32) | header.unp_size as u64;
-        let name = rar_header_name(&header);
-        let wanted = name.as_ref().is_some_and(|name| names.is_none_or(|set| set.contains(name)));
-        if !wanted || rar_symlink(header.file_attr) {
+        let Some(name) = rar_header_name(&header) else {
+            if names.is_none() {
+                let raw = header.filename_w;
+                skipped.push(format!("{}  (unsafe or undecodable name)", wide_text(&raw)));
+            }
+            skip(&handle)?;
+            continue;
+        };
+        if names.is_some_and(|set| !set.contains(&name)) {
             skip(&handle)?;
             continue;
         }
-        let name = name.unwrap();
+        // Hard links and file copies name a path that unrar resolves against our working folder, not dest.
+        if header.redir_type != 0 || rar_symlink(header.host_os, header.file_attr) {
+            skipped.push(format!("{name}  (link skipped)"));
+            skip(&handle)?;
+            continue;
+        }
         let rel = PathBuf::from(&name);
         let target = located(dest, &rel)?;
         if dir {
@@ -791,21 +800,31 @@ fn extract_rar(
             return Err(fail(code, unrar_ng::error::When::Process));
         }
         let placed = (|| {
-            let meta = fs::symlink_metadata(&part)?;
-            if meta.file_type().is_symlink() {
-                return Err(Fail::Message(format!("refusing symlink {}", rel.display())));
+            // Checked and chmodded through one descriptor, so a link left at `part` cannot redirect either.
+            // O_PATH needs no read permission, so a member archived as 0o000 still gets its mode fixed.
+            let file = OpenOptions::new().read(true).custom_flags(libc::O_PATH | libc::O_NOFOLLOW).open(&part)?;
+            let meta = file.metadata()?;
+            if !meta.is_file() || meta.nlink() > 1 {
+                return Ok(None);
             }
             if meta.len() > size {
                 return Err(oversized(&rel));
             }
             // unrar restores the archived mode. Keep only its exec bits, as for zip.
-            let mode = if meta.permissions().mode() & 0o111 != 0 { 0o755 } else { 0o644 };
-            fs::set_permissions(&part, fs::Permissions::from_mode(mode))?;
+            let mode = fs::Permissions::from_mode(if meta.permissions().mode() & 0o111 != 0 { 0o755 } else { 0o644 });
+            // An O_PATH descriptor cannot fchmod. Its /proc link reaches the same inode.
+            let by_fd = format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(&file));
+            fs::set_permissions(&by_fd, mode.clone()).or_else(|_| fs::set_permissions(&part, mode))?;
             fs::rename(&part, &target)?;
-            Ok(meta.len())
+            Ok(Some(meta.len()))
         })();
         let len = match placed {
-            Ok(len) => len,
+            Ok(Some(len)) => len,
+            Ok(None) => {
+                let _ = fs::remove_file(&part);
+                skipped.push(format!("{name}  (link skipped)"));
+                continue;
+            }
             Err(err) => {
                 let _ = fs::remove_file(&part);
                 return Err(err);
@@ -815,7 +834,7 @@ fn extract_rar(
         files += 1;
         job.report(written, rel);
     }
-    finish(files, damaged)
+    finish(files, damaged, skipped)
 }
 
 fn open_rar<'a>(path: &'a Path, password: Option<&'a str>) -> unrar_ng::Archive<'a> {
@@ -830,8 +849,16 @@ fn rar_path(path: &Path) -> PathBuf {
     if first.as_path() != path && first.is_file() { first } else { path.to_path_buf() }
 }
 
-fn rar_symlink(attr: u32) -> bool {
-    (attr >> 16) & 0o170000 == 0o120000
+// unrar's HOST_UNIX. Only there is FileAttr the raw st_mode; Windows hosts store attribute bits.
+const RAR_HOST_UNIX: u32 = 3;
+
+fn rar_symlink(host_os: u32, attr: u32) -> bool {
+    host_os == RAR_HOST_UNIX && attr & 0o170000 == 0o120000
+}
+
+// "./" names the destination itself, so it is neither unpacked nor reported.
+fn root_only(path: &Path) -> bool {
+    path.components().all(|part| part == Component::CurDir)
 }
 
 fn slash(name: &str) -> Option<String> {
@@ -885,10 +912,7 @@ fn located(root: &Path, rel: &Path) -> Result<PathBuf, Fail> {
             Ok(meta) if meta.file_type().is_symlink() => return Err(Fail::Message("symlink in destination".into())),
             Ok(meta) if meta.is_dir() => {}
             Ok(_) => return Err(Fail::Message(format!("{} is not a folder", cur.display()))),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                fs::create_dir(&cur)?;
-                fs::set_permissions(&cur, fs::Permissions::from_mode(0o755))?;
-            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => fs::DirBuilder::new().mode(0o755).create(&cur)?,
             Err(err) => return Err(err.into()),
         }
     }
@@ -906,8 +930,7 @@ fn ensure_dir(path: &Path) -> Result<(), Fail> {
     if path.is_dir() {
         return Ok(());
     }
-    fs::create_dir_all(path)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+    fs::DirBuilder::new().recursive(true).mode(0o755).create(path)?;
     Ok(())
 }
 
@@ -999,7 +1022,6 @@ fn write_reader(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(&Progress),
 ) -> Result<(), Fail> {
-    use std::os::unix::fs::OpenOptionsExt;
     let part = crate::ops::partial_path(dest);
     let _ = fs::remove_file(&part);
     let result = (|| {
@@ -1100,8 +1122,11 @@ mod tests {
         let dest = dir.join("out");
         fs::create_dir(&dest).unwrap();
         let cancel = AtomicBool::new(false);
-        let report = extract(&archive, &dest, None, None, &cancel, &mut |_| {}, &mut no_conflict).unwrap();
-        assert!(!report.cancelled);
+        let err = extract(&archive, &dest, None, None, &cancel, &mut |_| {}, &mut no_conflict).unwrap_err().to_string();
+        // The writer drops the leading '/', so the absolute name unpacks inside dest.
+        assert!(err.starts_with("Skipped 2 special entries, 3 unpacked OK"), "{err}");
+        assert!(err.contains("../evil.txt (unsafe or undecodable name)"), "{err}");
+        assert!(err.contains("link (symlink)"), "{err}");
         assert_eq!(fs::read_to_string(dest.join("ok.txt")).unwrap(), "hello");
         assert_eq!(fs::read_to_string(dest.join("sub/note.txt")).unwrap(), "nested");
         assert!(!dir.join("evil.txt").exists());
@@ -1244,6 +1269,17 @@ mod tests {
         assert!(is_archive(Path::new("Notes.TAR.GZ")));
         assert!(is_archive(Path::new("notes.tgz")));
         assert!(!is_archive(Path::new("notes.gz")));
+        assert!(!is_archive(Path::new(".zip")));
+        assert!(is_archive(Path::new(std::ffi::OsStr::from_bytes(b"caf\xe9.ZIP"))));
+        assert_eq!(extension(Path::new(std::ffi::OsStr::from_bytes(b"caf\xe9.tar.gz"))), Some("tgz"));
+    }
+
+    #[test]
+    fn rar_symlink_reads_mode_only_from_unix_hosts() {
+        assert!(rar_symlink(RAR_HOST_UNIX, 0o120777));
+        assert!(!rar_symlink(RAR_HOST_UNIX, 0o100644));
+        // Windows attribute bits that happen to look like S_IFLNK.
+        assert!(!rar_symlink(2, 0xa020));
     }
 
     #[test]
@@ -1345,9 +1381,10 @@ mod tests {
         fs::create_dir(&dest).unwrap();
         let cancel = AtomicBool::new(false);
         let err = extract(&archive, &dest, None, None, &cancel, &mut |_| {}, &mut no_conflict).unwrap_err().to_string();
-        assert!(err.starts_with("Skipped 2 special entries, 4 unpacked OK"), "{err}");
+        assert!(err.starts_with("Skipped 4 special entries, 4 unpacked OK"), "{err}");
         assert!(err.contains("link (symlink)"), "{err}");
         assert!(err.contains("hard (hard link)"), "{err}");
+        assert!(err.contains("../evil.txt (unsafe or undecodable name)"), "{err}");
         assert_eq!(fs::read_to_string(dest.join("ok.txt")).unwrap(), "hello");
         assert_eq!(fs::read_to_string(dest.join("sub/note.txt")).unwrap(), "nested");
         assert_eq!(fs::read_to_string(dest.join(&long)).unwrap(), "long");

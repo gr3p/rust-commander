@@ -587,8 +587,10 @@ fn terminal_argv_without_starting() -> Result<(), String> {
 }
 
 fn external_argv() -> Result<(), String> {
-    let editor = external::editor_argv("", Some("nvim"), Path::new("/tmp/a"));
+    let editor = external::editor_argv_with("", Some("nvim"), |_| false, Path::new("/tmp/a"));
     eq(editor, vec!["nvim".into(), "/tmp/a".into()], "editor")?;
+    let shown = external::editor_argv_in("", Some("nvim"), Some("alacritty"), |_| false, Path::new("/tmp/a"));
+    eq(shown, vec!["alacritty".into(), "-e".into(), "nvim".into(), "/tmp/a".into()], "editor in terminal")?;
     let viewer = external::viewer_argv("less -N", Path::new("/tmp/a"));
     eq(viewer[0].to_str(), Some("less"), "viewer")?;
     eq(viewer[1].to_str(), Some("-N"), "viewer arg")?;
@@ -1263,13 +1265,26 @@ fn bad_config_value_keeps_bookmarks(dir: &Path) -> Result<(), String> {
     if !text.contains("show_hidden = false") {
         return Err("unexpected config text".into());
     }
-    fs::write(&path, text.replace("show_hidden = false", "show_hidden = \"x\"")).map_err(s)?;
+    // One broken bookmark drops only itself.
+    let broken = text.replace("show_hidden = false", "show_hidden = \"x\"") + "\n[[bookmarks]]\nname = 5\npath = \"/x\"\n";
+    fs::write(&path, broken).map_err(s)?;
     let loaded = config::load_from(&path);
     eq(loaded.bookmarks.len(), 1, "bookmarks")?;
-    if !dir.join("config.toml.bad").is_file() {
-        return Err("no backup".into());
-    }
-    Ok(())
+    let backups = || {
+        fs::read_dir(dir).map_or(0, |items| {
+            items.flatten().filter(|item| item.file_name().to_string_lossy().starts_with("config.toml.bad-")).count()
+        })
+    };
+    eq(backups(), 1, "backup")?;
+    fs::write(&path, b"theme = \"\xff\"\n").map_err(s)?;
+    eq(config::load_from(&path).bookmarks.len(), 0, "unreadable")?;
+    eq(backups(), 2, "second backup kept apart")?;
+    // A bookmark that is not UTF-8 is left out instead of failing the save.
+    use std::os::unix::ffi::OsStrExt;
+    let odd = PathBuf::from(std::ffi::OsStr::from_bytes(b"/odd\xff"));
+    cfg.bookmarks.push(Bookmark { name: "Odd".into(), path: odd, target: PathBuf::new(), kind: String::new() });
+    config::save_to(&path, &cfg).map_err(s)?;
+    eq(config::load_from(&path).bookmarks.len(), 1, "utf-8 bookmarks saved")
 }
 
 fn copy_keeps_mode_and_time(dir: &Path) -> Result<(), String> {
