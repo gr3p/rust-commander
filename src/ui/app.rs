@@ -687,17 +687,7 @@ impl App {
                 Key::v | Key::V if self.state.quick_view && self.shell.editing.get() => {
                     self.leave_quick_edit(sender);
                 }
-                Key::q | Key::Q => {
-                    if self.shell.editing.get() && !self.leave_quick_edit(sender) {
-                        return;
-                    }
-                    self.state.panel_terminal = false;
-                    self.state.quick_view = !self.state.quick_view;
-                    if self.state.quick_view {
-                        self.note_preview_target();
-                        self.focus_list();
-                    }
-                }
+                Key::q | Key::Q => self.toggle_quick_view(sender),
                 Key::Tab | Key::ISO_Left_Tab => {
                     let id = self.state.active;
                     self.state.next_tab(id, shift);
@@ -739,7 +729,7 @@ impl App {
             Key::F8 | Key::Delete => self.on_fkey(8, shift, sender),
             Key::F9 if shift => self.start_sfv(sender),
             Key::F9 => self.toggle_panel_terminal(sender),
-            Key::ISO_Left_Tab | Key::Tab if self.shell.editing.get() => {}
+            Key::ISO_Left_Tab | Key::Tab if self.shell.editing.get() || self.state.quick_view => {}
             Key::ISO_Left_Tab | Key::Tab => {
                 self.state.active = self.state.active.other();
                 self.note_preview_target();
@@ -1388,6 +1378,14 @@ impl App {
             if let Some(entries) = entries {
                 self.layout_columns(pane, &entries);
             }
+        }
+        // Quick view owns the status line until it closes. An empty line is the mode itself.
+        if self.state.quick_view {
+            if self.status.is_empty() {
+                self.status = self.quick_status_idle();
+            }
+        } else if self.status.starts_with("QUICKVIEW") {
+            self.status.clear();
         }
         if self.shell.status.text().as_str() != self.status {
             self.shell.status.set_text(&self.status);

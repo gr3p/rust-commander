@@ -173,17 +173,7 @@ impl App {
             Act::Search => self.open_search(sender),
             Act::Hidden => self.toggle_hidden(),
             Act::Syntax => self.toggle_syntax(),
-            Act::QuickView => {
-                if self.shell.editing.get() && !self.leave_quick_edit(sender) {
-                    return;
-                }
-                self.state.panel_terminal = false;
-                self.state.quick_view = !self.state.quick_view;
-                if self.state.quick_view {
-                    self.note_preview_target();
-                    self.focus_list();
-                }
-            }
+            Act::QuickView => self.toggle_quick_view(sender),
             Act::Terminal => self.toggle_panel_terminal(sender),
             Act::NewShell => self.new_shell(sender),
             Act::CloseShell => self.close_current_shell(),

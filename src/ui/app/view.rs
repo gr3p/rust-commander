@@ -237,17 +237,17 @@ impl App {
             return;
         }
         if !self.state.quick_view || self.cursor_is_image() {
-            self.status = "Edit is for text".into();
+            self.note_quick("Edit is for text");
             return;
         }
         let Some(path) = self.file_under_cursor() else {
-            self.status = "Edit is for text".into();
+            self.note_quick("Edit is for text");
             return;
         };
         let (text, form) = match lister::read_for_edit(&path, self.charset) {
             Ok(read) => read,
             Err(err) => {
-                self.status = err;
+                self.note_quick(&err);
                 return;
             }
         };
@@ -266,6 +266,38 @@ impl App {
         preview.set_cursor_visible(true);
         preview.grab_focus();
         paint_edit(&self.shell.edit_button, true);
+        self.status = "QUICKVIEW: edit".into();
+    }
+
+    pub(in crate::ui::app) fn toggle_quick_view(&mut self, sender: &ComponentSender<Self>) {
+        if self.shell.editing.get() && !self.leave_quick_edit(sender) {
+            return;
+        }
+        self.state.panel_terminal = false;
+        self.state.quick_view = !self.state.quick_view;
+        if self.state.quick_view {
+            self.status = "QUICKVIEW: view".into();
+            self.note_preview_target();
+            self.focus_list();
+        }
+    }
+
+    pub(in crate::ui::app) fn quick_status_idle(&self) -> String {
+        if self.shell.editing.get() {
+            "QUICKVIEW: edit".into()
+        } else if self.state.quick_view {
+            "QUICKVIEW: view".into()
+        } else {
+            "QUICKVIEW".into()
+        }
+    }
+
+    fn note_quick(&mut self, text: &str) {
+        self.status = if self.state.quick_view {
+            format!("QUICKVIEW: {text}")
+        } else {
+            text.into()
+        };
     }
 
     // Returns false when unsaved text stopped the leave. The next try discards it.
@@ -274,11 +306,11 @@ impl App {
         if let Some(edit) = self.quick_edit.as_mut() {
             if edit.saved != changes && edit.armed != Some(changes) {
                 edit.armed = Some(changes);
-                self.status = format!(
+                self.note_quick(&format!(
                     "Unsaved changes: {} saves, {} discards, or press again",
                     rust_commander::commands::format_keys("Ctrl+S"),
                     rust_commander::commands::format_keys("Ctrl+D"),
-                );
+                ));
                 return false;
             }
         }
@@ -301,6 +333,9 @@ impl App {
             self.note_preview_target();
             self.kick_preview(sender);
         }
+        if self.state.quick_view {
+            self.status = "QUICKVIEW: view".into();
+        }
         self.focus_list();
     }
 
@@ -311,7 +346,7 @@ impl App {
         let dirty = self.quick_edit.as_ref().is_some_and(|edit| edit.saved != self.edit_changes.get());
         self.stop_quick_edit(true, sender);
         if dirty {
-            self.status = "Discarded".into();
+            self.note_quick("Discarded");
         }
     }
 
@@ -332,9 +367,9 @@ impl App {
                     edit.armed = None;
                 }
                 self.shell.window.set_title(Some(&self.edit_name.borrow()));
-                self.status = "Saved".into();
+                self.status = "QUICKVIEW: SAVED".into();
             }
-            Err(err) => self.status = err.to_string(),
+            Err(err) => self.note_quick(&err.to_string()),
         }
     }
 
@@ -393,16 +428,17 @@ impl App {
 
     pub(in crate::ui::app) fn set_charset(&mut self, charset: Charset, sender: &ComponentSender<Self>) {
         if self.shell.editing.get() {
-            self.status = "Leave edit first".into();
+            self.note_quick("Leave edit first");
             return;
         }
         self.charset = charset;
-        self.status = match charset {
-            Charset::Utf8 => "UTF-8".into(),
-            Charset::Ansi => "ANSI".into(),
-            Charset::Ascii => "ASCII".into(),
-            Charset::Json => "JSON".into(),
+        let name = match charset {
+            Charset::Utf8 => "UTF-8",
+            Charset::Ansi => "ANSI",
+            Charset::Ascii => "ASCII",
+            Charset::Json => "JSON",
         };
+        self.note_quick(name);
         self.lister_redraw(sender);
         if let Some(ui) = &self.lister {
             paint_charset(&ui.modes, charset);
