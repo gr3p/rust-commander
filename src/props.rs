@@ -94,10 +94,221 @@ pub fn apply(path: &Path, facts: &Facts, mode: u32, uid: u32, gid: u32) -> io::R
     // chown clears SUID/SGID, so the mode the dialog shows goes on last.
     // /proc/self/fd/N resolves to the pinned inode, not to a path that can be swapped.
     let proc = std::ffi::CString::new(format!("/proc/self/fd/{}", fd.as_raw_fd())).map_err(|_| io::Error::other("Bad path"))?;
-    if unsafe { libc::chmod(proc.as_ptr(), (mode & 0o7777) as libc::mode_t) } != 0 {
+    let mode = mode & 0o7777;
+    let dir = st.st_mode & libc::S_IFMT == libc::S_IFDIR;
+    if unsafe { libc::chmod(proc.as_ptr(), mode as libc::mode_t) } != 0 {
+        let err = io::Error::last_os_error();
+        return Err(mode_error(path, err.kind(), &err.to_string(), errno_why(path, dir, &err)));
+    }
+    // CIFS nounix and FAT report success and keep the old mode; the kernel also drops SGID for a foreign group.
+    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
         return Err(io::Error::last_os_error());
     }
+    let stored = (st.st_mode & 0o7777) as u32;
+    if stored != mode {
+        let lead = format!("The filesystem kept {} instead of {}", mode_text(stored), mode_text(mode));
+        return Err(mode_error(path, io::ErrorKind::Other, &lead, mode_why(path, dir, Some(stored), mode)));
+    }
     Ok(())
+}
+
+fn mode_error(path: &Path, kind: io::ErrorKind, lead: &str, why: String) -> io::Error {
+    let message = format!("{lead}. {why}");
+    crate::log::error(&format!("chmod {}: {message}", path.display()));
+    io::Error::new(kind, message)
+}
+
+struct MountInfo {
+    point: PathBuf,
+    fstype: String,
+    source: String,
+    flags: String,
+    opts: String,
+}
+
+fn errno_why(path: &Path, dir: bool, err: &io::Error) -> String {
+    let text = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    let mounts = parse_mountinfo(&text);
+    let mount = covering(&mounts, path);
+    if err.raw_os_error() == Some(libc::EROFS) || mount.is_some_and(is_read_only) {
+        return "The filesystem is mounted read-only, so the mode cannot change.".into();
+    }
+    if let Some(why) = mount.and_then(|mount| fixed_mode_why(mount, dir)) {
+        return why;
+    }
+    if err.kind() == io::ErrorKind::PermissionDenied {
+        return "Only the owner can change the mode. A parent directory without search permission, or an immutable file, causes this too.".into();
+    }
+    if matches!(err.raw_os_error(), Some(code) if code == libc::EOPNOTSUPP || code == libc::ENOTSUP || code == libc::ENOSYS) {
+        return "This filesystem does not support chmod. Usual causes: SMB with nounix, or FAT, exFAT and NTFS.".into();
+    }
+    explain_mode(mount, dir, None, 0)
+}
+
+fn mode_why(path: &Path, dir: bool, stored: Option<u32>, wanted: u32) -> String {
+    let text = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    let mounts = parse_mountinfo(&text);
+    explain_mode(covering(&mounts, path), dir, stored, wanted)
+}
+
+// The sentence after the error. Specific when the mount is a known case, otherwise the usual causes.
+fn explain_mode(mount: Option<&MountInfo>, dir: bool, stored: Option<u32>, wanted: u32) -> String {
+    if let Some(mount) = mount {
+        if is_read_only(mount) {
+            return "The filesystem is mounted read-only, so the mode cannot change.".into();
+        }
+        if let Some(why) = fixed_mode_why(mount, dir) {
+            return why;
+        }
+    }
+    if let Some(stored) = stored {
+        if stored & 0o777 == wanted & 0o777 {
+            if let Some(why) = special_bit_why(stored, wanted) {
+                return why;
+            }
+        }
+        if mount.is_some_and(|mount| is_unix_fs(&mount.fstype)) {
+            return "The mode did not stick. On this filesystem that is usually an immutable file, or the file changed while it was being saved.".into();
+        }
+    }
+    "Usual causes: SMB mounted with nounix and a fixed file_mode or dir_mode, or FAT, exFAT and NTFS, which have no Unix mode per file. A mount option such as file_mode, fmask, dmask or umask then overrides chmod.".into()
+}
+
+fn fixed_mode_why(mount: &MountInfo, dir: bool) -> Option<String> {
+    let kind = mount.fstype.as_str();
+    if matches!(kind, "cifs" | "smb3" | "smb") {
+        let nounix = has_opt(&mount.opts, "nounix");
+        let key = if dir { "dir_mode" } else { "file_mode" };
+        let fixed = opt_value(&mount.opts, key);
+        let how = match (nounix, fixed) {
+            (false, None) => {
+                return Some("The SMB server did not keep this mode. That happens when the share is mounted without Unix extensions.".into());
+            }
+            (true, Some(fixed)) => format!("nounix and {key}={fixed}"),
+            (true, None) => "nounix".into(),
+            (false, Some(fixed)) => format!("{key}={fixed}"),
+        };
+        return Some(format!(
+            "This SMB share ({}) does not store a permission on each file. It is mounted with {how}, so chmod cannot change this one. posix or modefromsid works only if the server supports it.",
+            mount.source
+        ));
+    }
+    if matches!(kind, "vfat" | "msdos" | "exfat") {
+        return Some("FAT and exFAT have no Unix permissions. The mode you see comes from the mount (umask, fmask or dmask), not from the file.".into());
+    }
+    if matches!(kind, "ntfs" | "ntfs3") || kind.contains("ntfs") {
+        return Some("This NTFS mount does not keep a Unix mode per file. It comes from the mount options (permissions, fmask, dmask or umask).".into());
+    }
+    if kind == "fuseblk" {
+        return Some("This volume does not keep a Unix mode per file. fuseblk is usually NTFS or exFAT, and the mode comes from the mount (permissions, fmask, dmask or umask).".into());
+    }
+    if matches!(kind, "nfs" | "nfs4") {
+        return Some("The NFS server did not keep this mode. That is common with root_squash, all_squash, or an export without ACL support.".into());
+    }
+    if kind == "fuse" || kind.starts_with("fuse.") {
+        return Some("This FUSE filesystem did not keep the mode. Many of them only pretend to have Unix permissions.".into());
+    }
+    None
+}
+
+fn special_bit_why(stored: u32, wanted: u32) -> Option<String> {
+    let lost = wanted & !stored & 0o7000;
+    if lost == 0 {
+        return None;
+    }
+    let mut names = Vec::new();
+    if lost & 0o4000 != 0 {
+        names.push("setuid");
+    }
+    if lost & 0o2000 != 0 {
+        names.push("setgid");
+    }
+    if lost & 0o1000 != 0 {
+        names.push("the sticky bit");
+    }
+    let names = names.join(" and ");
+    let group = if lost & 0o2000 != 0 {
+        " Setgid stays only when you are a member of the file's group."
+    } else {
+        ""
+    };
+    Some(format!("The read, write and execute bits were stored. The kernel dropped {names}.{group}"))
+}
+
+fn is_unix_fs(kind: &str) -> bool {
+    matches!(kind, "ext2" | "ext3" | "ext4" | "xfs" | "btrfs" | "tmpfs" | "bcachefs" | "f2fs" | "zfs")
+}
+
+fn is_read_only(mount: &MountInfo) -> bool {
+    has_opt(&mount.flags, "ro") || has_opt(&mount.opts, "ro")
+}
+
+fn has_opt(opts: &str, key: &str) -> bool {
+    opts.split(',').any(|opt| opt == key)
+}
+
+fn opt_value<'a>(opts: &'a str, key: &str) -> Option<&'a str> {
+    let prefix = format!("{key}=");
+    opts.split(',').find_map(|opt| opt.strip_prefix(&prefix))
+}
+
+fn covering<'a>(mounts: &'a [MountInfo], path: &Path) -> Option<&'a MountInfo> {
+    let mut best: Option<&MountInfo> = None;
+    for mount in mounts {
+        if !path.starts_with(&mount.point) {
+            continue;
+        }
+        let take = match best {
+            None => true,
+            Some(cur) if mount.point.components().count() > cur.point.components().count() => true,
+            Some(cur) if mount.point == cur.point && cur.fstype == "autofs" => true,
+            _ => false,
+        };
+        if take {
+            best = Some(mount);
+        }
+    }
+    best
+}
+
+fn parse_mountinfo(text: &str) -> Vec<MountInfo> {
+    text.lines().filter_map(parse_mount_line).collect()
+}
+
+fn parse_mount_line(line: &str) -> Option<MountInfo> {
+    let mut parts = line.split(' ');
+    let _id = parts.next()?;
+    let _parent = parts.next()?;
+    let _dev = parts.next()?;
+    let _root = parts.next()?;
+    let point = unescape_field(parts.next()?);
+    let flags = (*parts.next()?).to_string();
+    let rest: Vec<&str> = parts.collect();
+    let dash = rest.iter().position(|part| *part == "-")?;
+    let fstype = (*rest.get(dash + 1)?).to_string();
+    let source = unescape_field(rest.get(dash + 2)?).to_string_lossy().into_owned();
+    let opts = (*rest.get(dash + 3)?).to_string();
+    Some(MountInfo { point, fstype, source, flags, opts })
+}
+
+// \040 is a space. Mountinfo escapes a few bytes as three octal digits.
+fn unescape_field(field: &str) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 3 < bytes.len() {
+            if let Ok(value) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 4]).unwrap_or(""), 8) {
+                out.push(value);
+                i += 4;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    PathBuf::from(std::ffi::OsString::from_vec(out))
 }
 
 pub fn dimensions(path: &Path) -> Option<(u32, u32)> {
@@ -202,6 +413,39 @@ mod tests {
     fn groups_thousands() {
         assert_eq!(grouped(10341483), "10,341,483");
         assert_eq!(grouped(12), "12");
+    }
+
+    #[test]
+    fn stuck_mode_explains_the_common_causes() {
+        let text = "\
+74 33 0:40 / /mnt/seagate12tb rw - autofs systemd-1 rw,fd=58
+478 74 0:56 / /mnt/seagate12tb rw - cifs //smb.lan/seagate12tb rw,nounix,file_mode=0755,dir_mode=0755
+20 1 8:2 / /mnt/fat rw - vfat /dev/sdb1 rw,fmask=0111
+21 1 8:3 / /mnt/ntfs rw - ntfs3 /dev/sdc1 rw
+22 1 8:4 / /mnt/ro ro - ext4 /dev/sdd1 ro
+10 1 8:1 / /mnt/other rw - ext4 /dev/sda1 rw
+";
+        let mounts = parse_mountinfo(text);
+        let smb = explain_mode(covering(&mounts, Path::new("/mnt/seagate12tb/tmp/test.sh")), false, Some(0o755), 0o754);
+        assert!(smb.contains("SMB"), "{smb}");
+        assert!(smb.contains("nounix"), "{smb}");
+        assert!(smb.contains("file_mode=0755"), "{smb}");
+        let dir = explain_mode(covering(&mounts, Path::new("/mnt/seagate12tb/tmp")), true, Some(0o755), 0o700);
+        assert!(dir.contains("dir_mode=0755"), "{dir}");
+        let fat = explain_mode(covering(&mounts, Path::new("/mnt/fat/a")), false, Some(0o755), 0o644);
+        assert!(fat.contains("FAT"), "{fat}");
+        let ntfs = explain_mode(covering(&mounts, Path::new("/mnt/ntfs/a")), false, Some(0o777), 0o644);
+        assert!(ntfs.contains("NTFS"), "{ntfs}");
+        let ro = explain_mode(covering(&mounts, Path::new("/mnt/ro/a")), false, Some(0o644), 0o600);
+        assert!(ro.contains("read-only"), "{ro}");
+        let local = explain_mode(covering(&mounts, Path::new("/mnt/other/a")), false, Some(0o755), 0o2755);
+        assert!(local.contains("setgid"), "{local}");
+        let unknown = explain_mode(None, false, Some(0o755), 0o644);
+        assert!(unknown.contains("FAT"), "{unknown}");
+        assert!(unknown.contains("nounix"), "{unknown}");
+        let spaced = parse_mount_line("1 0 0:1 / /mnt/my\\040share rw - cifs //srv/my\\040share rw,nounix,file_mode=0755").unwrap();
+        assert_eq!(spaced.point, PathBuf::from("/mnt/my share"));
+        assert!(spaced.source.contains("my share"));
     }
 
     fn scratch(name: &str) -> PathBuf {

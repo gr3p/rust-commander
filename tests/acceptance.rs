@@ -250,6 +250,8 @@ fn file_icons_by_kind() -> Result<(), String> {
     eq(listing::file_icon("clip.mov", false, false), "video-x-generic-symbolic", "mov")?;
     eq(listing::file_icon("shot.jfif", false, false), "image-x-generic-symbolic", "jfif")?;
     eq(imageview::is_image("shot.JFIF"), true, "jfif image")?;
+    eq(listing::file_icon("doc.pdf", false, false), "application-pdf", "pdf")?;
+    eq(listing::is_pdf("doc.PDF"), true, "pdf kind")?;
     eq(listing::file_icon("data.bin", false, false), "text-x-generic-symbolic", "other")
 }
 
@@ -262,14 +264,19 @@ fn icon_packs_cover_roles() -> Result<(), String> {
     eq(icons::file_token(AWESOME, "shot.png", false, false), "\u{f1c5}".into(), "aw image")?;
     eq(icons::file_token(AWESOME, "clip.avi", false, false), "\u{f1c8}".into(), "aw video")?;
     let palette = rust_commander::theme::builtin();
-    let svg = icons::media_svg(false, &palette);
+    let svg = icons::art_svg(icons::Art::Video, &palette);
     if !svg.contains(&palette.foreground) || !svg.contains(&palette.accent) {
         return Err("video svg colors".into());
     }
-    let art = imageview::render_svg(&icons::media_svg(true, &palette), 128)?;
+    let art = imageview::render_svg(&icons::art_svg(icons::Art::Audio, &palette), 128)?;
     if art.width != 128 || art.pixels.len() != 128 * 128 * 4 || !art.pixels.chunks(4).any(|px| px[3] > 0) {
         return Err("audio svg render".into());
     }
+    let pdf = imageview::render_svg(&icons::art_svg(icons::Art::Pdf, &palette), 128)?;
+    if pdf.pixels.len() != 128 * 128 * 4 || !pdf.pixels.chunks(4).any(|px| px[3] > 0) {
+        return Err("pdf svg render".into());
+    }
+    eq(icons::art_for("a.pdf"), Some(icons::Art::Pdf), "pdf art")?;
     eq(icons::file_token(AWESOME, "a.rs", false, false), "\u{f1c9}".into(), "aw code")?;
     eq(icons::file_token(AWESOME, "a.pdf", false, false), "\u{f1c1}".into(), "aw pdf")?;
     eq(icons::file_token(AWESOME, "..", true, false), String::new(), "up")?;

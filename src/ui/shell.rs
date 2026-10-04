@@ -494,14 +494,89 @@ pub fn set_flash_enabled(enabled: bool) {
     FLASH_ENABLED.store(enabled, Ordering::Relaxed);
 }
 
+const LOGO_PNG: &[u8] = include_bytes!("../../img/rust-commander.png");
+const APP_ID: &str = "se.rustcommander.RustCommander";
+// Not "rust-commander": the dock keeps the previous picture for that name until the shell restarts.
+const ICON_NAME: &str = APP_ID;
+
 fn set_logo(window: &gtk::Window) {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("img/rustcommander_no white.png");
-    let Ok(texture) = gtk::gdk::Texture::from_filename(path) else { return };
+    // GNOME Shell ignores the toplevel icon and reads the desktop file instead.
+    publish_logo();
+    window.set_icon_name(Some(ICON_NAME));
+    let bytes = gtk::glib::Bytes::from_static(LOGO_PNG);
+    let Ok(texture) = gtk::gdk::Texture::from_bytes(&bytes) else { return };
     window.connect_realize(move |window| {
         let Some(surface) = window.surface() else { return };
         let Ok(toplevel) = surface.downcast::<gtk::gdk::Toplevel>() else { return };
         toplevel.set_icon_list(&[texture.clone()]);
     });
+}
+
+// GLib 2.88 drops a desktop file whose Exec is not an existing binary, and the shell then shows a gear.
+fn publish_logo() {
+    let Some(data) = data_home() else { return };
+    let icon = data.join(format!("icons/hicolor/512x512/apps/{ICON_NAME}.png"));
+    if let Err(err) = write_bytes(&icon, LOGO_PNG) {
+        rust_commander::log::error(&format!("logo icon {}: {err}", icon.display()));
+    }
+    let stale = data.join("icons/hicolor/512x512/apps/rust-commander.png");
+    if stale != icon {
+        let _ = std::fs::remove_file(&stale);
+    }
+    let Some(exe) = std::env::current_exe().ok().filter(|path| path.is_file()) else { return };
+    let desktop = data.join("applications").join(format!("{APP_ID}.desktop"));
+    let entry = format!(
+        "[Desktop Entry]\nType=Application\nName=Rust Commander\nComment=Dual-pane file manager\nExec={}\nIcon={ICON_NAME}\nTerminal=false\nCategories=System;FileManager;\nStartupWMClass={APP_ID}\n",
+        desktop_exec(&exe)
+    );
+    if let Err(err) = write_bytes(&desktop, entry.as_bytes()) {
+        rust_commander::log::error(&format!("logo desktop {}: {err}", desktop.display()));
+    }
+}
+
+fn data_home() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("XDG_DATA_HOME") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
+    Some(PathBuf::from(std::env::var_os("HOME")?).join(".local/share"))
+}
+
+fn desktop_exec(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy();
+    if text.contains([' ', '\t', '"', '\\']) {
+        format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        text.into_owned()
+    }
+}
+
+fn write_bytes(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    if std::fs::read(path).is_ok_and(|old| old == bytes) {
+        return Ok(());
+    }
+    let parent = path.parent().ok_or_else(|| std::io::Error::other("no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let mut tmp_name = path.as_os_str().to_os_string();
+    tmp_name.push(".tmp");
+    let tmp = PathBuf::from(tmp_name);
+    let written = (|| {
+        let mut file = std::fs::File::create(&tmp)?;
+        use std::io::Write;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(err) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    if let Err(err) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
 }
 
 pub fn repaint_drives(drives: &[(PathBuf, gtk::Button)], icon_pack: &str) {

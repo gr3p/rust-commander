@@ -482,12 +482,12 @@ impl App {
         };
         let charset = self.charset;
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
-        if rust_commander::listing::is_media(name) {
+        if let Some(art) = rust_commander::icons::art_for(name) {
             let palette = rust_commander::theme::load_named(&rust_commander::theme::active_name(
                 &self.cfg.theme,
                 &rust_commander::config::active_theme_path(),
             ));
-            let svg = rust_commander::icons::media_svg(rust_commander::listing::is_audio(name), &palette);
+            let svg = rust_commander::icons::art_svg(art, &palette);
             let stack = &self.shell.panes[self.state.active.other().index()].stack;
             let edge = stack.width().min(stack.height()).clamp(64, 512) as u32;
             let body = imageview::render_svg(&svg, edge)
@@ -650,7 +650,7 @@ impl App {
     pub(in crate::ui::app) fn cursor_is_media(&self) -> bool {
         self.state
             .cursor_entry(self.state.active)
-            .is_some_and(|entry| !entry.is_dir() && rust_commander::listing::is_media(&entry.name))
+            .is_some_and(|entry| !entry.is_dir() && rust_commander::listing::is_icon_preview(&entry.name))
     }
 
     pub(in crate::ui::app) fn paint_mode_bar(&self) {

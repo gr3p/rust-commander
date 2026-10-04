@@ -137,17 +137,39 @@ pub fn file_token(pack: &str, name: &str, is_dir: bool, is_link: bool) -> String
     format!("@{pack}/{}", theme_icon(name, is_dir, is_link))
 }
 
-// Quick view art for audio and video. Outline in the theme text color, mark in the accent.
-pub fn media_svg(audio: bool, palette: &crate::theme::Palette) -> String {
-    let (fg, accent) = (&palette.foreground, &palette.accent);
-    let body = if audio {
-        format!(
-            r#"<path d="M26 46V14l24-5v31" fill="none" stroke="{fg}" stroke-width="4" stroke-linejoin="round"/><ellipse cx="20" cy="46" rx="7" ry="5.5" fill="{accent}"/><ellipse cx="44" cy="40" rx="7" ry="5.5" fill="{accent}"/>"#
-        )
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Art {
+    Audio,
+    Video,
+    Pdf,
+}
+
+pub fn art_for(name: &str) -> Option<Art> {
+    if listing::is_audio(name) {
+        Some(Art::Audio)
+    } else if listing::is_video(name) {
+        Some(Art::Video)
+    } else if listing::is_pdf(name) {
+        Some(Art::Pdf)
     } else {
-        format!(
+        None
+    }
+}
+
+// Quick view art. Outline in the theme text color, mark in the accent.
+pub fn art_svg(art: Art, palette: &crate::theme::Palette) -> String {
+    let (fg, accent) = (&palette.foreground, &palette.accent);
+    let body = match art {
+        Art::Audio => format!(
+            r#"<path d="M26 46V14l24-5v31" fill="none" stroke="{fg}" stroke-width="4" stroke-linejoin="round"/><ellipse cx="20" cy="46" rx="7" ry="5.5" fill="{accent}"/><ellipse cx="44" cy="40" rx="7" ry="5.5" fill="{accent}"/>"#
+        ),
+        Art::Video => format!(
             r#"<rect x="6" y="10" width="52" height="44" rx="5" fill="none" stroke="{fg}" stroke-width="3"/><path d="M14 10v44M50 10v44M6 19h8M6 28h8M6 36h8M6 45h8M50 19h8M50 28h8M50 36h8M50 45h8" stroke="{fg}" stroke-width="2"/><path d="M27 23l13 9-13 9z" fill="{accent}"/>"#
-        )
+        ),
+        // No text feature in resvg: page with fold and an accent seal.
+        Art::Pdf => format!(
+            r#"<path d="M18 6h20l12 12v40H18z" fill="none" stroke="{fg}" stroke-width="3" stroke-linejoin="round"/><path d="M38 6v12h12" fill="none" stroke="{fg}" stroke-width="3" stroke-linejoin="round"/><path d="M26 28h16M26 35h16M26 42h10" stroke="{fg}" stroke-width="2" stroke-linecap="round"/><rect x="22" y="48" width="20" height="8" rx="2" fill="{accent}"/>"#
+        ),
     };
     format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">{body}</svg>"#)
 }

@@ -204,8 +204,16 @@ pub fn is_video(name: &str) -> bool {
     )
 }
 
+pub fn is_pdf(name: &str) -> bool {
+    extension(name).eq_ignore_ascii_case("pdf")
+}
+
 pub fn is_media(name: &str) -> bool {
     is_audio(name) || is_video(name)
+}
+
+pub fn is_icon_preview(name: &str) -> bool {
+    is_media(name) || is_pdf(name)
 }
 
 // GTK symbolic icon names, resolved by the active icon theme.
@@ -229,7 +237,7 @@ pub fn file_icon(name: &str, is_dir: bool, is_link: bool) -> &'static str {
         "txt" | "md" | "log" => "text-x-generic-symbolic",
         "jpg" | "jpeg" | "jfif" | "png" | "gif" | "webp" => "image-x-generic-symbolic",
         "zip" | "7z" | "rar" | "tar" | "gz" => "package-x-generic-symbolic",
-        "pdf" => "text-x-generic-symbolic",
+        "pdf" => "application-pdf",
         "rs" | "py" | "js" | "ts" | "go" | "c" | "h" => "text-x-generic-symbolic",
         _ => "text-x-generic-symbolic",
     }

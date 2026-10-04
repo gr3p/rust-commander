@@ -124,9 +124,9 @@ fn facts_page(path: &std::path::Path, facts: &Facts, mime: &str) -> gtk::Grid {
         name_label.add_css_class("dim-label");
         let value_label = gtk::Label::new(Some(value));
         value_label.set_xalign(0.0);
-        value_label.set_selectable(true);
         value_label.set_wrap(true);
         value_label.set_hexpand(true);
+        read_only(&value_label);
         grid.attach(&name_label, 0, row, 1, 1);
         grid.attach(&value_label, 1, row, 1, 1);
     };
@@ -172,8 +172,8 @@ fn details_page(path: &std::path::Path, name: &str, mime: &str) -> gtk::Grid {
         name_label.add_css_class("dim-label");
         let value_label = gtk::Label::new(Some(value));
         value_label.set_xalign(0.0);
-        value_label.set_selectable(true);
         value_label.set_hexpand(true);
+        read_only(&value_label);
         grid.attach(&name_label, 0, row as i32, 1, 1);
         grid.attach(&value_label, 1, row as i32, 1, 1);
     }
@@ -368,6 +368,13 @@ fn read_accounts<T>(
     end();
     rows.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
     rows
+}
+
+// Shown as text. A selectable label joins the tab order and looks like a field.
+fn read_only(label: &gtk::Label) {
+    label.set_selectable(true);
+    label.set_can_focus(false);
+    label.set_focus_on_click(false);
 }
 
 fn folder_of(path: &std::path::Path) -> String {
