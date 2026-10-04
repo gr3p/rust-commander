@@ -41,11 +41,15 @@ fn kind(name: &str, is_dir: bool, is_link: bool) -> Kind {
     if is_dir {
         return Kind::Folder;
     }
+    if listing::is_audio(name) {
+        return Kind::Audio;
+    }
+    if listing::is_video(name) {
+        return Kind::Video;
+    }
     match extension(name).to_ascii_lowercase().as_str() {
         "txt" | "md" | "log" => Kind::Text,
-        "mp3" | "flac" | "wav" | "ogg" => Kind::Audio,
-        "jpg" | "jpeg" | "png" | "gif" | "webp" => Kind::Image,
-        "mp4" | "mkv" | "webm" => Kind::Video,
+        "jpg" | "jpeg" | "jfif" | "png" | "gif" | "webp" => Kind::Image,
         "zip" | "7z" | "rar" | "tar" | "gz" | "tgz" | "bz2" | "xz" => Kind::Archive,
         "pdf" => Kind::Pdf,
         "rs" | "py" | "js" | "ts" | "go" | "c" | "h" | "cpp" | "java" => Kind::Code,
@@ -131,6 +135,21 @@ pub fn file_token(pack: &str, name: &str, is_dir: bool, is_link: bool) -> String
         return listing::file_icon(name, is_dir, is_link).to_string();
     }
     format!("@{pack}/{}", theme_icon(name, is_dir, is_link))
+}
+
+// Quick view art for audio and video. Outline in the theme text color, mark in the accent.
+pub fn media_svg(audio: bool, palette: &crate::theme::Palette) -> String {
+    let (fg, accent) = (&palette.foreground, &palette.accent);
+    let body = if audio {
+        format!(
+            r#"<path d="M26 46V14l24-5v31" fill="none" stroke="{fg}" stroke-width="4" stroke-linejoin="round"/><ellipse cx="20" cy="46" rx="7" ry="5.5" fill="{accent}"/><ellipse cx="44" cy="40" rx="7" ry="5.5" fill="{accent}"/>"#
+        )
+    } else {
+        format!(
+            r#"<rect x="6" y="10" width="52" height="44" rx="5" fill="none" stroke="{fg}" stroke-width="3"/><path d="M14 10v44M50 10v44M6 19h8M6 28h8M6 36h8M6 45h8M50 19h8M50 28h8M50 36h8M50 45h8" stroke="{fg}" stroke-width="2"/><path d="M27 23l13 9-13 9z" fill="{accent}"/>"#
+        )
+    };
+    format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">{body}</svg>"#)
 }
 
 pub fn drive_token(pack: &str, removable: bool, network: bool) -> String {

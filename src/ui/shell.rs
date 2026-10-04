@@ -878,8 +878,15 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
         if event.event_type() != gtk::gdk::EventType::ButtonPress {
             return gtk::glib::Propagation::Proceed;
         }
+        // Event positions are in surface space. pick and the popover want frame space.
+        let local = event.position().and_then(|(x, y)| {
+            let native = frame_hit.native()?;
+            let (sx, sy) = native.surface_transform();
+            let point = gtk::graphene::Point::new((x - sx) as f32, (y - sy) as f32);
+            native.compute_point(&frame_hit, &point).map(|p| (p.x() as f64, p.y() as f64))
+        });
         // The preview is not a file pane. A click there must not hide it.
-        let in_preview = event.position().is_some_and(|(x, y)| {
+        let in_preview = local.is_some_and(|(x, y)| {
             frame_hit.pick(x, y, gtk::PickFlags::DEFAULT).is_some_and(|hit| under(&hit, &preview_root))
         });
         if !in_preview {
@@ -893,7 +900,7 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
             picture_focus.grab_focus();
         }
         if image && button == 3 {
-            if let Some((x, y)) = event.position() {
+            if let Some((x, y)) = local {
                 menu.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
                 menu.popup();
             }

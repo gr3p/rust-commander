@@ -20,6 +20,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 landlock = "0.4.7"
 libc = "0.2.189"
 relm4 = { version = "0.11.0", features = ["macros"] }
+resvg = { version = "0.48", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 tar = "0.4.45"
 toml = "1.1.6"

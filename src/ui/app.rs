@@ -480,6 +480,7 @@ impl App {
                 let name = theme::active_name(&self.cfg.theme, &config::active_theme_path());
                 self.apply_css(&theme::load_named(&name));
                 self.paint_theme();
+                self.note_preview_target();
                 self.status = format!("Theme {name}");
             }
             Msg::PickPlace(pane, path) => {

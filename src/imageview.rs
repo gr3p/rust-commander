@@ -19,7 +19,7 @@ pub struct Rgba {
 pub fn is_image(name: &str) -> bool {
     matches!(
         listing::extension(name).to_ascii_lowercase().as_str(),
-        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "ico"
+        "jpg" | "jpeg" | "jfif" | "png" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "ico"
     )
 }
 
@@ -67,6 +67,23 @@ pub fn decode(path: &Path, max_edge: u32) -> Result<Rgba, String> {
         height: rgba.height(),
         pixels: rgba.into_raw(),
     })
+}
+
+pub fn render_svg(svg: &str, edge: u32) -> Result<Rgba, String> {
+    let tree = resvg::usvg::Tree::from_str(svg, &resvg::usvg::Options::default()).map_err(|err| err.to_string())?;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(edge, edge).ok_or_else(|| "Bad icon size".to_string())?;
+    let scale = edge as f32 / tree.size().width().max(tree.size().height());
+    resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+    // tiny-skia keeps premultiplied alpha. The texture expects straight RGBA.
+    let pixels = pixmap
+        .pixels()
+        .iter()
+        .flat_map(|px| {
+            let c = px.demultiply();
+            [c.red(), c.green(), c.blue(), c.alpha()]
+        })
+        .collect();
+    Ok(Rgba { width: edge, height: edge, pixels })
 }
 
 fn downscale(img: DynamicImage, max_edge: u32) -> DynamicImage {

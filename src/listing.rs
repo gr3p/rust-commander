@@ -190,6 +190,24 @@ pub fn extension(name: &str) -> &str {
     }
 }
 
+pub fn is_audio(name: &str) -> bool {
+    matches!(
+        extension(name).to_ascii_lowercase().as_str(),
+        "mp3" | "flac" | "wav" | "ogg" | "opus" | "aac" | "m4a" | "wma" | "aiff" | "aif"
+    )
+}
+
+pub fn is_video(name: &str) -> bool {
+    matches!(
+        extension(name).to_ascii_lowercase().as_str(),
+        "mp4" | "mkv" | "webm" | "avi" | "mov" | "m4v" | "mpg" | "mpeg" | "wmv" | "flv" | "ts" | "m2ts" | "ogv" | "3gp"
+    )
+}
+
+pub fn is_media(name: &str) -> bool {
+    is_audio(name) || is_video(name)
+}
+
 // GTK symbolic icon names, resolved by the active icon theme.
 pub fn file_icon(name: &str, is_dir: bool, is_link: bool) -> &'static str {
     if name == ".." {
@@ -201,11 +219,15 @@ pub fn file_icon(name: &str, is_dir: bool, is_link: bool) -> &'static str {
     if is_dir {
         return "folder-symbolic";
     }
+    if is_audio(name) {
+        return "audio-x-generic-symbolic";
+    }
+    if is_video(name) {
+        return "video-x-generic-symbolic";
+    }
     match extension(name).to_ascii_lowercase().as_str() {
         "txt" | "md" | "log" => "text-x-generic-symbolic",
-        "mp3" | "flac" | "wav" | "ogg" => "audio-x-generic-symbolic",
-        "jpg" | "png" | "gif" | "webp" => "image-x-generic-symbolic",
-        "mp4" | "mkv" | "webm" => "video-x-generic-symbolic",
+        "jpg" | "jpeg" | "jfif" | "png" | "gif" | "webp" => "image-x-generic-symbolic",
         "zip" | "7z" | "rar" | "tar" | "gz" => "package-x-generic-symbolic",
         "pdf" => "text-x-generic-symbolic",
         "rs" | "py" | "js" | "ts" | "go" | "c" | "h" => "text-x-generic-symbolic",

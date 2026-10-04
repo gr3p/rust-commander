@@ -481,7 +481,22 @@ impl App {
             return;
         };
         let charset = self.charset;
-        if path.file_name().and_then(|name| name.to_str()).is_some_and(imageview::is_image) {
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        if rust_commander::listing::is_media(name) {
+            let palette = rust_commander::theme::load_named(&rust_commander::theme::active_name(
+                &self.cfg.theme,
+                &rust_commander::config::active_theme_path(),
+            ));
+            let svg = rust_commander::icons::media_svg(rust_commander::listing::is_audio(name), &palette);
+            let stack = &self.shell.panes[self.state.active.other().index()].stack;
+            let edge = stack.width().min(stack.height()).clamp(64, 512) as u32;
+            let body = imageview::render_svg(&svg, edge)
+                .map_or_else(PreviewBody::Text, |img| PreviewBody::Image { width: img.width, height: img.height, pixels: img.pixels });
+            self.preview.set_body(body);
+            self.paint_preview();
+            return;
+        }
+        if imageview::is_image(name) {
             let tx = sender.input_sender().clone();
             let live = Arc::clone(&self.preview_live);
             live.store(generation, Ordering::Relaxed);
@@ -632,9 +647,15 @@ impl App {
             .is_some_and(|entry| !entry.is_dir() && imageview::is_image(&entry.name))
     }
 
+    pub(in crate::ui::app) fn cursor_is_media(&self) -> bool {
+        self.state
+            .cursor_entry(self.state.active)
+            .is_some_and(|entry| !entry.is_dir() && rust_commander::listing::is_media(&entry.name))
+    }
+
     pub(in crate::ui::app) fn paint_mode_bar(&self) {
         let image = self.cfg.mode_buttons && self.lister.is_none() && (self.image.is_some() || (self.state.quick_view && self.cursor_is_image()));
-        let text = self.cfg.mode_buttons && (self.lister.is_some() || (self.state.quick_view && self.cursor_is_file() && !self.cursor_is_image()));
+        let text = self.cfg.mode_buttons && (self.lister.is_some() || (self.state.quick_view && self.cursor_is_file() && !self.cursor_is_image() && !self.cursor_is_media()));
         let page = if image { "image" } else if text { "text" } else { "files" };
         if self.shell.mode_bar.visible_child_name().as_deref() != Some(page) {
             self.shell.mode_bar.set_visible_child_name(page);
@@ -649,7 +670,8 @@ impl App {
             && self.lister.is_none()
             && self.state.quick_view
             && self.cursor_is_file()
-            && !self.cursor_is_image();
+            && !self.cursor_is_image()
+            && !self.cursor_is_media();
         self.shell.edit_button.set_visible(quick_text);
         self.shell.save_button.set_visible(quick_text);
         self.shell.discard_button.set_visible(quick_text && self.shell.editing.get());

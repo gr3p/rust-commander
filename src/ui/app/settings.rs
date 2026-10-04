@@ -415,6 +415,7 @@ impl App {
         let _ = std::fs::write(config::active_theme_path(), format!("{name}\n"));
         self.restyle();
         self.paint_theme();
+        self.note_preview_target();
     }
 
     pub(in crate::ui::app) fn paint_theme(&self) {
