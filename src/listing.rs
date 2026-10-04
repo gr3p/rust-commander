@@ -208,12 +208,19 @@ pub fn is_pdf(name: &str) -> bool {
     extension(name).eq_ignore_ascii_case("pdf")
 }
 
+pub fn is_archive(name: &str) -> bool {
+    matches!(
+        extension(name).to_ascii_lowercase().as_str(),
+        "zip" | "7z" | "rar" | "tar" | "gz" | "tgz" | "bz2" | "xz"
+    )
+}
+
 pub fn is_media(name: &str) -> bool {
     is_audio(name) || is_video(name)
 }
 
 pub fn is_icon_preview(name: &str) -> bool {
-    is_media(name) || is_pdf(name)
+    is_media(name) || is_pdf(name) || is_archive(name)
 }
 
 // GTK symbolic icon names, resolved by the active icon theme.

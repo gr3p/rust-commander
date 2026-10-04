@@ -91,6 +91,22 @@ impl App {
         gtk::prelude::GtkWindowExt::focus(&self.shell.window).is_some_and(|widget| widget.has_css_class("panel-shell"))
     }
 
+    // Tab toggles the file list and the shell. The shell stays on the pane where it was opened.
+    pub(in crate::ui::app) fn focus_across_shell(&mut self) {
+        let pane = if self.shell_has_focus() {
+            self.focus_list();
+            self.state.active.index()
+        } else {
+            let id = self.shell.shell_current;
+            if let Some(shell) = self.shell.shells.iter().find(|shell| Some(shell.id) == id) {
+                shell.term.grab_focus();
+            }
+            self.state.active.other().index()
+        };
+        // The file pane is already accented, and the shell pane never becomes active, so sync will not blink.
+        super::shell::blink_frame(&self.shell.panes[pane].frame, pane, false);
+    }
+
     pub(in crate::ui::app) fn show_shell_index(&mut self, index: usize) {
         let Some(id) = self.shell.shells.get(index).map(|shell| shell.id) else { return };
         self.select_shell(id);

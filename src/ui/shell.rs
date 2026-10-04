@@ -462,7 +462,7 @@ pub fn blink_widget(widget: &gtk::Widget) {
     });
 }
 
-pub fn blink_frame(frame: &gtk::Frame, pane: usize) {
+pub fn blink_frame(frame: &gtk::Frame, pane: usize, only_while_active: bool) {
     if !FLASH_ENABLED.load(Ordering::Relaxed) || pane > 1 {
         return;
     }
@@ -476,7 +476,9 @@ pub fn blink_frame(frame: &gtk::Frame, pane: usize) {
         }
         let n = step.get() + 1;
         step.set(n);
-        if n % 2 == 0 && frame.has_css_class("pane-active") {
+        // A pane that lost the accent must not flash again. The shell pane never has it.
+        let show = n % 2 == 0 && (!only_while_active || frame.has_css_class("pane-active"));
+        if show {
             frame.add_css_class("pane-blink");
         } else {
             frame.remove_css_class("pane-blink");
@@ -496,13 +498,10 @@ pub fn set_flash_enabled(enabled: bool) {
 
 const LOGO_PNG: &[u8] = include_bytes!("../../img/rust-commander.png");
 const APP_ID: &str = "se.rustcommander.RustCommander";
-// Not "rust-commander": the dock keeps the previous picture for that name until the shell restarts.
-const ICON_NAME: &str = APP_ID;
 
 fn set_logo(window: &gtk::Window) {
     // GNOME Shell ignores the toplevel icon and reads the desktop file instead.
     publish_logo();
-    window.set_icon_name(Some(ICON_NAME));
     let bytes = gtk::glib::Bytes::from_static(LOGO_PNG);
     let Ok(texture) = gtk::gdk::Texture::from_bytes(&bytes) else { return };
     window.connect_realize(move |window| {
@@ -513,25 +512,41 @@ fn set_logo(window: &gtk::Window) {
 }
 
 // GLib 2.88 drops a desktop file whose Exec is not an existing binary, and the shell then shows a gear.
+// The shell scans the icon theme only when it starts, so Icon= is a file path. The hash in the name
+// makes a new logo a new path, which the shell's texture cache has never seen.
 fn publish_logo() {
     let Some(data) = data_home() else { return };
-    let icon = data.join(format!("icons/hicolor/512x512/apps/{ICON_NAME}.png"));
+    let dir = data.join("rust-commander");
+    let name = format!("{APP_ID}-{:016x}.png", fnv1a(LOGO_PNG));
+    let icon = dir.join(&name);
     if let Err(err) = write_bytes(&icon, LOGO_PNG) {
         rust_commander::log::error(&format!("logo icon {}: {err}", icon.display()));
+        return;
     }
-    let stale = data.join("icons/hicolor/512x512/apps/rust-commander.png");
-    if stale != icon {
-        let _ = std::fs::remove_file(&stale);
+    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let old = entry.file_name();
+        let old = old.to_string_lossy();
+        if old.starts_with(APP_ID) && old.ends_with(".png") && old != name {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    for stale in ["rust-commander.png", "se.rustcommander.RustCommander.png"] {
+        let _ = std::fs::remove_file(data.join("icons/hicolor/512x512/apps").join(stale));
     }
     let Some(exe) = std::env::current_exe().ok().filter(|path| path.is_file()) else { return };
     let desktop = data.join("applications").join(format!("{APP_ID}.desktop"));
     let entry = format!(
-        "[Desktop Entry]\nType=Application\nName=Rust Commander\nComment=Dual-pane file manager\nExec={}\nIcon={ICON_NAME}\nTerminal=false\nCategories=System;FileManager;\nStartupWMClass={APP_ID}\n",
-        desktop_exec(&exe)
+        "[Desktop Entry]\nType=Application\nName=Rust Commander\nComment=Dual-pane file manager\nExec={}\nIcon={}\nTerminal=false\nCategories=System;FileManager;\nStartupWMClass={APP_ID}\n",
+        desktop_exec(&exe),
+        icon.display()
     );
     if let Err(err) = write_bytes(&desktop, entry.as_bytes()) {
         rust_commander::log::error(&format!("logo desktop {}: {err}", desktop.display()));
     }
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &b| (hash ^ b as u64).wrapping_mul(0x0100_0000_01b3))
 }
 
 fn data_home() -> Option<PathBuf> {
@@ -695,8 +710,9 @@ fn terminal_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
     use gtk::gdk::Key;
     let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
     let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
-    // Escape stays in the shell (vim, fzf). F9 toggles back to the file list. F1 opens commands.
-    (!ctrl && !alt && matches!(key, Key::F1 | Key::F9))
+    // Escape stays in the shell (vim, fzf). F9 toggles the file list. F1 opens commands.
+    // Tab switches to the file pane. Completion inside the shell is given up.
+    (!ctrl && !alt && matches!(key, Key::F1 | Key::F9 | Key::Tab | Key::ISO_Left_Tab))
         || (ctrl && !alt && matches!(key, Key::q | Key::Q | Key::w | Key::W | Key::F9))
         || (alt && !ctrl && is_digit_key(key))
 }
@@ -941,12 +957,16 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     preview_kind.set_vexpand(true);
     let menu = image_menu(sender);
     menu.set_parent(&frame);
+    let terminal_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    terminal_slot.set_hexpand(true);
+    terminal_slot.set_vexpand(true);
     let watch = gtk::EventControllerLegacy::new();
     watch.set_propagation_phase(gtk::PropagationPhase::Capture);
     let tx = sender.clone();
     let active_pane = active_pane.clone();
     let frame_hit = frame.clone();
     let preview_root: gtk::Widget = preview_kind.clone().upcast();
+    let terminal_root: gtk::Widget = terminal_slot.clone().upcast();
     let picture_focus = picture.clone();
     let preview_page = preview_kind.clone();
     watch.connect_event(move |_, event| {
@@ -960,10 +980,15 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
             let point = gtk::graphene::Point::new((x - sx) as f32, (y - sy) as f32);
             native.compute_point(&frame_hit, &point).map(|p| (p.x() as f64, p.y() as f64))
         });
+        let hit = |root: &gtk::Widget| {
+            local.is_some_and(|(x, y)| frame_hit.pick(x, y, gtk::PickFlags::DEFAULT).is_some_and(|hit| under(&hit, root)))
+        };
+        // A click in the shell may select text. It must not activate that pane, or the shell moves.
+        if hit(&terminal_root) {
+            return gtk::glib::Propagation::Proceed;
+        }
         // The preview is not a file pane. A click there must not hide it.
-        let in_preview = local.is_some_and(|(x, y)| {
-            frame_hit.pick(x, y, gtk::PickFlags::DEFAULT).is_some_and(|hit| under(&hit, &preview_root))
-        });
+        let in_preview = hit(&preview_root);
         if !in_preview {
             active_pane.set(index);
             tx.emit(super::msg::Msg::FocusPane(index));
@@ -984,9 +1009,6 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
         gtk::glib::Propagation::Proceed
     });
     frame.add_controller(watch);
-    let terminal_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    terminal_slot.set_hexpand(true);
-    terminal_slot.set_vexpand(true);
     let stack = gtk::Stack::new();
     stack.add_named(&scroll, Some("list"));
     stack.add_named(&preview_kind, Some("preview"));

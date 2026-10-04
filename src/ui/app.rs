@@ -731,6 +731,7 @@ impl App {
             Key::F9 if shift => self.start_sfv(sender),
             Key::F9 => self.toggle_panel_terminal(sender),
             Key::ISO_Left_Tab | Key::Tab if self.shell.editing.get() || self.state.quick_view => {}
+            Key::ISO_Left_Tab | Key::Tab if self.state.panel_terminal => self.focus_across_shell(),
             Key::ISO_Left_Tab | Key::Tab => {
                 self.state.active = self.state.active.other();
                 self.note_preview_target();
@@ -1316,7 +1317,7 @@ impl App {
             if !ui.frame.has_css_class(class) {
                 ui.frame.set_css_classes(&[class]);
                 if active && focused_before {
-                    shell::blink_frame(&ui.frame, pane);
+                    shell::blink_frame(&ui.frame, pane, true);
                 }
             }
             if !self.focus_inside(&ui.path) && ui.path.text().as_str() != path {
