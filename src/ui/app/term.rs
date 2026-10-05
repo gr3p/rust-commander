@@ -54,7 +54,7 @@ impl App {
         let button = gtk::Button::new();
         button.add_css_class("drive");
         button.set_focus_on_click(false);
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         let number = gtk::Label::new(Some("1"));
         number.add_css_class("drive-num");
         let caption = gtk::Label::new(Some("sh"));
@@ -191,7 +191,7 @@ impl App {
         if self.shell.shell_buttons.is_visible() != buttons {
             self.shell.shell_buttons.set_visible(buttons);
         }
-        let bar = !self.shell.drives.is_empty() || buttons;
+        let bar = !self.shell.drives.is_empty() || !self.shell.idle_drives.is_empty() || buttons;
         if self.shell.shell_bar.is_visible() != bar {
             self.shell.shell_bar.set_visible(bar);
         }

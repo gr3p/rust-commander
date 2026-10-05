@@ -368,6 +368,18 @@ pub fn column_pixels(chars: [usize; 5], unit: i32) -> [i32; 5] {
     out
 }
 
+/// Fits wanted column pixels to the pane: Name takes what the other columns leave, so long names never decide the layout.
+pub fn fit_columns(wanted: [i32; 5], avail: i32) -> [i32; 5] {
+    const NAME_MIN: i32 = 96;
+    if avail <= 0 {
+        return wanted;
+    }
+    let mut out = wanted;
+    let others: i32 = out[1..].iter().sum();
+    out[0] = (avail - others).max(NAME_MIN);
+    out
+}
+
 pub fn entry_path(dir: &Path, entry: &Entry) -> std::path::PathBuf {
     if entry.name.as_ref() == ".." {
         dir.parent().unwrap_or(dir).to_path_buf()

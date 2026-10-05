@@ -99,10 +99,16 @@ const MEMORY: &[(&str, fn() -> Result<(), String>)] = &[
     ("file_icons_by_kind", file_icons_by_kind),
     ("icon_packs_cover_roles", icon_packs_cover_roles),
     ("column_widths_follow_text", column_widths_follow_text),
+    ("columns_fit_pane", columns_fit_pane),
     ("filter_keeps_substring", filter_keeps_substring),
     ("insert_mark_is_used", insert_mark_is_used),
     ("space_marks_without_moving_cursor", space_marks_without_moving_cursor),
     ("colors_toml_overrides_palette", colors_toml_overrides_palette),
+    ("colors_toml_resolves_legacy_names", colors_toml_resolves_legacy_names),
+    ("light_theme_is_detected", light_theme_is_detected),
+    ("shell_style_reads_tokens", shell_style_reads_tokens),
+    ("omarchy_style_changes_rows", omarchy_style_changes_rows),
+    ("disk_info_reads_mount_and_space", disk_info_reads_mount_and_space),
     ("list_background_color_and_image", list_background_color_and_image),
     ("enter_opens_directory", enter_opens_directory),
     ("up_goes_to_parent", up_goes_to_parent),
@@ -286,12 +292,27 @@ fn icon_packs_cover_roles() -> Result<(), String> {
     eq(icons::file_token(AWESOME, "a.rs", false, false), "\u{f1c9}".into(), "aw code")?;
     eq(icons::file_token(AWESOME, "a.pdf", false, false), "\u{f1c1}".into(), "aw pdf")?;
     eq(icons::file_token(AWESOME, "..", true, false), String::new(), "up")?;
-    eq(icons::drive_token(AWESOME, false, false), "\u{f0a0}".into(), "aw disk")?;
-    eq(icons::drive_token(AWESOME, true, false), "\u{f287}".into(), "aw usb")?;
-    eq(icons::drive_token(AWESOME, false, true), "\u{f233}".into(), "aw net")?;
-    eq(icons::drive_token(SYSTEM, false, false), "drive-harddisk-symbolic".into(), "sys disk")?;
+    eq(icons::drive_token(AWESOME, false, false, false), "\u{f0a0}".into(), "aw disk")?;
+    eq(icons::drive_token(AWESOME, true, false, false), "\u{f287}".into(), "aw usb")?;
+    eq(icons::drive_token(AWESOME, false, true, false), "\u{f233}".into(), "aw net")?;
+    eq(icons::drive_token(SYSTEM, false, false, false), "drive-harddisk-symbolic".into(), "sys disk")?;
     eq(icons::file_token("Yaru", "pic.png", false, false), "@Yaru/image-x-generic".into(), "theme file")?;
-    eq(icons::drive_token("Adwaita", false, false), "@Adwaita/drive-harddisk".into(), "theme disk")
+    eq(icons::drive_token("Adwaita", false, false, false), "@Adwaita/drive-harddisk".into(), "theme disk")?;
+    eq(icons::drive_token(AWESOME, true, false, true), "\u{f192}".into(), "aw disc")?;
+    eq(icons::drive_token(SYSTEM, true, false, true), "media-optical-symbolic".into(), "sys disc")
+}
+
+fn columns_fit_pane() -> Result<(), String> {
+    let wanted = [640, 80, 90, 188, 120];
+    let wide = listing::fit_columns(wanted, 1000);
+    if wide.iter().sum::<i32>() != 1000 || wide[0] <= 96 {
+        return Err(format!("wide {wide:?}"));
+    }
+    let narrow = listing::fit_columns(wanted, 500);
+    if narrow[0] != 96 || narrow[1..] != wanted[1..] {
+        return Err(format!("narrow {narrow:?}"));
+    }
+    eq(listing::fit_columns(wanted, 0), wanted, "unknown width")
 }
 
 fn column_widths_follow_text() -> Result<(), String> {
@@ -391,6 +412,96 @@ bright_foreground = \"#555555\"
 ";
     let palette = theme::from_colors_toml(text).ok_or("parse")?;
     eq(palette.background.as_str(), "#111111", "colors")
+}
+
+fn colors_toml_resolves_legacy_names() -> Result<(), String> {
+    let text = "\
+bg = \"#101010\"
+fg = \"#e0e0e0\"
+color1 = \"#aa0000\"
+color2 = \"#00aa00\"
+color4 = \"#0000aa\"
+color8 = \"#666\"
+selection = \"#222222\"
+";
+    let palette = theme::from_colors_toml(text).ok_or("parse")?;
+    eq(palette.background.as_str(), "#101010", "bg alias")?;
+    eq(palette.foreground.as_str(), "#e0e0e0", "fg alias")?;
+    eq(palette.red.as_str(), "#aa0000", "red from color1")?;
+    eq(palette.green.as_str(), "#00aa00", "green from color2")?;
+    eq(palette.accent.as_str(), "#0000aa", "accent from blue")?;
+    eq(palette.muted.as_str(), "#666666", "muted from color8, short hex widened")?;
+    eq(palette.bright.as_str(), "#e0e0e0", "bright falls back to foreground")
+}
+
+fn light_theme_is_detected() -> Result<(), String> {
+    let base = "background = \"#ffffff\"\nforeground = \"#000000\"\naccent = \"#333333\"\nselection = \"#cccccc\"\nmuted = \"#888888\"\n";
+    let derived = theme::from_colors_toml(base).ok_or("parse")?;
+    eq(derived.light, true, "luminance")?;
+    let forced = theme::from_colors_toml(&format!("mode = \"dark\"\n{base}")).ok_or("parse")?;
+    eq(forced.light, false, "explicit mode")
+}
+
+fn shell_style_reads_tokens() -> Result<(), String> {
+    let none = theme::ShellStyle::from_text("", 0);
+    eq(none, theme::ShellStyle::default(), "defaults without shell.toml")?;
+    let text = "\
+[hyprland]
+active-border = \"rgba(33ccffee) rgba(00ff99ee) 45deg\"
+
+[controls]
+selected-fill-alpha = 0.18
+hover-cursor-fill-alpha = 0.08 # inline comment
+
+[spacing]
+scale = 1.0
+scale-with-font = true
+
+[font]
+base-size = 16
+";
+    let style = theme::ShellStyle::from_text(text, 8);
+    eq(style.active_border.clone(), Some("#33ccff".to_string()), "gradient first stop")?;
+    eq(style.selected_alpha, Some(0.18), "selected alpha")?;
+    eq(style.hover_alpha, Some(0.08), "hover alpha")?;
+    eq(style.font_px, 17, "font px")?;
+    eq(style.space(6), 8, "spacing follows font")?;
+    eq(style.radius, 8, "radius")
+}
+
+fn omarchy_style_changes_rows() -> Result<(), String> {
+    let plain = theme::builtin();
+    let style = theme::ShellStyle::from_text("[controls]\nselected-fill-alpha = 0.5\n", 6);
+    let styled = plain.clone().styled(&style);
+    if styled.row_selected == plain.row_selected {
+        return Err("selected row unchanged".into());
+    }
+    eq(styled.row_hover.as_str(), plain.row_hover.as_str(), "hover untouched without a token")?;
+    let sheet = theme::stylesheet(&styled, &style);
+    if !sheet.contains(&styled.row_selected) || !sheet.contains("border-radius: 6px") {
+        return Err("stylesheet ignores style".into());
+    }
+    Ok(())
+}
+
+fn disk_info_reads_mount_and_space() -> Result<(), String> {
+    use rust_commander::places;
+    let text = "/dev/sda1 / ext4 rw,relatime 0 0\n/dev/sdb1 /mnt/My\\040Disk exfat rw,nosuid 0 0\n";
+    let (mount, device, fstype, options) = places::mount_entry(text, Path::new("/mnt/My Disk/photos")).ok_or("entry")?;
+    eq(mount, PathBuf::from("/mnt/My Disk"), "deepest mount wins")?;
+    eq(device.as_str(), "/dev/sdb1", "device")?;
+    eq(fstype.as_str(), "exfat", "fs type")?;
+    eq(options.as_str(), "rw,nosuid", "options")?;
+    let root = places::mount_entry(text, Path::new("/home/me")).ok_or("root")?;
+    eq(root.0, PathBuf::from("/"), "falls back to root")?;
+    let info = places::disk_info(Path::new("/")).map_err(|e| e.to_string())?;
+    if info.total == 0 || info.free > info.total || info.avail > info.free {
+        return Err(format!("space {} {} {}", info.total, info.free, info.avail));
+    }
+    if info.used_percent() > 100 || !places::summary(&info).contains("free of") {
+        return Err("summary".into());
+    }
+    Ok(())
 }
 
 fn list_background_color_and_image() -> Result<(), String> {
@@ -541,8 +652,13 @@ systemd-1 /proc/sys/fs/binfmt_misc autofs rw 0 0
 systemd-1 /mnt/wd4tb autofs rw 0 0
 systemd-1 /mnt/seagate12tb autofs rw 0 0
 //smb.lan/seagate12tb /mnt/seagate12tb cifs rw 0 0
+/dev/sr0 /run/media/marcus/MY_DISC iso9660 ro 0 0
 ";
     let mounts = rust_commander::places::parse_mounts(text);
+    let disc = mounts.iter().find(|m| m.path == pb("/run/media/marcus/MY_DISC")).ok_or("disc")?;
+    if !disc.optical || !disc.removable || mounts.iter().any(|m| m.path == pb("/media/marcus/USB") && m.optical) {
+        return Err("optical flag".into());
+    }
     let paths: Vec<_> = mounts.iter().map(|m| m.path.clone()).collect();
     eq(paths.first().cloned().unwrap_or_default(), pb("/"), "root first")?;
     if paths.iter().any(|p| p.starts_with("/run") && !p.starts_with("/run/media")) {
@@ -1238,7 +1354,7 @@ fn bookmark_roundtrip_config(dir: &Path) -> Result<(), String> {
     if loaded.file_icons {
         return Err("file icons default".into());
     }
-    if loaded.icon_pack != "awesome" {
+    if loaded.icon_pack != theme::OMARCHY {
         return Err("icon pack default".into());
     }
     Ok(())

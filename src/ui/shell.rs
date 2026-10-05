@@ -41,6 +41,7 @@ pub struct PaneUi {
 pub struct Shell {
     pub window: gtk::Window,
     pub panes: [PaneUi; 2],
+    pub paned: gtk::Paned,
     pub status: gtk::Label,
     pub css: gtk::CssProvider,
     pub f_labels: Vec<String>,
@@ -50,6 +51,8 @@ pub struct Shell {
     pub hints: [Hint; 6],
     pub active: Rc<Cell<usize>>,
     pub drives: Vec<(PathBuf, gtk::Button)>,
+    pub idle_drives: Vec<gtk::Button>,
+    pub drive_snapshot: DriveSnapshot,
     pub edit_button: gtk::Button,
     pub save_button: gtk::Button,
     pub discard_button: gtk::Button,
@@ -88,7 +91,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
     }
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let active = Rc::new(Cell::new(0));
-    let (shell_bar, shell_buttons, drives) = drive_bar(sender, &active, iconpack::active(icon_pack));
+    let (shell_bar, shell_buttons, drives, idle_drives, drive_snapshot) = drive_bar(sender, &active, &iconpack::active(icon_pack));
     root.append(&shell_bar);
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
     paned.add_css_class("panes");
@@ -101,6 +104,22 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
     paned.set_end_child(Some(&right.frame));
     paned.set_resize_start_child(true);
     paned.set_resize_end_child(true);
+    // Keep the divider centred on every window resize.
+    let last_width = Cell::new(0);
+    let tx_tick = sender.clone();
+    paned.add_tick_callback(move |paned, _| {
+        let width = paned.width();
+        if width != last_width.get() {
+            last_width.set(width);
+            if width > 0 {
+                paned.set_position(width / 2);
+                tx_tick.emit(super::msg::Msg::PanesResized);
+            }
+        }
+        gtk::glib::ControlFlow::Continue
+    });
+    let tx = sender.clone();
+    paned.connect_position_notify(move |_| tx.emit(super::msg::Msg::PanesResized));
     root.append(&paned);
 
     let status = gtk::Label::new(Some(""));
@@ -235,6 +254,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
     Shell {
         window: window.clone(),
         panes: [left, right],
+        paned,
         status,
         css,
         f_labels,
@@ -244,6 +264,8 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
         hints,
         active,
         drives,
+        idle_drives,
+        drive_snapshot,
         edit_button,
         save_button,
         discard_button,
@@ -332,21 +354,74 @@ fn drive_bar(
     sender: &relm4::Sender<super::msg::Msg>,
     active: &Rc<Cell<usize>>,
     icon_pack: &str,
-) -> (gtk::Box, gtk::Box, Vec<(PathBuf, gtk::Button)>) {
-    let mounts = rust_commander::places::mounts();
+) -> (gtk::Box, gtk::Box, Vec<(PathBuf, gtk::Button)>, Vec<gtk::Button>, DriveSnapshot) {
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
     bar.add_css_class("drives");
     bar.set_margin_top(2);
+    let snapshot = (rust_commander::places::mounts(), super::drives::idle_volumes());
+    let (drives, idle) = drive_buttons(sender, active, icon_pack, &snapshot);
+    for button in drives.iter().map(|(_, button)| button).chain(idle.iter()) {
+        bar.append(button);
+    }
+    let shells = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    shells.set_margin_start(8);
+    shells.set_visible(false);
+    bar.append(&shells);
+    bar.set_visible(!drives.is_empty() || !idle.is_empty());
+    (bar, shells, drives, idle, snapshot)
+}
+
+pub type DriveSnapshot = (Vec<rust_commander::places::Mount>, Vec<super::drives::Idle>);
+
+/// Rebuilds the drive buttons when the set of drives changed. Returns the mount points that went away.
+pub fn rebuild_drives(
+    shell: &mut Shell,
+    sender: &relm4::Sender<super::msg::Msg>,
+    icon_pack: &str,
+) -> Option<Vec<PathBuf>> {
+    let snapshot = (rust_commander::places::mounts(), super::drives::idle_volumes());
+    if snapshot == shell.drive_snapshot {
+        return None;
+    }
+    let gone = shell
+        .drive_snapshot
+        .0
+        .iter()
+        .filter(|old| !snapshot.0.iter().any(|new| new.path == old.path))
+        .map(|old| old.path.clone())
+        .collect();
+    for button in shell.drives.drain(..).map(|(_, button)| button).chain(shell.idle_drives.drain(..)) {
+        shell.shell_bar.remove(&button);
+    }
+    let (drives, idle) = drive_buttons(sender, &shell.active, &iconpack::active(icon_pack), &snapshot);
+    let mut prev: Option<gtk::Widget> = None;
+    for button in drives.iter().map(|(_, button)| button).chain(idle.iter()) {
+        shell.shell_bar.insert_child_after(button, prev.as_ref());
+        prev = Some(button.clone().upcast());
+    }
+    shell.drives = drives;
+    shell.idle_drives = idle;
+    shell.drive_snapshot = snapshot;
+    Some(gone)
+}
+
+fn drive_buttons(
+    sender: &relm4::Sender<super::msg::Msg>,
+    active: &Rc<Cell<usize>>,
+    icon_pack: &str,
+    (mounts, idle): &DriveSnapshot,
+) -> (Vec<(PathBuf, gtk::Button)>, Vec<gtk::Button>) {
+    use super::msg::Msg;
     let mut drives = Vec::new();
-    for (index, mount) in mounts.into_iter().enumerate() {
+    for (index, mount) in mounts.iter().enumerate() {
         let button = gtk::Button::new();
         button.add_css_class("drive");
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         let number = gtk::Label::new(Some(&(index + 1).to_string()));
         number.add_css_class("drive-num");
         row.append(&number);
         row.append(&iconpack::icon_widget(
-            &icons::drive_token(icon_pack, mount.removable, mount.network),
+            &icons::drive_token(icon_pack, mount.removable, mount.network, mount.optical),
             16,
         ));
         let caption = gtk::Label::new(Some(&mount.label));
@@ -364,21 +439,104 @@ fn drive_bar(
         } else {
             format!("{shortcut}  {}  {}", mount.device, mount.path.display())
         };
-        button.set_tooltip_text(Some(&tip));
+        // Free space changes while the program runs, so it is read each time the tip opens.
+        button.set_has_tooltip(true);
+        let mount_path = mount.path.clone();
+        button.connect_query_tooltip(move |_, _, _, _, tooltip| {
+            let space = rust_commander::places::disk_info(&mount_path)
+                .map(|info| rust_commander::places::summary(&info))
+                .unwrap_or_default();
+            tooltip.set_text(Some(&format!("{tip}\n{space}")));
+            true
+        });
+        let menu_click = gtk::GestureClick::new();
+        menu_click.set_button(gtk::gdk::BUTTON_SECONDARY);
+        let tx_menu = sender.clone();
+        let menu_path = mount.path.clone();
+        menu_click.connect_pressed(move |gesture, _, _, _| {
+            let Some(button) = gesture.widget() else { return };
+            let can = super::drives::actions(&menu_path);
+            let mut items: Vec<(&str, Box<dyn Fn()>)> = Vec::new();
+            let (tx, path) = (tx_menu.clone(), menu_path.clone());
+            items.push(("Properties", Box::new(move || tx.emit(Msg::DiskInfo(Some(path.clone()))))));
+            if can.unmount {
+                let (tx, path) = (tx_menu.clone(), menu_path.clone());
+                items.push(("Unmount", Box::new(move || tx.emit(Msg::Unmount(path.clone(), false)))));
+            }
+            if can.eject {
+                let (tx, path) = (tx_menu.clone(), menu_path.clone());
+                items.push(("Eject", Box::new(move || tx.emit(Msg::Unmount(path.clone(), true)))));
+            }
+            popup_menu(&button, items);
+        });
+        button.add_controller(menu_click);
         button.set_focus_on_click(false);
         let tx = sender.clone();
         let path = mount.path.clone();
-        drives.push((mount.path, button.clone()));
+        drives.push((mount.path.clone(), button.clone()));
         let active = active.clone();
-        button.connect_clicked(move |_| tx.emit(super::msg::Msg::Mount(active.get(), path.clone())));
-        bar.append(&button);
+        button.connect_clicked(move |_| tx.emit(Msg::Mount(active.get(), path.clone())));
     }
-    let shells = gtk::Box::new(gtk::Orientation::Horizontal, 2);
-    shells.set_margin_start(8);
-    shells.set_visible(false);
-    bar.append(&shells);
-    bar.set_visible(!drives.is_empty());
-    (bar, shells, drives)
+    let mut idles = Vec::new();
+    for volume in idle {
+        let button = gtk::Button::new();
+        button.add_css_class("drive");
+        button.add_css_class("idle");
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        row.append(&iconpack::icon_widget(&icons::drive_token(icon_pack, true, false, volume.optical), 16));
+        let caption = gtk::Label::new(Some(&volume.label));
+        caption.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        caption.set_max_width_chars(10);
+        row.append(&caption);
+        button.set_child(Some(&row));
+        button.set_tooltip_text(Some(&format!("{}  Click to mount", volume.id)));
+        button.set_focus_on_click(false);
+        let tx = sender.clone();
+        let (id, pane) = (volume.id.clone(), active.clone());
+        button.connect_clicked(move |_| tx.emit(Msg::MountVolume(pane.get(), id.clone())));
+        let menu_click = gtk::GestureClick::new();
+        menu_click.set_button(gtk::gdk::BUTTON_SECONDARY);
+        let tx_menu = sender.clone();
+        let (id, pane) = (volume.id.clone(), active.clone());
+        menu_click.connect_pressed(move |gesture, _, _, _| {
+            let Some(button) = gesture.widget() else { return };
+            let (tx, mount_id, pane) = (tx_menu.clone(), id.clone(), pane.get());
+            let mut items: Vec<(&str, Box<dyn Fn()>)> =
+                vec![("Mount", Box::new(move || tx.emit(Msg::MountVolume(pane, mount_id.clone()))))];
+            if super::drives::idle_can_eject(&id) {
+                let (tx, eject_id) = (tx_menu.clone(), id.clone());
+                items.push(("Eject", Box::new(move || tx.emit(Msg::EjectVolume(eject_id.clone())))));
+            }
+            popup_menu(&button, items);
+        });
+        button.add_controller(menu_click);
+        idles.push(button);
+    }
+    (drives, idles)
+}
+
+fn popup_menu(anchor: &gtk::Widget, items: Vec<(&str, Box<dyn Fn()>)>) {
+    let menu = gtk::Popover::new();
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    column.set_margin_all(4);
+    for (label, action) in items {
+        let button = gtk::Button::with_label(label);
+        button.add_css_class("fkey");
+        button.set_focus_on_click(false);
+        let menu = menu.clone();
+        button.connect_clicked(move |_| {
+            menu.popdown();
+            action();
+        });
+        column.append(&button);
+    }
+    menu.set_child(Some(&column));
+    menu.set_parent(anchor);
+    menu.connect_closed(|menu| {
+        let menu = menu.clone();
+        gtk::glib::idle_add_local_once(move || menu.unparent());
+    });
+    menu.popup();
 }
 
 pub fn blink_drive(button: &gtk::Button) {
@@ -602,8 +760,9 @@ pub fn repaint_drives(drives: &[(PathBuf, gtk::Button)], icon_pack: &str) {
         let Some(number) = row.first_child() else { continue };
         let Some(old) = number.next_sibling() else { continue };
         let mount = mounts.iter().find(|mount| &mount.path == path);
-        let (removable, network) = mount.map(|mount| (mount.removable, mount.network)).unwrap_or((false, false));
-        let next = iconpack::icon_widget(&icons::drive_token(icon_pack, removable, network), 16);
+        let (removable, network, optical) =
+            mount.map(|mount| (mount.removable, mount.network, mount.optical)).unwrap_or_default();
+        let next = iconpack::icon_widget(&icons::drive_token(&icon_pack, removable, network, optical), 16);
         row.insert_child_after(&next, Some(&number));
         row.remove(&old);
     }
@@ -867,6 +1026,8 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     path_row.append(&path);
     path_row.append(&copy);
     let filter = gtk::Entry::new();
+    filter.add_css_class("filter");
+    filter.set_has_frame(false);
     filter.set_placeholder_text(Some("Filter"));
     filter.set_visible(false);
     let tx = sender.clone();

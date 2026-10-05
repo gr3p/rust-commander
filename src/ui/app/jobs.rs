@@ -732,7 +732,8 @@ impl App {
             Ok(report) if report.cancelled => label.set_text("Cancelled"),
             Ok(report) => {
                 label.set_markup(&format!(
-                    "<span foreground=\"#2e7d32\" size=\"x-large\">✔</span>  All files OK, {} files",
+                    "<span foreground=\"{}\" size=\"x-large\">✔</span>  All files OK, {} files",
+                    rust_commander::theme::current().green,
                     report.files
                 ));
                 if let Some((heading, _)) = log {
@@ -832,6 +833,12 @@ impl App {
         win.set_default_width(520);
         let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
         column.set_margin_all(12);
+        let heading = gtk::Label::new(Some(title));
+        heading.set_xalign(0.0);
+        heading.set_wrap(true);
+        heading.set_max_width_chars(60);
+        heading.add_css_class("dialog-title");
+        column.append(&heading);
         let entry = gtk::Entry::new();
         entry.set_text(initial);
         if title == "Password" {
@@ -883,7 +890,6 @@ impl App {
         win.set_modal(true);
         win.set_transient_for(Some(&self.shell.window));
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        row.set_margin_all(12);
         let ok = gtk::Button::with_label("OK");
         let tx_ok = tx.clone();
         crate::ui::shell::on_click(&ok, move || tx_ok.emit(Msg::Submit(String::new())));
@@ -893,7 +899,16 @@ impl App {
         crate::ui::shell::on_click(&cancel, move || tx.emit(Msg::CancelAsk));
         row.append(&ok);
         row.append(&cancel);
-        win.set_child(Some(&row));
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        column.set_margin_all(12);
+        let heading = gtk::Label::new(Some(title));
+        heading.set_xalign(0.0);
+        heading.set_wrap(true);
+        heading.set_max_width_chars(60);
+        heading.add_css_class("dialog-title");
+        column.append(&heading);
+        column.append(&row);
+        win.set_child(Some(&column));
         win.present();
         self.dialog = Some(win);
     }

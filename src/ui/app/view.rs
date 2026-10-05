@@ -795,11 +795,15 @@ pub(in crate::ui::app) fn paint_syntax(view: &gtk::TextView, name: &str, on: boo
     if spans.is_empty() {
         return;
     }
-    for (tag, color) in [("syn-comment", "#565f89"), ("syn-string", "#9ece6a"), ("syn-keyword", "#7aa2f7")] {
-        if buf.tag_table().lookup(tag).is_none() {
-            let mark = gtk::TextTag::new(Some(tag));
-            mark.set_foreground(Some(color));
-            buf.tag_table().add(&mark);
+    let palette = rust_commander::theme::current();
+    for (tag, color) in [("syn-comment", &palette.dim), ("syn-string", &palette.green), ("syn-keyword", &palette.blue)] {
+        match buf.tag_table().lookup(tag) {
+            Some(mark) => mark.set_foreground(Some(color)),
+            None => {
+                let mark = gtk::TextTag::new(Some(tag));
+                mark.set_foreground(Some(color));
+                buf.tag_table().add(&mark);
+            }
         }
     }
     for span in spans {

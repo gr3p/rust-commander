@@ -66,11 +66,11 @@ pub struct Config {
 }
 
 fn default_theme() -> String {
-    "tokyo-night".into()
+    crate::theme::OMARCHY.into()
 }
 
 fn default_icon_pack() -> String {
-    crate::icons::AWESOME.into()
+    crate::theme::OMARCHY.into()
 }
 
 fn default_true() -> bool {

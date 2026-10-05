@@ -7,13 +7,29 @@ use relm4::gtk::prelude::*;
 
 use relm4::gtk::pango::prelude::FontExt;
 use rust_commander::icons::{AWESOME, SYSTEM, THEME_REQUIRED};
+use rust_commander::theme::OMARCHY;
 
-pub fn active<'a>(pack: &'a str) -> &'a str {
-    if pack == AWESOME && !glyphs_available() { SYSTEM } else { pack }
+// The pack id stored in the config; it resolves to whichever icon theme Omarchy's theme names.
+pub fn active(pack: &str) -> String {
+    if pack == OMARCHY {
+        return match rust_commander::theme::omarchy_icon_theme().filter(|name| usable_theme(name)) {
+            Some(name) => name,
+            None => active(AWESOME),
+        };
+    }
+    if pack == AWESOME && !glyphs_available() { SYSTEM.into() } else { pack.into() }
+}
+
+fn usable_theme(name: &str) -> bool {
+    let theme = theme_for(name);
+    THEME_REQUIRED.iter().all(|icon| theme.has_icon(icon))
 }
 
 pub fn choices() -> Vec<(String, String)> {
     let mut out = Vec::new();
+    if rust_commander::theme::omarchy_icon_theme().is_some_and(|name| usable_theme(&name)) {
+        out.push((OMARCHY.to_string(), "Omarchy (follows theme)".to_string()));
+    }
     if glyphs_available() {
         out.push((AWESOME.to_string(), "Font Awesome".to_string()));
     }
@@ -71,6 +87,7 @@ fn fallback(name: &str) -> &'static str {
     match name {
         "network-server-symbolic" => "⇄",
         "drive-removable-media-symbolic" => "⏏",
+        "media-optical-symbolic" => "◉",
         _ => "▮",
     }
 }

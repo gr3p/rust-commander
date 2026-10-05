@@ -17,6 +17,7 @@ const GLYPH_FILE: &str = "\u{f016}";
 const GLYPH_DRIVE: &str = "\u{f0a0}";
 const GLYPH_REMOVABLE: &str = "\u{f287}";
 const GLYPH_NETWORK: &str = "\u{f233}";
+const GLYPH_OPTICAL: &str = "\u{f192}";
 
 enum Kind {
     Folder,
@@ -32,6 +33,7 @@ enum Kind {
     Drive,
     Removable,
     Network,
+    Optical,
 }
 
 fn kind(name: &str, is_dir: bool, is_link: bool) -> Kind {
@@ -74,6 +76,7 @@ fn glyph(kind: Kind) -> &'static str {
         Kind::Drive => GLYPH_DRIVE,
         Kind::Removable => GLYPH_REMOVABLE,
         Kind::Network => GLYPH_NETWORK,
+        Kind::Optical => GLYPH_OPTICAL,
     }
 }
 
@@ -92,6 +95,7 @@ fn theme_icon(kind_name: &str, is_dir: bool, is_link: bool) -> &'static str {
         Kind::Drive => "drive-harddisk",
         Kind::Removable => "drive-removable-media",
         Kind::Network => "network-server",
+        Kind::Optical => "media-optical",
     }
 }
 
@@ -107,9 +111,11 @@ pub const THEME_REQUIRED: &[&str] = &[
     "network-server",
 ];
 
-fn drive_kind(removable: bool, network: bool) -> Kind {
+fn drive_kind(removable: bool, network: bool, optical: bool) -> Kind {
     if network {
         Kind::Network
+    } else if optical {
+        Kind::Optical
     } else if removable {
         Kind::Removable
     } else {
@@ -117,9 +123,10 @@ fn drive_kind(removable: bool, network: bool) -> Kind {
     }
 }
 
-fn system_drive(removable: bool, network: bool) -> &'static str {
-    match drive_kind(removable, network) {
+fn system_drive(removable: bool, network: bool, optical: bool) -> &'static str {
+    match drive_kind(removable, network, optical) {
         Kind::Network => "network-server-symbolic",
+        Kind::Optical => "media-optical-symbolic",
         Kind::Removable => "drive-removable-media-symbolic",
         _ => "drive-harddisk-symbolic",
     }
@@ -183,15 +190,16 @@ pub fn art_svg(art: Art, palette: &crate::theme::Palette) -> String {
     format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">{body}</svg>"#)
 }
 
-pub fn drive_token(pack: &str, removable: bool, network: bool) -> String {
+pub fn drive_token(pack: &str, removable: bool, network: bool, optical: bool) -> String {
     if pack == AWESOME {
-        return glyph(drive_kind(removable, network)).to_string();
+        return glyph(drive_kind(removable, network, optical)).to_string();
     }
     if pack.is_empty() || pack == SYSTEM {
-        return system_drive(removable, network).to_string();
+        return system_drive(removable, network, optical).to_string();
     }
-    let icon = match drive_kind(removable, network) {
+    let icon = match drive_kind(removable, network, optical) {
         Kind::Network => "network-server",
+        Kind::Optical => "media-optical",
         Kind::Removable => "drive-removable-media",
         _ => "drive-harddisk",
     };

@@ -25,6 +25,7 @@ use super::row::{self, EntryObject};
 use super::shell::{self, Shell};
 
 mod commands;
+mod disk;
 mod jobs;
 mod props;
 mod queue;
@@ -156,6 +157,7 @@ pub struct App {
     cfg: Config,
     status: String,
     dirty: [bool; 2],
+    wanted_widths: [Option<[i32; 5]>; 2],
     job: Option<Job>,
     ask: Option<Ask>,
     dialog: Option<gtk::Window>,
@@ -311,6 +313,7 @@ impl SimpleComponent for App {
             cfg,
             status: String::new(),
             dirty: [true, true],
+            wanted_widths: [None, None],
             job: None,
             ask: None,
             dialog: None,
@@ -367,6 +370,9 @@ impl SimpleComponent for App {
             gtk::glib::ControlFlow::Continue
         });
         install_usr1();
+        watch_omarchy_theme();
+        let tx = sender.input_sender().clone();
+        super::drives::watch(move || tx.emit(Msg::DrivesChanged));
         let tx = sender.input_sender().clone();
         gtk::glib::timeout_add_local(Duration::from_millis(200), move || {
             if take_usr1() {
@@ -477,11 +483,15 @@ impl App {
                 }
             }
             Msg::ReloadTheme => {
+                theme::refresh_system_style();
                 let name = theme::active_name(&self.cfg.theme, &config::active_theme_path());
                 self.apply_css(&theme::load_named(&name));
                 self.paint_theme();
+                self.paint_icon_pack();
+                crate::ui::shell::repaint_drives(&self.shell.drives, &self.cfg.icon_pack);
+                self.touch_both();
                 self.note_preview_target();
-                self.status = format!("Theme {name}");
+                self.status = format!("Theme {}", theme::label(&name));
             }
             Msg::PickPlace(pane, path) => {
                 let id = PaneId::from_index(pane);
@@ -491,6 +501,7 @@ impl App {
                 self.spawn_load(sender, id, tab, path, token);
             }
             Msg::ColumnSized(pane) => self.on_column_sized(pane),
+            Msg::PanesResized => self.refit_columns(),
             Msg::ToggleAutoColumns => self.toggle_auto_columns(),
             Msg::ToggleHidden => self.toggle_hidden(),
             Msg::ToggleModeButtons => self.toggle_mode_buttons(),
@@ -567,6 +578,29 @@ impl App {
                 }
             }
             Msg::Mount(pane, path) => self.goto_mount(pane, path, sender),
+            Msg::DiskInfo(path) => self.show_disk_info(path),
+            Msg::DrivesChanged => self.refresh_drives(sender),
+            Msg::DriveStatus(text) => self.status = text,
+            Msg::MountVolume(pane, id) => {
+                self.status = format!("Mounting {id}");
+                let tx = sender.input_sender().clone();
+                super::drives::mount_volume(&id, move |result| {
+                    tx.emit(match result {
+                        Ok(path) => Msg::Mount(pane, path),
+                        Err(err) => Msg::DriveStatus(err),
+                    })
+                });
+            }
+            Msg::EjectVolume(id) => {
+                let tx = sender.input_sender().clone();
+                let name = id.clone();
+                super::drives::eject_volume(&id, move |result| tx.emit(Msg::DriveStatus(released(&name, result))));
+            }
+            Msg::Unmount(path, eject) => {
+                let tx = sender.input_sender().clone();
+                let name = path.display().to_string();
+                super::drives::release(&path, eject, move |result| tx.emit(Msg::DriveStatus(released(&name, result))));
+            }
             Msg::Smoke => self.run_smoke(sender),
         }
     }
@@ -668,6 +702,7 @@ impl App {
                     }
                 }
                 Key::h | Key::H => self.toggle_hidden(),
+                Key::i | Key::I => self.show_disk_info(None),
                 Key::l | Key::L => self.focus_path(),
                 Key::y | Key::Y => self.toggle_syntax(),
                 Key::t | Key::T => self.open_new_tab(sender),
@@ -796,7 +831,7 @@ impl App {
                 };
                 self.ask = Some(Ask::CopyAs(src));
                 let name = self.current_name().unwrap_or_default();
-                self.ask_text("Copy as", &name, tx);
+                self.ask_text(&format!("Copy {name} as"), &name, tx);
             }
             5 => {
                 let sources = self.state.selected_paths(self.state.active);
@@ -804,9 +839,9 @@ impl App {
                     self.status = "Nothing selected".into();
                     return;
                 }
-                self.ask = Some(Ask::Copy(sources));
+                self.ask = Some(Ask::Copy(sources.clone()));
                 let dest = self.state.tab(self.state.active.other()).path.display().to_string();
-                self.ask_text("Copy to", &dest, tx);
+                self.ask_text(&format!("Copy {} to", describe(&sources)), &dest, tx);
             }
             6 if shift => {
                 let Some(src) = self.cursor_path() else {
@@ -815,7 +850,7 @@ impl App {
                 };
                 self.ask = Some(Ask::Rename(src));
                 let name = self.current_name().unwrap_or_default();
-                self.ask_text("Rename", &name, tx);
+                self.ask_text(&format!("Rename {name} to"), &name, tx);
             }
             6 => {
                 let sources = self.state.selected_paths(self.state.active);
@@ -823,9 +858,9 @@ impl App {
                     self.status = "Nothing selected".into();
                     return;
                 }
-                self.ask = Some(Ask::Move(sources));
+                self.ask = Some(Ask::Move(sources.clone()));
                 let dest = self.state.tab(self.state.active.other()).path.display().to_string();
-                self.ask_text("Move to", &dest, tx);
+                self.ask_text(&format!("Move {} to", describe(&sources)), &dest, tx);
             }
             7 => {
                 self.ask = Some(Ask::Mkdir);
@@ -1361,7 +1396,7 @@ impl App {
                         entry,
                         *marked,
                         self.cfg.file_icons,
-                        crate::ui::iconpack::active(&self.cfg.icon_pack),
+                        &crate::ui::iconpack::active(&self.cfg.icon_pack),
                     ));
                 }
                 self.dirty[pane] = false;
@@ -1870,6 +1905,22 @@ impl App {
         self.focus_list();
     }
 
+    fn refresh_drives(&mut self, sender: &ComponentSender<Self>) {
+        let Some(gone) = shell::rebuild_drives(&mut self.shell, sender.input_sender(), &self.cfg.icon_pack) else {
+            return;
+        };
+        // A pane left on a vanished mount would show a dead folder.
+        for id in [PaneId::Left, PaneId::Right] {
+            let path = self.state.tab(id).path.clone();
+            if gone.iter().any(|mount| path.starts_with(mount)) {
+                let home = home_dir();
+                let token = self.state.navigate(id, home.clone(), true);
+                let tab = self.state.pane(id).active;
+                self.spawn_load(sender, id, tab, home, token);
+            }
+        }
+    }
+
     fn mark_drives(&self) {
         let dir = &self.state.tab(self.state.active).path;
         let mounts: Vec<&Path> = self.shell.drives.iter().map(|(path, _)| path.as_path()).collect();
@@ -2144,6 +2195,14 @@ fn tabs_current(tabs: &gtk::Box) -> Vec<String> {
 }
 
 
+// What a copy or move acts on, as a short name for dialog headings.
+fn describe(paths: &[PathBuf]) -> String {
+    match paths {
+        [one] => one.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
+        many => format!("{} items", many.len()),
+    }
+}
+
 fn install_usr1() {
     unsafe {
         libc::signal(libc::SIGUSR1, on_usr1 as *const () as libc::sighandler_t);
@@ -2152,6 +2211,22 @@ fn install_usr1() {
 
 fn on_usr1(_: i32) {
     USR1.store(true, Ordering::Relaxed);
+}
+
+// Omarchy swaps its theme directory and then rewrites theme.name, so watch the parent.
+fn watch_omarchy_theme() {
+    let Some(dir) = theme::omarchy_current() else { return };
+    let file = gtk::gio::File::for_path(dir);
+    let Ok(monitor) = file.monitor_directory(gtk::gio::FileMonitorFlags::NONE, gtk::gio::Cancellable::NONE) else {
+        return;
+    };
+    monitor.connect_changed(|_, changed, _, _| {
+        if changed.basename().is_some_and(|name| name.to_str() == Some("theme.name")) {
+            USR1.store(true, Ordering::Relaxed);
+        }
+    });
+    // The watch ends when the monitor is dropped, and it should last as long as the window.
+    std::mem::forget(monitor);
 }
 
 fn take_usr1() -> bool {
@@ -2173,6 +2248,13 @@ fn drive_slot(key: Key) -> Option<usize> {
         Key::_9 | Key::KP_9 => 8,
         _ => return None,
     })
+}
+
+fn released(name: &str, result: Result<(), String>) -> String {
+    match result {
+        Ok(()) => format!("{name} can be removed"),
+        Err(err) => format!("{name}: {err}"),
+    }
 }
 
 fn home_dir() -> PathBuf {

@@ -1,4 +1,5 @@
 mod app;
+mod drives;
 mod hotlist;
 mod iconpack;
 mod msg;

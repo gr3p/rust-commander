@@ -35,6 +35,7 @@ impl App {
             image_view: self.image.is_some() || (self.state.quick_view && self.cursor_is_image()),
             quick_view: self.state.quick_view,
             editing: self.shell.editing.get(),
+            drive: self.shell.drives.iter().any(|(path, _)| path == &self.state.tab(id).path),
         }
     }
 
@@ -212,6 +213,7 @@ impl App {
             }
             Act::CopyImage => self.copy_preview_image(sender),
             Act::Drive => self.status = "Press Ctrl+1 to Ctrl+9".into(),
+            Act::DiskInfo => self.show_disk_info(None),
             Act::Commands => self.toggle_commands(sender),
         }
     }

@@ -17,6 +17,7 @@ const HINTS: &[Act] = &[
     Act::CopyDir,
     Act::Filter,
     Act::Search,
+    Act::DiskInfo,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,11 +113,12 @@ pub enum Act {
     LeaveEdit,
     CopyImage,
     Drive,
+    DiskInfo,
     Commands,
 }
 
 impl Act {
-    pub const ALL: [Act; 69] = [
+    pub const ALL: [Act; 70] = [
         Act::Refresh,
         Act::View,
         Act::Edit,
@@ -185,6 +187,7 @@ impl Act {
         Act::LeaveEdit,
         Act::CopyImage,
         Act::Drive,
+        Act::DiskInfo,
         Act::Commands,
     ];
 }
@@ -202,6 +205,8 @@ pub struct Cue {
     pub image_view: bool,
     pub quick_view: bool,
     pub editing: bool,
+    // The active panel stands at the root of a drive, as right after picking one.
+    pub drive: bool,
 }
 
 impl Cue {
@@ -218,6 +223,7 @@ impl Cue {
             image_view: false,
             quick_view: false,
             editing: false,
+            drive: false,
         }
     }
 }
@@ -250,7 +256,13 @@ pub fn rank(cue: &Cue) -> Vec<Act> {
         })
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    scored.into_iter().take(6).map(|(_, _, act)| act).collect()
+    // Quick view takes the last slot every time, so it is always in the same place.
+    let keep = if cue.editing { 6 } else { 5 };
+    let mut ranked: Vec<Act> = scored.into_iter().take(keep).map(|(_, _, act)| act).collect();
+    if !cue.editing {
+        ranked.push(Act::QuickView);
+    }
+    ranked
 }
 
 /// PC: Ctl and ⇧. Mac: ⌃ ⌥ ⇧. The CSS font list falls back to Noto Sans CJK for a full-height ⇧.
@@ -341,6 +353,7 @@ fn score(act: Act, cue: &Cue) -> i32 {
         Act::CopyDir if cue.dir => 20,
         Act::CopyPaths if cue.file => 16,
         Act::Properties if cue.file || cue.dir => 14,
+        Act::DiskInfo if cue.drive => 30,
         Act::Filter => 10,
         Act::Search => 8,
         Act::CopyDir => 6,
@@ -382,6 +395,7 @@ const CATALOG: &[Item] = &[
     Item { act: Act::PlacesLeft, keys: "Alt+F1", label: "Left places", group: Group::Navigate },
     Item { act: Act::PlacesRight, keys: "Alt+F2", label: "Right places", group: Group::Navigate },
     Item { act: Act::Drive, keys: "Ctrl+1…9", label: "Drive", group: Group::Navigate },
+    Item { act: Act::DiskInfo, keys: "Ctrl+I", label: "Disk info", group: Group::Navigate },
     Item { act: Act::Hotlist, keys: "Ctrl+D", label: "Hotlist", group: Group::Navigate },
     Item { act: Act::Path, keys: "Ctrl+L", label: "Path", group: Group::Navigate },
     Item { act: Act::Open, keys: "Enter", label: "Open", group: Group::Navigate },
@@ -438,6 +452,17 @@ mod tests {
     }
 
     #[test]
+    fn drive_root_offers_disk_info() {
+        let ranked = rank(&cue(|cue| {
+            cue.drive = true;
+            cue.dir = true;
+        }));
+        assert_eq!(ranked[0], Act::DiskInfo);
+        assert!(hint_label(Act::DiskInfo, "right").contains("Disk info"));
+        assert!(!rank(&Cue::none()).contains(&Act::DiskInfo));
+    }
+
+    #[test]
     fn archive_offers_unpack_first() {
         let ranked = rank(&cue(|cue| {
             cue.archive = true;
@@ -480,7 +505,6 @@ mod tests {
         }));
         assert_eq!(&ranked[..4], &[Act::Copy, Act::Move, Act::Pack, Act::PackHere]);
         assert!(ranked.contains(&Act::Unpack));
-        assert!(ranked.contains(&Act::UnpackHere));
         assert_eq!(ranked.len(), 6);
     }
 
@@ -499,6 +523,14 @@ mod tests {
         assert_eq!(ranked[0], Act::CopyPaths);
         assert!(ranked.contains(&Act::Filter));
         assert!(ranked.contains(&Act::Search));
+    }
+
+    #[test]
+    fn quick_view_is_always_last() {
+        for build in [Cue::none(), cue(|c| c.file = true), cue(|c| c.marks = 3), cue(|c| c.drive = true)] {
+            assert_eq!(rank(&build).last(), Some(&Act::QuickView));
+        }
+        assert!(!rank(&cue(|c| c.editing = true)).contains(&Act::QuickView));
     }
 
     #[test]

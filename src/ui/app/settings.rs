@@ -20,9 +20,15 @@ use super::{App, SettingsUi, SIZING, home_dir};
 impl App {
     pub(in crate::ui::app) fn apply_css(&self, palette: &Palette) {
         let image = self.background_path();
+        let style = theme::ShellStyle::load();
+        theme::set_current(palette);
+        if let Some(settings) = gtk::Settings::default() {
+            settings.set_gtk_application_prefer_dark_theme(!palette.light);
+        }
+        let px = style.font_px;
         let sheet = format!(
-            "window, label, entry, button {{ font-family: \"JetBrainsMono Nerd Font\", \"JetBrains Mono\", \"Noto Sans CJK SC\", monospace; font-size: 13px; }}\ntextview, textview text {{ font-family: \"DejaVu Sans Mono\", \"JetBrains Mono\", monospace; font-size: 13px; }}\n{}{}{}",
-            theme::stylesheet(palette),
+            "window, label, entry, button {{ font-family: monospace, \"JetBrainsMono Nerd Font\", \"JetBrains Mono\", \"Noto Sans CJK SC\"; font-size: {px}px; }}\ntextview, textview text {{ font-family: \"DejaVu Sans Mono\", \"JetBrains Mono\", monospace; font-size: {px}px; }}\n{}{}{}",
+            theme::stylesheet(palette, &style),
             theme::list_background(
                 palette,
                 &self.cfg.background_color,
@@ -68,7 +74,8 @@ impl App {
             if self.cfg.file_icons {
                 px[0] += unit;
             }
-            [px[0], px[1], px[2], px[3], px[4]]
+            self.wanted_widths[pane] = Some(px);
+            rust_commander::listing::fit_columns(px, self.pane_width(pane))
         } else if self.cfg.column_widths.len() == 5 {
             let w = &self.cfg.column_widths;
             [w[0], w[1], w[2], w[3], w[4]]
@@ -76,6 +83,29 @@ impl App {
             return;
         };
         self.apply_widths(pane, widths);
+    }
+
+    // Usable width for the data columns: pane width minus glyph column, separators, scrollbar and frame.
+    fn pane_width(&self, pane: usize) -> i32 {
+        let paned = &self.shell.paned;
+        let total = paned.width();
+        if total <= 0 {
+            return 0;
+        }
+        let side = if pane == 0 { paned.position() } else { total - paned.position() - 6 };
+        side - 44
+    }
+
+    pub(in crate::ui::app) fn refit_columns(&mut self) {
+        if !self.cfg.auto_columns {
+            return;
+        }
+        for pane in 0..2 {
+            if let Some(px) = self.wanted_widths[pane] {
+                let widths = rust_commander::listing::fit_columns(px, self.pane_width(pane));
+                self.apply_widths(pane, widths);
+            }
+        }
     }
 
     pub(in crate::ui::app) fn apply_widths(&mut self, pane: usize, widths: [i32; 5]) {
@@ -748,7 +778,8 @@ pub(in crate::ui::app) fn theme_picker(active: &str, tx: relm4::Sender<Msg>) -> 
     let name = gtk::Label::new(Some("Theme"));
     name.set_xalign(0.0);
     let names = theme::available_themes();
-    let labels: Vec<&str> = names.iter().map(String::as_str).collect();
+    let shown: Vec<String> = names.iter().map(|n| theme::label(n)).collect();
+    let labels: Vec<&str> = shown.iter().map(String::as_str).collect();
     let drop = gtk::DropDown::from_strings(&labels);
     drop.add_css_class("editor-pick");
     drop.set_hexpand(true);
@@ -811,7 +842,8 @@ pub(in crate::ui::app) fn fill_icon_pack(drop: &gtk::DropDown, ids: &Rc<RefCell<
 
 pub(in crate::ui::app) fn fill_theme(drop: &gtk::DropDown, ids: &Rc<RefCell<Vec<String>>>, guard: &Rc<Cell<bool>>, active: &str) {
     let names = theme::available_themes();
-    let labels: Vec<&str> = names.iter().map(String::as_str).collect();
+    let shown: Vec<String> = names.iter().map(|n| theme::label(n)).collect();
+    let labels: Vec<&str> = shown.iter().map(String::as_str).collect();
     let selected = names.iter().position(|n| n == active).unwrap_or(0) as u32;
     guard.set(true);
     drop.set_model(Some(&gtk::StringList::new(&labels)));
