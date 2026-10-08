@@ -718,6 +718,7 @@ impl App {
                 }
                 Key::c | Key::C if shift => self.copy_selected_paths(),
                 Key::c | Key::C if self.preview_image_focused() => self.copy_preview_image(sender),
+                Key::F1 if shift => self.toggle_thumbs(),
                 Key::F3 => self.set_sort(rust_commander::listing::SortKey::Name),
                 Key::F4 => self.set_sort(rust_commander::listing::SortKey::Ext),
                 Key::F5 if shift => self.start_pack(true, sender),
@@ -821,12 +822,14 @@ impl App {
             }
             Key::BackSpace => self.go_up(sender),
             Key::Return => self.activate_cursor(sender),
+            Key::Left | Key::KP_Left if self.thumbs_shown() => self.move_list(-1),
+            Key::Right | Key::KP_Right if self.thumbs_shown() => self.move_list(1),
             Key::Left | Key::KP_Left if self.state.quick_view => self.step_quick_image(-1),
             Key::Right | Key::KP_Right if self.state.quick_view => self.step_quick_image(1),
-            Key::Up | Key::KP_Up => self.move_list(-1),
-            Key::Down | Key::KP_Down => self.move_list(1),
-            Key::Page_Up | Key::KP_Page_Up => self.move_list(-20),
-            Key::Page_Down | Key::KP_Page_Down => self.move_list(20),
+            Key::Up | Key::KP_Up => self.move_list(-self.row_step(false)),
+            Key::Down | Key::KP_Down => self.move_list(self.row_step(false)),
+            Key::Page_Up | Key::KP_Page_Up => self.move_list(-self.row_step(true)),
+            Key::Page_Down | Key::KP_Page_Down => self.move_list(self.row_step(true)),
             Key::Home | Key::KP_Home => {
                 self.state.set_cursor(0);
                 self.focus_list();
@@ -1401,10 +1404,13 @@ impl App {
                 "terminal"
             } else if show_preview {
                 "preview"
+            } else if self.state.pane(id).thumbs {
+                "thumbs"
             } else {
                 "list"
             };
-            if ui.stack.visible_child_name().as_deref() != Some(page) {
+            let switched = ui.stack.visible_child_name().as_deref() != Some(page);
+            if switched {
                 ui.stack.set_visible_child_name(page);
             }
             if show_preview && !self.shell.editing.get() {
@@ -1429,6 +1435,7 @@ impl App {
                 for (entry, marked) in &rows {
                     ui.store.append(&EntryObject::from_entry(
                         entry,
+                        &self.state.tab(id).path,
                         *marked,
                         self.cfg.file_icons,
                         &crate::ui::iconpack::active(&self.cfg.icon_pack),
@@ -1443,6 +1450,15 @@ impl App {
                 if ui.selection.selected() != want {
                     ui.selection.set_selected(want);
                     reveal_row(&ui.list, want);
+                    row::reveal_cell(&ui.grid, want);
+                }
+                // A view that was just shown has no size yet, so it can only scroll once it has one.
+                if switched {
+                    let (list, grid) = (ui.list.clone(), ui.grid.clone());
+                    gtk::glib::idle_add_local_once(move || {
+                        reveal_row(&list, want);
+                        row::reveal_cell(&grid, want);
+                    });
                 }
             }
         }
@@ -1530,6 +1546,12 @@ impl App {
         self.sync();
         if self.shell.panes[0].selection.selected() == before {
             errors.push("arrow cursor".into());
+        }
+        for page in ["thumbs", "list"] {
+            self.on_key(Key::F1, ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK, sender);
+            if self.shell.panes[0].stack.visible_child_name().as_deref() != Some(page) || self.shell.panes[1].stack.visible_child_name().as_deref() != Some("list") {
+                errors.push(format!("thumbnail toggle {page}"));
+            }
         }
         self.state.active = PaneId::Right;
         self.sync();
@@ -1994,7 +2016,34 @@ impl App {
     fn focus_list(&self) {
         let index = self.state.active.index();
         self.shell.active.set(index);
-        self.shell.panes[index].list.grab_focus();
+        if self.thumbs_shown() {
+            self.shell.panes[index].grid.grab_focus();
+        } else {
+            self.shell.panes[index].list.grab_focus();
+        }
+    }
+
+    fn thumbs_shown(&self) -> bool {
+        self.state.pane(self.state.active).thumbs
+    }
+
+    // A grid row holds several files, so up and down jump by the column count.
+    fn row_step(&self, page: bool) -> isize {
+        if !self.thumbs_shown() {
+            return if page { 20 } else { 1 };
+        }
+        let (cols, rows) = row::grid_shape(&self.shell.panes[self.state.active.index()].grid);
+        (if page { cols * rows.saturating_sub(1).max(1) } else { cols }) as isize
+    }
+
+    fn toggle_thumbs(&mut self) {
+        let id = self.state.active;
+        let pane = self.state.pane_mut(id);
+        pane.thumbs = !pane.thumbs;
+        shell::blink_frame(&self.shell.panes[id.index()].frame, id.index(), false);
+        // The grid cannot take focus until sync has shown it.
+        self.sync();
+        self.focus_list();
     }
 
     fn point_at(&mut self, id: PaneId, name: &str) -> bool {

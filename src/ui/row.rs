@@ -1,6 +1,7 @@
 use relm4::gtk::glib;
 use relm4::gtk::glib::subclass::prelude::*;
 use relm4::gtk::prelude::*;
+use std::path::Path;
 
 use rust_commander::entry::Entry;
 use rust_commander::listing;
@@ -31,6 +32,15 @@ mod imp {
         icon: RefCell<String>,
         #[property(get, set)]
         is_dir: Cell<bool>,
+        // The thumbnail grid always draws an icon, so it does not follow the file icons switch.
+        #[property(get, set)]
+        big_icon: RefCell<String>,
+        // Full path of an image, empty for everything else.
+        #[property(get, set)]
+        thumb: RefCell<String>,
+        // Changes when the file does, so an edited image is decoded again.
+        #[property(get, set)]
+        stamp: Cell<u64>,
     }
 
     #[glib::object_subclass]
@@ -48,7 +58,7 @@ glib::wrapper! {
 }
 
 impl EntryObject {
-    pub fn from_entry(entry: &Entry, marked: bool, icons: bool, pack: &str) -> Self {
+    pub fn from_entry(entry: &Entry, dir: &Path, marked: bool, icons: bool, pack: &str) -> Self {
         let skip = entry.name.as_ref() == "..";
         let name = if skip {
             "↑ [..]".into()
@@ -60,10 +70,12 @@ impl EntryObject {
             entry.name.to_string()
         };
         let glyph = if skip || entry.is_dir() { "" } else { rust_commander::archive::unpack_mark(&entry.name) };
-        let icon = if icons {
-            rust_commander::icons::file_token(pack, &entry.name, entry.is_dir(), entry.is_symlink())
-        } else {
+        let token = rust_commander::icons::file_token(pack, &entry.name, entry.is_dir(), entry.is_symlink());
+        let icon = if icons { token.clone() } else { String::new() };
+        let thumb = if entry.is_dir() || !rust_commander::imageview::is_image(&entry.name) {
             String::new()
+        } else {
+            listing::entry_path(dir, entry).display().to_string()
         };
         glib::Object::builder()
             .property("name", name)
@@ -74,6 +86,9 @@ impl EntryObject {
             .property("marked", marked)
             .property("glyph", glyph)
             .property("icon", icon)
+            .property("big-icon", token)
+            .property("thumb", thumb)
+            .property("stamp", entry.mtime as u64 ^ entry.size.rotate_left(32))
             .property("is-dir", entry.is_dir())
             .build()
     }
@@ -333,25 +348,210 @@ fn paint_file_icon(item: &relm4::gtk::ListItem, obj: &EntryObject) {
     let Some(folder) = row.first_child().and_then(|arrow| arrow.next_sibling()) else { return };
     let Some(glyph) = folder.next_sibling().and_then(|widget| widget.downcast::<relm4::gtk::Label>().ok()) else { return };
     let Some(icon) = glyph.next_sibling().and_then(|widget| widget.downcast::<relm4::gtk::Image>().ok()) else { return };
-    let name = obj.icon();
-    let glyph_icon = crate::ui::iconpack::is_glyph(&name);
+    paint_icon(&folder, &glyph, &icon, &obj.icon(), obj.is_dir());
+}
+
+fn paint_icon(folder: &relm4::gtk::Widget, glyph: &relm4::gtk::Label, icon: &relm4::gtk::Image, name: &str, is_dir: bool) {
+    let glyph_icon = crate::ui::iconpack::is_glyph(name);
     // Themes draw folder-symbolic as an outline, so directories get the filled folder instead.
     let filled = name == "folder-symbolic";
     folder.set_visible(filled);
     glyph.set_visible(glyph_icon);
     icon.set_visible(!filled && !glyph_icon && !name.is_empty());
     if glyph_icon {
-        glyph.set_label(&name);
+        glyph.set_label(name);
     } else if !name.is_empty() && !filled {
-        crate::ui::iconpack::apply_image(&icon, &name);
+        crate::ui::iconpack::apply_image(icon, name);
     }
-    if obj.is_dir() {
+    if is_dir {
         glyph.add_css_class("dir");
         icon.add_css_class("dir");
     } else {
         glyph.remove_css_class("dir");
         icon.remove_css_class("dir");
     }
+}
+
+const THUMB: i32 = 128;
+const THUMB_ICON: i32 = 48;
+const DECODERS: usize = 4;
+const CACHE_MAX: usize = 512;
+
+thread_local! {
+    static THUMBS: std::cell::RefCell<std::collections::HashMap<(String, u64), relm4::gtk::gdk::Texture>> = Default::default();
+    static DECODING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[derive(Clone)]
+struct ThumbCell {
+    root: relm4::gtk::Box,
+    stack: relm4::gtk::Stack,
+    arrow: relm4::gtk::Widget,
+    folder: relm4::gtk::Widget,
+    glyph: relm4::gtk::Label,
+    icon: relm4::gtk::Image,
+    picture: relm4::gtk::Picture,
+    label: relm4::gtk::Label,
+}
+
+impl ThumbCell {
+    fn new() -> Self {
+        use relm4::gtk;
+        let (arrow, folder) = (up_arrow(), folder_icon());
+        for area in [&arrow, &folder] {
+            area.set_content_width(THUMB_ICON);
+            area.set_content_height(THUMB_ICON);
+        }
+        let glyph = gtk::Label::new(None);
+        glyph.add_css_class("icon-glyph");
+        glyph.add_css_class("file-icon");
+        let icon = gtk::Image::new();
+        icon.add_css_class("file-icon");
+        icon.set_pixel_size(THUMB_ICON);
+        let symbols = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        symbols.set_halign(gtk::Align::Center);
+        symbols.set_valign(gtk::Align::Center);
+        for widget in [arrow.upcast_ref::<gtk::Widget>(), folder.upcast_ref(), glyph.upcast_ref(), icon.upcast_ref()] {
+            symbols.append(widget);
+        }
+        let picture = gtk::Picture::new();
+        picture.set_content_fit(gtk::ContentFit::Contain);
+        picture.set_can_shrink(true);
+        let stack = gtk::Stack::new();
+        stack.set_size_request(THUMB, THUMB);
+        stack.add_named(&symbols, Some("icon"));
+        stack.add_named(&picture, Some("thumb"));
+        let label = gtk::Label::new(None);
+        label.set_justify(gtk::Justification::Center);
+        label.set_wrap(true);
+        label.set_wrap_mode(gtk::pango::WrapMode::Char);
+        label.set_lines(2);
+        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        label.set_max_width_chars(12);
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        root.add_css_class("thumb-cell");
+        root.append(&stack);
+        root.append(&label);
+        Self { root, stack, arrow: arrow.upcast(), folder: folder.upcast(), glyph, icon, picture, label }
+    }
+
+    fn show(&self, texture: &relm4::gtk::gdk::Texture) {
+        self.picture.set_paintable(Some(texture));
+        self.stack.set_visible_child_name("thumb");
+    }
+}
+
+pub fn thumb_factory() -> relm4::gtk::SignalListItemFactory {
+    use relm4::gtk;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(|_, item| {
+        let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+        let cell = ThumbCell::new();
+        item.set_child(Some(&cell.root));
+        unsafe { item.set_data("thumb-cell", cell) };
+    });
+    factory.connect_bind(|_, item| {
+        let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+        let obj = item.item().unwrap().downcast::<EntryObject>().unwrap();
+        let cell = unsafe { item.data::<ThumbCell>("thumb-cell").unwrap().as_ref().clone() };
+        let name = obj.name();
+        let up = name == "↑ [..]";
+        cell.arrow.set_visible(up);
+        cell.label.set_label(if up { "[..]" } else { &name });
+        paint_icon(&cell.folder, &cell.glyph, &cell.icon, &obj.big_icon(), obj.is_dir());
+        apply_marked(&cell.label, obj.marked());
+        let label = cell.label.clone();
+        let handler = obj.connect_marked_notify(move |obj| apply_marked(&label, obj.marked()));
+        unsafe { item.set_data("mark-watch", MarkWatch { obj: obj.downgrade(), handler }) };
+        load_thumb(item, &cell, &obj);
+    });
+    factory.connect_unbind(|_, item| {
+        let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+        if let Some(cancel) = unsafe { item.steal_data::<Arc<AtomicBool>>("thumb-cancel") } {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        let Some(watch) = (unsafe { item.steal_data::<MarkWatch>("mark-watch") }) else { return };
+        if let Some(obj) = watch.obj.upgrade() {
+            obj.disconnect(watch.handler);
+        }
+    });
+    factory
+}
+
+// The icon stays until the image is decoded. A cell that is rebound or scrolled away cancels its decode.
+fn load_thumb(item: &relm4::gtk::ListItem, cell: &ThumbCell, obj: &EntryObject) {
+    use relm4::gtk::{gdk, gio, glib};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    cell.stack.set_visible_child_name("icon");
+    let path = obj.thumb();
+    if path.is_empty() {
+        return;
+    }
+    let key = (path, obj.stamp());
+    if let Some(texture) = THUMBS.with(|cache| cache.borrow().get(&key).cloned()) {
+        cell.show(&texture);
+        return;
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    unsafe { item.set_data("thumb-cancel", cancel.clone()) };
+    let cell = cell.clone();
+    glib::spawn_future_local(async move {
+        // Large photos decode into a lot of memory, so only a few run at once.
+        while DECODING.get() >= DECODERS {
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            glib::timeout_future(std::time::Duration::from_millis(40)).await;
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        DECODING.set(DECODING.get() + 1);
+        let file = std::path::PathBuf::from(&key.0);
+        let decoded = gio::spawn_blocking(move || rust_commander::imageview::decode(&file, THUMB as u32)).await;
+        DECODING.set(DECODING.get() - 1);
+        let Ok(Ok(img)) = decoded else { return };
+        let stride = img.width as usize * 4;
+        let texture: gdk::Texture = gdk::MemoryTexture::new(
+            img.width as i32,
+            img.height as i32,
+            gdk::MemoryFormat::R8g8b8a8,
+            &glib::Bytes::from_owned(img.pixels),
+            stride,
+        )
+        .upcast();
+        THUMBS.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.len() >= CACHE_MAX {
+                cache.clear();
+            }
+            cache.insert(key, texture.clone());
+        });
+        if !cancel.load(Ordering::Relaxed) {
+            cell.show(&texture);
+        }
+    });
+}
+
+// GridView does not report its column count. A full row is the most cells sharing one top edge.
+// Cells it keeps for reuse are not mapped and sit in a corner, so they are skipped.
+pub fn grid_shape(grid: &relm4::gtk::GridView) -> (usize, usize) {
+    let mut rows = std::collections::HashMap::<i32, usize>::new();
+    let mut child = grid.first_child();
+    while let Some(cell) = child {
+        if let Some(bounds) = cell.compute_bounds(grid).filter(|_| cell.is_mapped()) {
+            *rows.entry(bounds.y().round() as i32).or_default() += 1;
+        }
+        child = cell.next_sibling();
+    }
+    (rows.values().copied().max().unwrap_or(1), rows.len())
+}
+
+pub fn reveal_cell(grid: &relm4::gtk::GridView, pos: u32) {
+    let _ = grid.activate_action("list.scroll-to-item", Some(&relm4::gtk::glib::Variant::from(pos)));
 }
 
 fn cell_label(item: &relm4::gtk::ListItem) -> relm4::gtk::Label {

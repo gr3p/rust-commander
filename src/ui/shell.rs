@@ -29,6 +29,7 @@ pub struct PaneUi {
     pub filter: gtk::Entry,
     pub stack: gtk::Stack,
     pub list: gtk::ColumnView,
+    pub grid: gtk::GridView,
     pub store: gio::ListStore,
     pub selection: gtk::SingleSelection,
     pub preview: gtk::TextView,
@@ -1002,6 +1003,33 @@ fn under(widget: &gtk::Widget, ancestor: &gtk::Widget) -> bool {
     false
 }
 
+// A file view takes the pane on click and on focus.
+fn claim_pane(view: &impl IsA<gtk::Widget>, index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<Cell<usize>>) {
+    // Already-selected rows do not notify, so a click in Ext/Size/Date/Attr must still activate the pane.
+    let column_click = gtk::GestureClick::new();
+    column_click.set_propagation_phase(gtk::PropagationPhase::Capture);
+    column_click.set_exclusive(false);
+    column_click.set_button(0);
+    let tx = sender.clone();
+    let column_active = active_pane.clone();
+    column_click.connect_pressed(move |_, _, _, _| {
+        column_active.set(index);
+        tx.emit(super::msg::Msg::FocusPane(index));
+    });
+    view.add_controller(column_click);
+    let focus = gtk::EventControllerFocus::new();
+    let tx = sender.clone();
+    let focus_active = active_pane.clone();
+    focus.connect_enter(move |_| {
+        // A click in the other pane can move focus here while the button is still down.
+        if pointer_buttons_down() && focus_active.get() != index {
+            return;
+        }
+        tx.emit(super::msg::Msg::FocusPane(index));
+    });
+    view.add_controller(focus);
+}
+
 fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<Cell<usize>>) -> PaneUi {
     let frame = gtk::Frame::new(None);
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -1083,34 +1111,24 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     bind_header_clicks(&list, index, sender, active_pane);
     let tx = sender.clone();
     list.connect_activate(move |_, _| tx.emit(super::msg::Msg::Activate(index)));
-    // Already-selected rows do not notify, so a click in Ext/Size/Date/Attr must still activate the pane.
-    let column_click = gtk::GestureClick::new();
-    column_click.set_propagation_phase(gtk::PropagationPhase::Capture);
-    column_click.set_exclusive(false);
-    column_click.set_button(0);
-    let tx = sender.clone();
-    let column_active = active_pane.clone();
-    column_click.connect_pressed(move |_, _, _, _| {
-        column_active.set(index);
-        tx.emit(super::msg::Msg::FocusPane(index));
-    });
-    list.add_controller(column_click);
-    let focus = gtk::EventControllerFocus::new();
-    let tx = sender.clone();
-    let focus_active = active_pane.clone();
-    focus.connect_enter(move |_| {
-        // A click in the other pane can move focus here while the button is still down.
-        if pointer_buttons_down() && focus_active.get() != index {
-            return;
-        }
-        tx.emit(super::msg::Msg::FocusPane(index));
-    });
-    list.add_controller(focus);
+    claim_pane(&list, index, sender, active_pane);
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_child(Some(&list));
     scroll.set_vexpand(true);
     // Scrollbars get their own space instead of covering the rows.
     scroll.set_overlay_scrolling(false);
+    let grid = gtk::GridView::new(Some(selection.clone()), Some(row::thumb_factory()));
+    grid.set_hexpand(true);
+    grid.set_vexpand(true);
+    // The default stops at 7 columns, however wide the pane is.
+    grid.set_max_columns(64);
+    let tx = sender.clone();
+    grid.connect_activate(move |_, _| tx.emit(super::msg::Msg::Activate(index)));
+    claim_pane(&grid, index, sender, active_pane);
+    let grid_scroll = gtk::ScrolledWindow::new();
+    grid_scroll.set_child(Some(&grid));
+    grid_scroll.set_vexpand(true);
+    grid_scroll.set_overlay_scrolling(false);
     let preview = gtk::TextView::new();
     preview.set_editable(false);
     preview.set_monospace(true);
@@ -1193,6 +1211,7 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     frame.add_controller(watch);
     let stack = gtk::Stack::new();
     stack.add_named(&scroll, Some("list"));
+    stack.add_named(&grid_scroll, Some("thumbs"));
     stack.add_named(&preview_kind, Some("preview"));
     stack.add_named(&terminal_slot, Some("terminal"));
     stack.set_vexpand(true);
@@ -1209,6 +1228,7 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
         filter,
         stack,
         list,
+        grid,
         store,
         selection,
         preview,

@@ -599,13 +599,13 @@ pub fn list_background(p: &Palette, color: &str, image: &str, strength: u8, stre
         )
     };
     format!(
-        "paned.panes {{\n  background-color: {fill};\n  background-image: {picture};\n  background-size: {size};\n  background-position: {at};\n  background-repeat: {repeat};\n}}\npaned.panes > separator,\npaned.panes frame.pane,\npaned.panes frame.pane > border,\npaned.panes frame.pane box,\npaned.panes scrolledwindow,\npaned.panes columnview,\npaned.panes columnview > header > button,\npaned.panes columnview > listview,\npaned.panes columnview > listview > row,\npaned.panes columnview > listview > row > cell {{\n  background-color: transparent;\n  background-image: none;\n}}\n{selected}"
+        "paned.panes {{\n  background-color: {fill};\n  background-image: {picture};\n  background-size: {size};\n  background-position: {at};\n  background-repeat: {repeat};\n}}\npaned.panes > separator,\npaned.panes frame.pane,\npaned.panes frame.pane > border,\npaned.panes frame.pane box,\npaned.panes scrolledwindow,\npaned.panes columnview,\npaned.panes columnview > header > button,\npaned.panes columnview > listview,\npaned.panes columnview > listview > row,\npaned.panes columnview > listview > row > cell,\npaned.panes gridview,\npaned.panes gridview > child {{\n  background-color: transparent;\n  background-image: none;\n}}\n{selected}"
     )
 }
 
 fn selected_rows(p: &Palette) -> String {
     format!(
-        "frame.pane-active columnview > listview > row:selected,\nframe.pane-active columnview > listview > row:selected > cell {{\n  background: {sel};\n  color: {bright};\n}}\n",
+        "frame.pane-active columnview > listview > row:selected,\nframe.pane-active columnview > listview > row:selected > cell,\nframe.pane-active gridview > child:selected {{\n  background: {sel};\n  color: {bright};\n}}\n",
         sel = p.row_selected,
         bright = p.bright,
     )
@@ -616,13 +616,13 @@ pub fn cursor_bar(fallback: &str, color: &str, alpha: u8, text: &str) -> String 
     let color = hex_color(color).unwrap_or(fallback);
     let opacity = f64::from(alpha.min(100)) / 100.0;
     format!(
-        "frame.pane columnview > listview > row:selected,\nframe.pane columnview > listview > row:selected > cell {{\n  background-color: transparent;\n  background-image: none;\n  color: {text};\n}}\nframe.pane-active columnview > listview > row:selected,\nframe.pane-active columnview > listview > row:selected > cell {{\n  background-color: alpha({color}, {opacity:.2});\n  background-image: none;\n}}\n"
+        "frame.pane columnview > listview > row:selected,\nframe.pane columnview > listview > row:selected > cell,\nframe.pane gridview > child:selected {{\n  background-color: transparent;\n  background-image: none;\n  color: {text};\n}}\nframe.pane-active columnview > listview > row:selected,\nframe.pane-active columnview > listview > row:selected > cell,\nframe.pane-active gridview > child:selected {{\n  background-color: alpha({color}, {opacity:.2});\n  background-image: none;\n}}\n"
     )
 }
 
 fn solid_lists(fill: &str, selected: &str) -> String {
     format!(
-        "columnview,\ncolumnview > listview,\ncolumnview > listview > row,\ncolumnview > listview > row > cell {{\n  background: {fill};\n}}\n{selected}"
+        "columnview,\ncolumnview > listview,\ncolumnview > listview > row,\ncolumnview > listview > row > cell,\ngridview,\ngridview > child {{\n  background: {fill};\n}}\n{selected}"
     )
 }
 
@@ -636,7 +636,7 @@ fn plain_background(p: &Palette, chosen: Option<&str>, strength: u8, selected: &
     let fill = chosen.unwrap_or(p.background.as_str());
     let opacity = f64::from(strength) / 100.0;
     format!(
-        "window.rust-commander {{\n  background-color: alpha({fill}, {opacity:.2});\n}}\nwindow.rust-commander headerbar,\nwindow.rust-commander .titlebar,\nwindow.rust-commander frame,\nwindow.rust-commander frame > border,\nwindow.rust-commander scrolledwindow,\nwindow.rust-commander columnview,\nwindow.rust-commander columnview > listview,\nwindow.rust-commander columnview > listview > row,\nwindow.rust-commander columnview > listview > row > cell,\nwindow.rust-commander textview,\nwindow.rust-commander textview text {{\n  background-color: transparent;\n  background-image: none;\n}}\n{selected}"
+        "window.rust-commander {{\n  background-color: alpha({fill}, {opacity:.2});\n}}\nwindow.rust-commander headerbar,\nwindow.rust-commander .titlebar,\nwindow.rust-commander frame,\nwindow.rust-commander frame > border,\nwindow.rust-commander scrolledwindow,\nwindow.rust-commander columnview,\nwindow.rust-commander columnview > listview,\nwindow.rust-commander columnview > listview > row,\nwindow.rust-commander columnview > listview > row > cell,\nwindow.rust-commander gridview,\nwindow.rust-commander gridview > child,\nwindow.rust-commander textview,\nwindow.rust-commander textview text {{\n  background-color: transparent;\n  background-image: none;\n}}\n{selected}"
     )
 }
 
@@ -708,6 +708,13 @@ label.icon-glyph {{
   min-width: 0;
   padding: 0;
   margin: 0 {icon_gap}px 0 0;
+}}
+.thumb-cell .file-icon,
+.thumb-cell label.icon-glyph {{
+  margin: 0;
+}}
+.thumb-cell label.icon-glyph {{
+  font-size: 40px;
 }}
 columnview > listview > row > cell:first-child {{
   padding: 0;

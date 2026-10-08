@@ -174,6 +174,7 @@ impl App {
             Act::Search => self.open_search(sender),
             Act::Hidden => self.toggle_hidden(),
             Act::Syntax => self.toggle_syntax(),
+            Act::Thumbs => self.toggle_thumbs(),
             Act::QuickView => self.toggle_quick_view(sender),
             Act::Terminal => self.toggle_panel_terminal(sender),
             Act::NewShell => self.new_shell(sender),

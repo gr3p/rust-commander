@@ -17,7 +17,7 @@ Bibliotek i `src/lib.rs`. Fönstret startar i `src/main.rs` via `ui::run`.
 | Kommandon, poäng, F1 | `src/commands.rs`, katalog i `src/ui/app/settings.rs`, körning i `src/ui/app/commands.rs` |
 | Egenskaper, rättigheter | `src/props.rs`, dialog i `src/ui/app/props.rs` |
 | Fönster, paneler, tangentfångst | `src/ui/shell.rs` |
-| Kolumner, ikon, markör | `src/ui/row.rs` |
+| Kolumner, ikon, markör, miniatyrrutnät (Ctrl+Shift+F1) | `src/ui/row.rs` |
 | Meddelanden | `src/ui/msg.rs` |
 | Hotlist-fönster | `src/ui/hotlist.rs` |
 | Paneler, Enter i katalog, markering | `src/state.rs` |

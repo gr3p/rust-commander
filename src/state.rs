@@ -105,6 +105,7 @@ pub struct Pane {
     pub filter: String,
     pub sort: SortKey,
     pub ascending: bool,
+    pub thumbs: bool,
 }
 
 impl Pane {
@@ -115,6 +116,7 @@ impl Pane {
             filter: String::new(),
             sort: SortKey::Name,
             ascending: true,
+            thumbs: false,
         }
     }
 

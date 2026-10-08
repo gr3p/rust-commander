@@ -93,6 +93,7 @@ pub enum Act {
     Hidden,
     QuickView,
     Syntax,
+    Thumbs,
     Terminal,
     NewShell,
     CloseShell,
@@ -118,7 +119,7 @@ pub enum Act {
 }
 
 impl Act {
-    pub const ALL: [Act; 70] = [
+    pub const ALL: [Act; 71] = [
         Act::Refresh,
         Act::View,
         Act::Edit,
@@ -167,6 +168,7 @@ impl Act {
         Act::Hidden,
         Act::QuickView,
         Act::Syntax,
+        Act::Thumbs,
         Act::Terminal,
         Act::NewShell,
         Act::CloseShell,
@@ -420,6 +422,7 @@ const CATALOG: &[Item] = &[
     Item { act: Act::Discard, keys: "Ctrl+D", label: "Discard", group: Group::View },
     Item { act: Act::LeaveEdit, keys: "Escape", label: "Leave edit", group: Group::View },
     Item { act: Act::Syntax, keys: "Ctrl+Y", label: "Syntax", group: Group::View },
+    Item { act: Act::Thumbs, keys: "Ctrl+Shift+F1", label: "Thumbnails", group: Group::View },
     Item { act: Act::Terminal, keys: "F9", label: "Terminal in other panel", group: Group::View },
     Item { act: Act::NewShell, keys: "Ctrl+F9", label: "New shell", group: Group::View },
     Item { act: Act::CloseShell, keys: "Ctrl+W", label: "Close shell", group: Group::View },
