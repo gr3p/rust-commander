@@ -169,7 +169,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
     for hint in &hints {
         context_row.append(&hint.button);
     }
-    let all = gtk::Button::with_label("F1 All");
+    let all = gtk::Button::with_label("F1 All CMD");
     all.add_css_class("fkey");
     all.set_hexpand(true);
     all.set_focus_on_click(false);
@@ -232,10 +232,22 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
         }
         if editing_keys.get() {
             if let Some(widget) = focused.as_ref() {
-                if widget.downcast_ref::<gtk::TextView>().is_some() && !edit_command(key, mods) {
-                    // Capture on the window runs before the text view, so Proceed never inserts.
-                    controller.forward(widget);
-                    return gtk::glib::Propagation::Stop;
+                if let Some(view) = widget.downcast_ref::<gtk::TextView>() {
+                    // The window captures the key, so the text view never sees its own clipboard shortcuts.
+                    if clipboard_edit(key, mods) {
+                        use gtk::gdk::Key;
+                        match key {
+                            Key::c | Key::C => view.emit_copy_clipboard(),
+                            Key::x | Key::X => view.emit_cut_clipboard(),
+                            _ => view.emit_paste_clipboard(),
+                        }
+                        return gtk::glib::Propagation::Stop;
+                    }
+                    if !edit_command(key, mods) {
+                        // Capture on the window runs before the text view, so Proceed never inserts.
+                        controller.forward(widget);
+                        return gtk::glib::Propagation::Stop;
+                    }
                 }
             }
         }
@@ -854,15 +866,24 @@ fn collect_titles(widget: &gtk::Widget, out: &mut Vec<gtk::Widget>) {
     }
 }
 
-fn edit_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
+pub(crate) fn edit_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
     use gtk::gdk::Key;
     let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
     let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
-    // Escape and Ctrl+V leave edit. Ctrl+Q leaves quick view once the text is saved.
+    // Escape leaves edit. Ctrl+Q leaves quick view once the text is saved.
     // Ctrl+D discards. Ctrl+S saves. Ctrl+Y toggles syntax. Ctrl+L edits the path. Ctrl+E stays out of the text. F1 opens commands.
     (!ctrl && !alt && key == Key::F1)
         || key == Key::Escape
-        || (ctrl && !alt && matches!(key, Key::s | Key::S | Key::v | Key::V | Key::e | Key::E | Key::d | Key::D | Key::q | Key::Q | Key::y | Key::Y | Key::l | Key::L))
+        || (ctrl && !alt && matches!(key, Key::s | Key::S | Key::e | Key::E | Key::d | Key::D | Key::q | Key::Q | Key::y | Key::Y | Key::l | Key::L))
+}
+
+// Ctrl+C copies, Ctrl+X cuts, Ctrl+V pastes. Shift stays free for copy path.
+pub(crate) fn clipboard_edit(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
+    use gtk::gdk::Key;
+    let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+    let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
+    let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+    ctrl && !alt && !shift && matches!(key, Key::c | Key::C | Key::x | Key::X | Key::v | Key::V)
 }
 
 fn terminal_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
@@ -1220,7 +1241,7 @@ pub fn paint_terminal(term: &Terminal, theme: &rust_commander::theme::TerminalTh
 
 #[cfg(test)]
 mod tests {
-    use super::{edit_command, entry_input};
+    use super::{clipboard_edit, edit_command, entry_input};
     use relm4::gtk::gdk::{Key, ModifierType};
 
     #[test]
@@ -1245,5 +1266,12 @@ mod tests {
         assert!(edit_command(Key::l, ModifierType::CONTROL_MASK));
         assert!(!edit_command(Key::d, ModifierType::empty()));
         assert!(!edit_command(Key::q, ModifierType::empty()));
+        assert!(!edit_command(Key::c, ModifierType::CONTROL_MASK));
+        assert!(!edit_command(Key::x, ModifierType::CONTROL_MASK));
+        assert!(!edit_command(Key::v, ModifierType::CONTROL_MASK));
+        assert!(clipboard_edit(Key::c, ModifierType::CONTROL_MASK));
+        assert!(clipboard_edit(Key::x, ModifierType::CONTROL_MASK));
+        assert!(clipboard_edit(Key::v, ModifierType::CONTROL_MASK));
+        assert!(!clipboard_edit(Key::c, ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK));
     }
 }

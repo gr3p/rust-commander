@@ -86,6 +86,7 @@ pub enum Msg {
     RefreshActive,
     PreviewImageCopied { generation: u64, image: Result<(u32, u32, Vec<u8>), String> },
     CloseWindow,
+    CloseLister,
     PickBackground,
     ClearBackground,
     BackgroundImage(std::path::PathBuf),

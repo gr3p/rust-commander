@@ -113,6 +113,10 @@ pub fn read_for_edit(path: &Path, charset: Charset) -> Result<(String, TextForm)
     if meta.len() > EDIT_MAX {
         return Err("File too large to edit".into());
     }
+    // No bytes to decode. An empty file is editable in every charset.
+    if meta.len() == 0 {
+        return Ok((String::new(), TextForm::default()));
+    }
     let bytes = fs::read(path).map_err(|err| err.to_string())?;
     let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
     let text = match std::str::from_utf8(&bytes) {
@@ -530,6 +534,9 @@ mod tests {
         let path = dir.join("note.txt");
         write_text(&path, "hello\n", TextForm::default()).unwrap();
         assert_eq!(read_for_edit(&path, Charset::Utf8).unwrap().0, "hello\n");
+        let empty = dir.join("file.json");
+        fs::write(&empty, "").unwrap();
+        assert_eq!(read_for_edit(&empty, Charset::Json).unwrap(), (String::new(), TextForm::default()));
         write_text(&path, "changed\n", TextForm::default()).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"changed\n");
         let _ = fs::remove_dir_all(&dir);

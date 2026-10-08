@@ -111,6 +111,14 @@ struct ListerUi {
     reader: lister::Reader,
     mode: ViewMode,
     modes: super::shell::CharsetBar,
+    edit_button: gtk::Button,
+    discard_button: gtk::Button,
+    editing: Rc<Cell<bool>>,
+    quiet: Rc<Cell<bool>>,
+    changes: Rc<Cell<u64>>,
+    form: lister::TextForm,
+    saved: u64,
+    armed: Option<u64>,
 }
 
 struct ImageUi {
@@ -513,8 +521,20 @@ impl App {
             Msg::ToggleImageScale => self.toggle_shown_scale(sender),
             Msg::SetCharset(charset) => self.set_charset(charset, sender),
             Msg::ToggleQuickEdit => self.toggle_quick_edit(sender),
-            Msg::SaveQuick => self.save_quick(),
-            Msg::DiscardQuick => self.discard_quick(sender),
+            Msg::SaveQuick => {
+                if self.lister_editing() {
+                    self.save_lister();
+                } else {
+                    self.save_quick();
+                }
+            }
+            Msg::DiscardQuick => {
+                if self.lister_editing() {
+                    self.discard_lister(sender);
+                } else {
+                    self.discard_quick(sender);
+                }
+            }
             Msg::CopyPreviewPath => self.copy_preview_path(),
             Msg::CopyPreviewImage => self.copy_preview_image(sender),
             Msg::Run(act) => self.run_act(act, sender),
@@ -532,6 +552,9 @@ impl App {
                 if self.leave_quick_edit(sender) {
                     self.shell.window.close();
                 }
+            }
+            Msg::CloseLister => {
+                let _ = self.close_lister();
             }
             Msg::ImageStep(delta) => self.step_shown_image(delta, sender),
             Msg::PickBackground => self.pick_background(sender),
@@ -646,13 +669,22 @@ impl App {
             }
             return;
         }
-        if self.shell.editing.get() && ctrl && !shift && !alt && matches!(key, Key::s | Key::S) {
-            self.save_quick();
-            return;
+        if ctrl && !shift && !alt && matches!(key, Key::s | Key::S) {
+            if self.lister_editing() {
+                self.save_lister();
+                return;
+            }
+            if self.shell.editing.get() {
+                self.save_quick();
+                return;
+            }
         }
         if self.lister.is_some() && !ctrl && !alt {
             match key {
-                Key::Escape => self.close_lister(),
+                Key::Escape if self.lister_editing() => self.toggle_lister_edit(sender),
+                Key::Escape => {
+                    let _ = self.close_lister();
+                }
                 Key::_1 => self.lister_set_mode(ViewMode::Text, sender),
                 Key::_2 => self.lister_set_mode(ViewMode::Binary, sender),
                 Key::_3 => self.lister_set_mode(ViewMode::Hex, sender),
@@ -715,13 +747,16 @@ impl App {
                         self.touch(id);
                     }
                 }
+                Key::d | Key::D if self.lister_editing() => self.discard_lister(sender),
                 Key::d | Key::D if self.shell.editing.get() => self.discard_quick(sender),
                 Key::d | Key::D => self.toggle_hotlist(sender),
+                Key::e | Key::E if self.lister.is_some() => {
+                    if !self.lister_editing() {
+                        self.start_lister_edit();
+                    }
+                }
                 Key::e | Key::E if self.state.quick_view && !self.shell.editing.get() => {
                     self.toggle_quick_edit(sender);
-                }
-                Key::v | Key::V if self.state.quick_view && self.shell.editing.get() => {
-                    self.leave_quick_edit(sender);
                 }
                 Key::q | Key::Q => self.toggle_quick_view(sender),
                 Key::Tab | Key::ISO_Left_Tab => {

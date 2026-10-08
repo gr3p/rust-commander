@@ -1,4 +1,6 @@
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -33,7 +35,9 @@ impl App {
         let id = self.state.active;
         let files = self.image_files(id);
         let Some(index) = files.iter().position(|item| item == &path) else { return };
-        self.close_lister();
+        if !self.close_lister() {
+            return;
+        }
         self.close_image();
         self.image_token = self.image_token.wrapping_add(1);
         let token = self.image_token;
@@ -168,6 +172,12 @@ impl App {
     pub(in crate::ui::app) fn open_lister(&mut self, sender: &ComponentSender<Self>) {
         self.close_image();
         let Some(path) = self.file_under_cursor() else { return };
+        if self.lister.as_ref().is_some_and(|ui| ui.reader.path() == path) {
+            return;
+        }
+        if self.lister_dirty_blocked() {
+            return;
+        }
         self.lister_gen = self.lister_gen.wrapping_add(1);
         let generation = self.lister_gen;
         let charset = self.charset;
@@ -195,7 +205,9 @@ impl App {
             }
         };
         let path = reader.path().to_path_buf();
-        self.close_lister();
+        if !self.close_lister() {
+            return;
+        }
         let window = gtk::Window::new();
         window.set_title(Some(&path.display().to_string()));
         window.set_transient_for(Some(&self.shell.window));
@@ -205,9 +217,10 @@ impl App {
         view.set_editable(false);
         view.set_monospace(true);
         view.buffer().set_text(&text);
+        place_at_start(&view);
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("file").to_string();
         if self.cfg.syntax_highlight && self.charset == Charset::Utf8 {
-            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
-            paint_syntax(&view, name, true);
+            paint_syntax(&view, &name, true);
         }
         let scroll = gtk::ScrolledWindow::new();
         scroll.set_child(Some(&view));
@@ -215,23 +228,211 @@ impl App {
         let modes = crate::ui::shell::charset_bar(sender.input_sender());
         modes.bar.set_visible(self.cfg.mode_buttons);
         paint_charset(&modes, self.charset);
+        let edit_button = lister_key("Ctrl+E", "Edit", || Msg::ToggleQuickEdit, sender.input_sender());
+        let save_button = lister_key("Ctrl+S", "Save", || Msg::SaveQuick, sender.input_sender());
+        let discard_button = lister_key("Ctrl+D", "Discard", || Msg::DiscardQuick, sender.input_sender());
+        discard_button.set_visible(false);
+        modes.bar.append(&edit_button);
+        modes.bar.append(&save_button);
+        modes.bar.append(&discard_button);
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
         column.append(&scroll);
         column.append(&modes.bar);
         window.set_child(Some(&column));
+        let editing = Rc::new(Cell::new(false));
+        let quiet = Rc::new(Cell::new(false));
+        let changes = Rc::new(Cell::new(0u64));
+        let editing_keys = Rc::clone(&editing);
+        let quiet_changed = Rc::clone(&quiet);
+        let changes_changed = Rc::clone(&changes);
+        let editing_changed = Rc::clone(&editing);
+        let window_changed = window.clone();
+        let view_changed = view.clone();
+        let name_changed = name.clone();
+        let syntax = self.cfg.syntax_highlight;
+        view.buffer().connect_changed(move |_| {
+            if quiet_changed.get() || !editing_changed.get() {
+                return;
+            }
+            changes_changed.set(changes_changed.get() + 1);
+            window_changed.set_title(Some(&format!("{name_changed}*")));
+            paint_syntax(&view_changed, &name_changed, syntax);
+        });
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let tx = sender.input_sender().clone();
-        keys.connect_key_pressed(move |_, key, _, mods| {
+        let view_keys = view.clone();
+        keys.connect_key_pressed(move |controller, key, _, mods| {
+            if editing_keys.get() {
+                use gtk::gdk::Key;
+                if crate::ui::shell::clipboard_edit(key, mods) {
+                    match key {
+                        Key::c | Key::C => view_keys.emit_copy_clipboard(),
+                        Key::x | Key::X => view_keys.emit_cut_clipboard(),
+                        _ => view_keys.emit_paste_clipboard(),
+                    }
+                    return gtk::glib::Propagation::Stop;
+                }
+                if !crate::ui::shell::edit_command(key, mods) {
+                    controller.forward(&view_keys);
+                    return gtk::glib::Propagation::Stop;
+                }
+            }
             tx.emit(Msg::Key(key, mods));
             gtk::glib::Propagation::Stop
         });
         window.add_controller(keys);
+        let editing_close = Rc::clone(&editing);
+        let tx_close = sender.input_sender().clone();
+        window.connect_close_request(move |_| {
+            if editing_close.get() {
+                tx_close.emit(Msg::CloseLister);
+                return gtk::glib::Propagation::Stop;
+            }
+            gtk::glib::Propagation::Proceed
+        });
         window.present();
-        self.lister = Some(ListerUi { window, view, reader, mode: ViewMode::Text, modes });
+        self.lister = Some(ListerUi {
+            window,
+            view,
+            reader,
+            mode: ViewMode::Text,
+            modes,
+            edit_button,
+            discard_button,
+            editing,
+            quiet,
+            changes,
+            form: lister::TextForm::default(),
+            saved: 0,
+            armed: None,
+        });
+    }
+
+    pub(in crate::ui::app) fn lister_editing(&self) -> bool {
+        self.lister.as_ref().is_some_and(|ui| ui.editing.get())
+    }
+
+    pub(in crate::ui::app) fn toggle_lister_edit(&mut self, sender: &ComponentSender<Self>) {
+        if self.lister_editing() {
+            if !self.lister_dirty_blocked() {
+                self.stop_lister_edit(sender);
+            }
+            return;
+        }
+        self.start_lister_edit();
+    }
+
+    pub(in crate::ui::app) fn start_lister_edit(&mut self) {
+        let Some(lister) = self.lister.as_ref() else { return };
+        if lister.mode != ViewMode::Text {
+            self.status = "Edit is for text".into();
+            return;
+        }
+        let path = lister.reader.path().to_path_buf();
+        let (text, form) = match lister::read_for_edit(&path, self.charset) {
+            Ok(read) => read,
+            Err(err) => {
+                self.status = err;
+                return;
+            }
+        };
+        let lister = self.lister.as_mut().unwrap();
+        lister.quiet.set(true);
+        lister.view.buffer().set_text(&text);
+        lister.quiet.set(false);
+        paint_syntax(&lister.view, lister.reader.file_name(), self.cfg.syntax_highlight);
+        place_at_start(&lister.view);
+        lister.form = form;
+        lister.saved = lister.changes.get();
+        lister.armed = None;
+        lister.editing.set(true);
+        lister.view.set_hexpand(true);
+        lister.view.set_vexpand(true);
+        lister.view.set_editable(true);
+        lister.view.set_cursor_visible(true);
+        lister.view.grab_focus();
+        lister.discard_button.set_visible(true);
+        paint_edit(&lister.edit_button, true);
+        lister.window.set_title(Some(&path.display().to_string()));
+        self.status = "VIEW: edit".into();
+    }
+
+    pub(in crate::ui::app) fn save_lister(&mut self) {
+        let Some(lister) = self.lister.as_ref() else { return };
+        if !lister.editing.get() {
+            return;
+        }
+        let path = lister.reader.path().to_path_buf();
+        let form = lister.form;
+        let text = {
+            let buffer = lister.view.buffer();
+            buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).to_string()
+        };
+        match lister::write_text(&path, &text, form) {
+            Ok(()) => {
+                let lister = self.lister.as_mut().unwrap();
+                lister.saved = lister.changes.get();
+                lister.armed = None;
+                lister.window.set_title(Some(&path.display().to_string()));
+                self.status = "VIEW: SAVED".into();
+            }
+            Err(err) => self.status = err.to_string(),
+        }
+    }
+
+    pub(in crate::ui::app) fn discard_lister(&mut self, sender: &ComponentSender<Self>) {
+        if !self.lister_editing() {
+            return;
+        }
+        let dirty = self.lister.as_ref().is_some_and(|ui| ui.saved != ui.changes.get());
+        self.stop_lister_edit(sender);
+        if dirty {
+            self.status = "Discarded".into();
+        }
+    }
+
+    fn lister_dirty_blocked(&mut self) -> bool {
+        let Some(lister) = self.lister.as_mut() else { return false };
+        if !lister.editing.get() {
+            return false;
+        }
+        let changes = lister.changes.get();
+        if lister.saved != changes && lister.armed != Some(changes) {
+            lister.armed = Some(changes);
+            let message = format!(
+                "Unsaved changes: {} saves, {} discards, or press again",
+                rust_commander::commands::format_keys("Ctrl+S"),
+                rust_commander::commands::format_keys("Ctrl+D"),
+            );
+            lister.window.set_title(Some(&message));
+            self.status = message;
+            return true;
+        }
+        false
+    }
+
+    fn stop_lister_edit(&mut self, sender: &ComponentSender<Self>) {
+        let Some(lister) = self.lister.as_mut() else { return };
+        if !lister.editing.get() {
+            return;
+        }
+        let title = lister.reader.path().display().to_string();
+        lister.editing.set(false);
+        lister.view.set_editable(false);
+        lister.view.set_hexpand(false);
+        lister.view.set_vexpand(false);
+        lister.discard_button.set_visible(false);
+        paint_edit(&lister.edit_button, false);
+        lister.window.set_title(Some(&title));
+        self.lister_redraw(sender);
     }
 
     pub(in crate::ui::app) fn toggle_quick_edit(&mut self, sender: &ComponentSender<Self>) {
+        if self.lister.is_some() {
+            self.toggle_lister_edit(sender);
+            return;
+        }
         if self.shell.editing.get() {
             self.leave_quick_edit(sender);
             return;
@@ -262,9 +463,14 @@ impl App {
         paint_syntax(preview, &name, self.cfg.syntax_highlight);
         self.quick_edit = Some(QuickEdit { path, pane, form, saved: self.edit_changes.get(), armed: None });
         self.shell.editing.set(true);
+        // An empty file has no lines to click. The view fills the pane so the cursor is there.
+        preview.set_hexpand(true);
+        preview.set_vexpand(true);
         preview.set_editable(true);
         preview.set_cursor_visible(true);
         preview.grab_focus();
+        // set_text leaves the cursor at the end. Editing starts on the first line.
+        place_at_start(preview);
         paint_edit(&self.shell.edit_button, true);
         self.status = "QUICKVIEW: edit".into();
     }
@@ -326,6 +532,8 @@ impl App {
         self.quick_edit = None;
         for pane in &self.shell.panes {
             pane.preview.set_editable(false);
+            pane.preview.set_hexpand(false);
+            pane.preview.set_vexpand(false);
         }
         paint_edit(&self.shell.edit_button, false);
         self.shell.window.set_title(Some(rust_commander::app_title()));
@@ -374,6 +582,10 @@ impl App {
     }
 
     pub(in crate::ui::app) fn lister_set_mode(&mut self, mode: ViewMode, sender: &ComponentSender<Self>) {
+        if self.lister_editing() {
+            self.status = "Leave edit first".into();
+            return;
+        }
         if let Some(lister) = self.lister.as_mut() {
             lister.mode = mode;
         }
@@ -415,8 +627,12 @@ impl App {
         if generation != self.lister_draw {
             return;
         }
+        if self.lister_editing() {
+            return;
+        }
         let Some(lister) = self.lister.as_ref() else { return };
         lister.view.buffer().set_text(&text);
+        place_at_start(&lister.view);
         self.paint_lister_syntax();
     }
 
@@ -427,7 +643,7 @@ impl App {
     }
 
     pub(in crate::ui::app) fn set_charset(&mut self, charset: Charset, sender: &ComponentSender<Self>) {
-        if self.shell.editing.get() {
+        if self.shell.editing.get() || self.lister_editing() {
             self.note_quick("Leave edit first");
             return;
         }
@@ -450,10 +666,15 @@ impl App {
         }
     }
 
-    pub(in crate::ui::app) fn close_lister(&mut self) {
+    pub(in crate::ui::app) fn close_lister(&mut self) -> bool {
+        if self.lister_dirty_blocked() {
+            return false;
+        }
         if let Some(lister) = self.lister.take() {
+            lister.editing.set(false);
             lister.window.close();
         }
+        true
     }
 
     pub(in crate::ui::app) fn note_preview_target(&mut self) {
@@ -696,9 +917,28 @@ pub(in crate::ui::app) fn preview_body(path: &Path, max_edge: u32) -> PreviewBod
     }
 }
 
+fn lister_key(keys: &str, label: &str, make: impl Fn() -> Msg + 'static, sender: &relm4::Sender<Msg>) -> gtk::Button {
+    let button = gtk::Button::with_label(&rust_commander::commands::caption(keys, label));
+    button.add_css_class("fkey");
+    button.set_hexpand(true);
+    button.set_focus_on_click(false);
+    let tx = sender.clone();
+    crate::ui::shell::on_click(&button, move || tx.emit(make()));
+    button
+}
+
+fn place_at_start(view: &gtk::TextView) {
+    let buffer = view.buffer();
+    buffer.place_cursor(&buffer.start_iter());
+    view.scroll_to_mark(&buffer.get_insert(), 0.0, true, 0.0, 0.0);
+    if let Some(adj) = view.vadjustment() {
+        adj.set_value(adj.lower());
+    }
+}
+
 fn paint_edit(button: &gtk::Button, on: bool) {
     button.set_label(&if on {
-        rust_commander::commands::caption("Ctrl+V", "View")
+        rust_commander::commands::caption("Escape", "View")
     } else {
         rust_commander::commands::caption("Ctrl+E", "Edit")
     });

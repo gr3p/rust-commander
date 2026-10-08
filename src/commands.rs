@@ -256,6 +256,8 @@ pub fn rank(cue: &Cue) -> Vec<Act> {
         })
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    // F3 View, F4 Edit, F5 Copy and F6 Move already sit on the key row.
+    scored.retain(|(_, _, act)| !matches!(act, Act::View | Act::Edit | Act::Copy | Act::Move));
     // Quick view takes the last slot every time, so it is always in the same place.
     let keep = if cue.editing { 6 } else { 5 };
     let mut ranked: Vec<Act> = scored.into_iter().take(keep).map(|(_, _, act)| act).collect();
@@ -416,7 +418,7 @@ const CATALOG: &[Item] = &[
     Item { act: Act::QuickEdit, keys: "Ctrl+E", label: "Quick edit", group: Group::View },
     Item { act: Act::Save, keys: "Ctrl+S", label: "Save", group: Group::View },
     Item { act: Act::Discard, keys: "Ctrl+D", label: "Discard", group: Group::View },
-    Item { act: Act::LeaveEdit, keys: "Ctrl+V", label: "Leave edit", group: Group::View },
+    Item { act: Act::LeaveEdit, keys: "Escape", label: "Leave edit", group: Group::View },
     Item { act: Act::Syntax, keys: "Ctrl+Y", label: "Syntax", group: Group::View },
     Item { act: Act::Terminal, keys: "F9", label: "Terminal in other panel", group: Group::View },
     Item { act: Act::NewShell, keys: "Ctrl+F9", label: "New shell", group: Group::View },
@@ -475,25 +477,24 @@ mod tests {
     }
 
     #[test]
-    fn text_prefers_view_edit_and_path() {
+    fn text_skips_commands_already_on_the_key_row() {
         let ranked = rank(&cue(|cue| {
             cue.text = true;
             cue.file = true;
         }));
-        assert_eq!(&ranked[..3], &[Act::View, Act::Edit, Act::CopyPaths]);
-        let view = ranked.iter().position(|act| *act == Act::View).unwrap();
-        let filter = ranked.iter().position(|act| *act == Act::Filter).unwrap();
-        assert!(view < filter);
+        assert_eq!(&ranked[..3], &[Act::CopyPaths, Act::Properties, Act::Filter]);
+        assert!(!ranked.contains(&Act::View));
+        assert!(!ranked.contains(&Act::Edit));
     }
 
     #[test]
-    fn image_prefers_view_and_properties() {
+    fn image_offers_properties_not_view() {
         let ranked = rank(&cue(|cue| {
             cue.image = true;
             cue.file = true;
         }));
-        assert_eq!(ranked[0], Act::View);
-        assert_eq!(ranked[1], Act::Properties);
+        assert_eq!(ranked[0], Act::Properties);
+        assert!(!ranked.contains(&Act::View));
     }
 
     #[test]
@@ -503,7 +504,7 @@ mod tests {
             cue.file = true;
             cue.marks = 2;
         }));
-        assert_eq!(&ranked[..4], &[Act::Copy, Act::Move, Act::Pack, Act::PackHere]);
+        assert_eq!(&ranked[..4], &[Act::Pack, Act::PackHere, Act::Unpack, Act::UnpackHere]);
         assert!(ranked.contains(&Act::Unpack));
         assert_eq!(ranked.len(), 6);
     }
