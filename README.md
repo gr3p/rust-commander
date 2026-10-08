@@ -1,6 +1,18 @@
 # Rust Commander
 
-Standalone dual-pane file manager for Linux. Ships with a few built-in themes (Tokyo Night, Catppuccin Mocha, Gruvbox Dark, Nord); an Omarchy theme on a verified path is used instead when active.
+Dual-pane file manager for Linux. It copies and moves files, views and edits text, shows images, and packs and unpacks archives.
+
+## What it does
+
+**Files.** Two panels. The panel with focus is the source. Copy and move go to the other panel. Tabs, history, bookmarks, hidden files, a name filter, search, sorting, a drive list and disk info. F5 copies, F6 moves, F7 makes a folder, F8 moves to trash, Shift+F8 deletes. A copy or move can wait in a queue. Alt+Enter shows properties.
+
+**View.** F3 opens the file under the cursor. Text can be shown as text, binary or hex, in UTF-8, ANSI, ASCII or pretty JSON. Ctrl+E edits that text, including an empty file. The cursor starts at the top. Ctrl+C copies, Ctrl+X cuts and Ctrl+V pastes. Ctrl+S saves. Escape leaves edit. Images open in their own window. Ctrl+Q previews the file in the other panel, and edits it the same way.
+
+**Archives.** Alt+F5 packs the selection. `.zip` is built in. `.7z` uses 7-Zip and `.rar` uses RARLAB `rar`. Alt+F9 unpacks a zip, rar or tar into the other panel. Shift+Alt+F9 extracts in the panel where the archive is. Broken files are listed when unpacking finishes. Shift+F9 writes a `.sfv` for the selection. Enter on a `.sfv` checks CRC32.
+
+**Shell.** F9 opens a terminal in the other panel, in the active panel's directory. Ctrl+F9 opens another shell. Alt+1 to Alt+9 switches between them.
+
+Built-in themes are Tokyo Night, Catppuccin Mocha, Gruvbox Dark and Nord. An Omarchy theme on a verified path is used instead when it is active.
 
 ## Build on Linux
 
@@ -58,13 +70,9 @@ Ctrl+1 to Ctrl+9 selects a drive in the active panel. The number is shown before
 
 `scripts/gui-smoke.sh` does the same against the window and binds only the Wayland socket.
 
-## Checklist
+## Not included
 
-MVP, with a green acceptance test: two panels, copy and move trees, conflict, Lister (text, binary, hex, windowed reading), Quick View, images in Quick View and F3, filter, sorting, history, bookmarks, and tabs.
-
-Later, one at a time: multi-select rename (Ctrl+M), search in file contents and advanced search conditions, archives as folders, directory sync.
-
-Left out: Windows builds, network neighborhood, parallel port, USB cable, UAC, Windows context menu, WLX/WCX/WDX/WFX, and IrfanView/XnView.
+Windows builds, network neighborhood, parallel port, USB cable, UAC, Windows context menu, WLX/WCX/WDX/WFX, and IrfanView/XnView. Search looks at file names, not file contents. An archive is unpacked. It is not opened as a folder.
 
 ## Themes
 
