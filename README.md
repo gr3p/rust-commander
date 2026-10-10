@@ -1,7 +1,7 @@
 # Rust Commander
 
 <p align="center">
-  <img src="img/rustcommander_white.png" alt="Rust Commander" width="320">
+  <img src="img/rust-commander.png" alt="Rust Commander" width="320">
 </p>
 
 Dual-pane file manager for Linux. It copies and moves files, views and edits text, shows images, and packs and unpacks archives.
