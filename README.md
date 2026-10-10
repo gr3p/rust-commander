@@ -4,33 +4,48 @@
   <img src="img/rust-commander.png" alt="Rust Commander" width="320">
 </p>
 
-Dual-pane file manager for Linux. It copies and moves files, views and edits text, shows images, and packs and unpacks archives.
+A dual-pane file manager for Linux, in the tradition of Total Commander on Windows and Midnight Commander in the terminal. It keeps the keyboard-driven F-key workflow and adds a native GTK4 window written in Rust, built-in terminals, image and text viewers, and themes that follow your desktop.
 
 ## Install
 
-Arch and Omarchy:
+**Arch and Omarchy**
 
 ```bash
 yay -S rust-commander
 ```
 
-Ubuntu and Debian, with the release `.deb` in the current directory:
+**Ubuntu and Debian**
+
+1. Download the newest `rust-commander_<version>_amd64.deb` from the [Releases page](https://github.com/gr3p/rust-commander/releases/latest).
+2. Install it from the folder where it was saved. apt pulls in GTK4 and VTE for you.
 
 ```bash
-sudo apt install ./rust-commander_0.1.0-1_amd64.deb
+sudo apt install ./rust-commander_*_amd64.deb
 ```
+
+Start it from the application menu, or run `rust-commander`.
+
+For `.7z` and `.rar` archives, also install 7-Zip (`p7zip-full` on Ubuntu, `p7zip` on Arch) and RARLAB `rar`. `.zip` works without them.
 
 ## What it does
 
-**Files.** Two panels. The panel with focus is the source. Copy and move go to the other panel. Tabs, history, bookmarks, hidden files, a name filter, search, sorting, a drive list and disk info. F5 copies, F6 moves, F7 makes a folder, F8 moves to trash, Shift+F8 deletes. A copy or move can wait in a queue. Alt+Enter shows properties.
+**Two panels, one source.** The panel with focus is the source, the other is the target. F5 copies, F6 moves, F7 makes a folder, F8 sends to the trash and Shift+F8 deletes for good. Each panel has tabs, history, bookmarks, a drive list with free space on hover, and a disk info window with file system, UUID, mount options and inodes. Tab switches panel, Space marks and Insert marks and moves on.
 
-**View.** F3 opens the file under the cursor. Text can be shown as text, binary or hex, in UTF-8, ANSI, ASCII or pretty JSON. Ctrl+E edits that text, including an empty file. The cursor starts at the top. Ctrl+C copies, Ctrl+X cuts and Ctrl+V pastes. Ctrl+S saves. Escape leaves edit. Images open in their own window. Ctrl+Q previews the file in the other panel, and edits it the same way.
+**Copy and move.** Copies and moves can wait in a queue and show progress. A copy never leaves a half-written file under the real name: it writes to a temporary file and renames it when complete. Shift+F5 copies under a new name, Shift+F6 renames, Shift+F7 makes a symbolic or hard link, and Ctrl+Delete overwrites a file once before deleting it. Alt+Enter shows properties and permissions, and can calculate the size of a folder.
 
-**Archives.** Alt+F5 packs the selection. `.zip` is built in. `.7z` uses 7-Zip and `.rar` uses RARLAB `rar`. Alt+F9 unpacks a zip, rar or tar into the other panel. Shift+Alt+F9 extracts in the panel where the archive is. Broken files are listed when unpacking finishes. Shift+F9 writes a `.sfv` for the selection. Enter on a `.sfv` checks CRC32.
+**Find and filter.** Ctrl+S filters the panel, with plain text or wildcards such as `*.md` and `edit?.txt`. Ctrl+Shift+S searches names through all subfolders. Search can also look inside file text, limit by size and date, find duplicates, look inside archives, and show the hits in a panel. Sorting is on Ctrl+F3 to Ctrl+F6, and Ctrl+H shows or hides dotfiles. Ctrl+Shift+F1 switches to a thumbnail grid.
 
-**Shell.** F9 opens a terminal in the other panel, in the active panel's directory. Ctrl+F9 opens another shell. Alt+1 to Alt+9 switches between them.
+**View and edit.** F3 opens text as text, binary or hex, in UTF-8, ANSI, ASCII or pretty JSON. Ctrl+E edits it in place, with cut, copy, paste and save. Images open in their own window and arrow keys step through the folder. Ctrl+Q previews the file under the cursor in the other panel, and edits it there too. F4 opens the editor you pick in F12.
 
-Built-in themes are Tokyo Night, Catppuccin Mocha, Gruvbox Dark and Nord. An Omarchy theme on a verified path is used instead when it is active.
+**Archives.** Alt+F5 packs the selection to `.zip`, `.7z` or `.rar`, and Alt+F9 unpacks zip, rar and tar into the other panel. Shift+Alt+F9 extracts where the archive is. Broken files are skipped and listed when unpacking finishes, and a missing rar volume is named. Ctrl+Shift+F2 tests an archive without unpacking it. An archive is unpacked, it is not opened as a folder.
+
+**Checksums and encoding.** Shift+F9 writes a `.sfv`, `.md5`, `.sha1` or `.sha256` for the selection, and Enter on one checks it. Ctrl+Shift+F7 encodes or decodes Base64, UUE and MIME into the other panel.
+
+**Shell.** F9 opens a real terminal in the other panel, in the active panel's directory, and F9 again hides it without stopping it. Ctrl+F9 opens another one. Each is a numbered button, and Alt+1 to Alt+9 switches between them.
+
+**Command bar.** The button row above the F keys shows the commands you are most likely to want for what is under the cursor, so an archive offers unpack. F1 (All CMD) lists the rest, and F12 holds the settings.
+
+**Themes.** Built-in themes are Tokyo Night, Catppuccin Mocha, Gruvbox Dark and Nord. On Omarchy the window follows the active Omarchy theme and restyles by itself when you change it.
 
 ## Build on Linux
 
@@ -46,15 +61,9 @@ sudo pacman -S --needed base-devel pkgconf gtk4 vte4
 cargo run --release
 ```
 
-Optional runtime tools (not required to build):
+`.7z` and `.rar` packing need 7-Zip and RARLAB `rar` (`unrar` does not pack), as under Install. `bubblewrap` is only needed for `scripts/test-sandbox.sh`, not to build or start the program. Omarchy does not need to be installed; it uses the same Arch packages.
 
-- 7-Zip for `.7z`: Ubuntu `p7zip-full`, Arch `p7zip` (binary `7z`)
-- RAR pack: RARLAB `rar` (`unrar` does not pack)
-- Sandbox tests: `bubblewrap` on Ubuntu and Arch
-
-`bubblewrap` is only needed for `scripts/test-sandbox.sh`, not to start the program. Omarchy does not need to be installed; it uses the same Arch packages.
-
-If `cargo build` fails on `vte-2.91-gtk4`, install the VTE GTK4 package for your distro (table above).
+If `cargo build` fails on `vte-2.91-gtk4`, install the VTE GTK4 package from the commands above.
 
 The log is written to `~/.local/state/rust-commander/rust-commander.log`.
 
@@ -67,26 +76,6 @@ Try copy, move, and delete in a scratch directory, for example `~/rust-commander
 5. F8 moves a file to the trash. Restore it from the trash if you want to see that it is not really gone.
 6. F3 shows a text file, or an image in its own window. Ctrl+Q previews in the other panel. Left and right change the image in that folder.
 7. Close and start again. The window comes back.
-
-## Keys
-
-Tab switches panel. Up and down move the cursor. Space marks the row under the cursor. Insert marks and moves to the next row. F2 reloads. Ctrl+S filters file names in the active panel: plain text matches parts of names, while `*.md` or `edit?.txt` uses `*` and `?` against the whole name. Ctrl+Shift+S searches file and directory names from the active panel's directory, including subdirectories. The search window can limit the search to files, choose hidden names and case sensitivity, cancel a search, and go to a hit. Ctrl+H shows or hides dotfiles.
-
-F3 shows text or an image. In the image window the arrow keys change the image in the folder where the window was opened. When Quick View or the image window shows an image, the buttons at the bottom change to S Fit or S 1:1. S on a text file is still ASCII. F4 editor, Shift+F4 new file, F5 copy, Shift+F5 copy with a new name, F6 move, Shift+F6 rename, F7 new folder, F8 trash, Shift+F8 delete permanently.
-
-Special modes change the buttons at the bottom of the main window to commands for that mode. The row is turned off with Mode buttons in F12.
-
-Alt+F5 packs selected files. The extension chooses the format: `.zip` is built in, `.7z` uses 7-Zip (`7z` or `7zz`, for example `/usr/bin/7z`) and `.rar` uses RARLAB `rar` (for example `/usr/bin/rar`). `unrar` does not pack. The paths are set in F12. An empty field searches PATH.
-
-Alt+F9 unpacks a zip, rar or tar into the other panel and shows the file list. Shift+Alt+F9 unpacks the whole archive in the panel where the archive is. When the cursor is on a zip, rar or tar archive, the upper button row at the bottom shows `Alt+F9 Unpack to right panel` (or left, depending on the active panel) and `Shift+Alt+F9 Extract here`. The F keys are on the row below. The progress window shows which rar volume is being read (`From:`), the target folder (`To:`), and which file is being unpacked. Broken files are skipped and listed when unpacking finishes. If a volume is missing, it says which one. Enter on a `.sfv` checks CRC32. Shift+F9 creates a `.sfv` for the selection.
-
-Alt+Enter on a folder can calculate its size. Shift+F7 creates a symbolic or hard link in the other panel. Ctrl+Delete overwrites a file once and then deletes it. Shift+F9 asks for CRC32, MD5, SHA1 or SHA256. Enter on `.sfv`, `.md5`, `.sha1` or `.sha256` checks it. Ctrl+Shift+F2 tests a zip, rar, tar or 7z without unpacking. Ctrl+Shift+F7 encodes or decodes Base64, UUE or MIME into the other panel. Search can look inside file text, limit by size and date, find duplicates, look inside archives, and show the hits in the panel.
-
-Ctrl+1 to Ctrl+9 selects a drive in the active panel. The number is shown before the icon. Hovering a drive shows its free space. Ctrl+I, or a right click on a drive, opens a disk info window with usage, file system, device, label, UUID, mount options and inodes. F9 opens a shell in the other panel in the active panel's directory. The bottom button reads F9 Shell, and F9 Shell Toggle while that shell is showing. F9 hides it and leaves it running. Ctrl+F9 opens another shell. Each shell is a numbered button to the right of the drives; Alt+1 to Alt+9 switches to it. Ctrl+W in the shell closes that shell and returns to the file list. `exit` does the same. Ctrl+W in the file list still closes a tab. Ctrl+F3 name, Ctrl+F4 extension, Ctrl+F5 time, Ctrl+F6 size. Alt+F1 and Alt+F2 are places. Alt+F3 is the external viewer. Ctrl+Q previews. There, left and right change the image in that folder. Ctrl+T new tab, Ctrl+W close tab, Alt+left and Alt+right are history.
-
-## Not included
-
-Windows builds, network neighborhood, parallel port, USB cable, UAC, Windows context menu, WLX/WCX/WDX/WFX, and IrfanView/XnView. An archive is unpacked. It is not opened as a folder.
 
 ## Themes
 
