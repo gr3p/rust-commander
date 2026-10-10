@@ -1,6 +1,24 @@
 # Rust Commander
 
+<p align="center">
+  <img src="img/rustcommander_white.png" alt="Rust Commander" width="320">
+</p>
+
 Dual-pane file manager for Linux. It copies and moves files, views and edits text, shows images, and packs and unpacks archives.
+
+## Install
+
+Arch and Omarchy:
+
+```bash
+yay -S rust-commander
+```
+
+Ubuntu and Debian, with the release `.deb` in the current directory:
+
+```bash
+sudo apt install ./rust-commander_0.1.0-1_amd64.deb
+```
 
 ## What it does
 
