@@ -183,7 +183,10 @@ impl App {
                     Work::Unpack if err.starts_with("Skipped ") => "Unpack",
                     Work::Unpack => "Unpack failed",
                     Work::Pack => "Pack failed",
-                    Work::Sfv => "SFV failed",
+                    Work::Sfv | Work::Sum => "Checksum failed",
+                    Work::Shred => "Secure delete failed",
+                    Work::Test => "Test failed",
+                    Work::Encode => "Encode failed",
                     Work::Verify | Work::Transfer | Work::Delete => "Failed",
                 };
                 self.show_error(title, err);
@@ -196,7 +199,8 @@ impl App {
         self.pending = None;
         self.status = match result {
             Ok(report) if report.cancelled => "Cancelled".into(),
-            Ok(_) if matches!(work, Work::Verify) => "SFV OK".into(),
+            Ok(_) if matches!(work, Work::Verify) => "Checksum OK".into(),
+            Ok(_) if matches!(work, Work::Test) => "Archive OK".into(),
             Ok(_) => "Done".into(),
             Err(err) => err,
         };
@@ -367,11 +371,13 @@ impl App {
             match pending.phase {
                 Phase::List => Phase::List,
                 Phase::Extract => Phase::Extract,
+                Phase::Test => Phase::Test,
             }
         };
         match phase {
             Phase::List => self.spawn_archive_list(sender),
             Phase::Extract => self.spawn_extract(sender),
+            Phase::Test => self.spawn_test(sender),
         }
     }
 
@@ -490,6 +496,17 @@ impl App {
         options.append(&format);
         options.append(&gtk::Label::new(Some("Compression")));
         options.append(&level);
+        let volume = gtk::Entry::new();
+        volume.set_placeholder_text(Some("Volume MB, empty = one file"));
+        volume.set_sensitive(start != 0);
+        let volume_format = volume.clone();
+        format.connect_selected_notify(move |drop| {
+            let zip = drop.selected() == 0;
+            volume_format.set_sensitive(!zip);
+            if zip {
+                volume_format.set_text("");
+            }
+        });
         let password = gtk::PasswordEntry::new();
         password.set_show_peek_icon(true);
         password.set_property("placeholder-text", "Password (empty = no encryption)");
@@ -519,13 +536,28 @@ impl App {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         row.set_margin_top(6);
         let ok = gtk::Button::with_label("Pack");
-        let (entry_ok, level_ok, password_ok, repeat_ok, error_ok, tx_ok) =
-            (entry.clone(), level.clone(), password.clone(), repeat.clone(), error.clone(), tx.clone());
+        let (entry_ok, level_ok, password_ok, repeat_ok, volume_ok, error_ok, tx_ok) =
+            (entry.clone(), level.clone(), password.clone(), repeat.clone(), volume.clone(), error.clone(), tx.clone());
         crate::ui::shell::on_click(&ok, move || {
             let dest = entry_ok.text().trim().to_string();
             let secret = password_ok.text().to_string();
+            let volume_text = volume_ok.text().trim().to_string();
+            let volume = if volume_text.is_empty() {
+                None
+            } else {
+                match volume_text.parse::<u64>() {
+                    Ok(mb) if mb > 0 => Some(mb.saturating_mul(1024 * 1024)),
+                    _ => {
+                        error_ok.set_text("Volume size is a number of MB");
+                        error_ok.set_visible(true);
+                        return;
+                    }
+                }
+            };
             let problem = if pack::format_of(Path::new(&dest)).is_none() {
                 Some("Use a .zip, .7z or .rar name")
+            } else if volume.is_some() && pack::format_of(Path::new(&dest)) == Some(Format::Zip) {
+                Some("Zip is one file. Volume size needs 7z or rar.")
             } else if secret != repeat_ok.text().as_str() {
                 Some("Passwords do not match")
             } else {
@@ -537,7 +569,7 @@ impl App {
                 return;
             }
             let level = pack::LEVELS.get(level_ok.selected() as usize).map(|(_, n)| *n).unwrap_or(5);
-            tx_ok.emit(Msg::PackPick(dest, Options { level, password: (!secret.is_empty()).then_some(secret) }));
+            tx_ok.emit(Msg::PackPick(dest, Options { level, password: (!secret.is_empty()).then_some(secret), volume }));
         });
         let ok_entry = ok.clone();
         entry.connect_activate(move |_| ok_entry.emit_clicked());
@@ -554,6 +586,7 @@ impl App {
         column.append(&heading("Target location"));
         column.append(&entry);
         column.append(&options);
+        column.append(&volume);
         column.append(&heading("Encryption"));
         column.append(&password);
         column.append(&repeat);
@@ -671,42 +704,145 @@ impl App {
     }
 
     pub(in crate::ui::app) fn start_verify(&mut self, sender: &ComponentSender<Self>) {
-        let path = match self.sfv_to_check() {
-            Ok(path) => path,
-            Err(status) => {
-                self.status = status.into();
-                return;
+        let path = if let Some(path) = self.file_under_cursor().filter(|path| is_check_file(path)) {
+            path
+        } else {
+            match self.sfv_to_check() {
+                Ok(path) => path,
+                Err(status) => {
+                    self.status = status.into();
+                    return;
+                }
             }
         };
+        let summed = rust_commander::sum::kind_of(&path).is_some();
         let Some(pipes) = self.open_job(Work::Verify) else { return };
-        self.status = "Checking SFV".into();
-        rust_commander::log::info(&format!("sfv {}", path.display()));
+        self.status = "Checking checksum".into();
+        rust_commander::log::info(&format!("checksum {}", path.display()));
         self.ensure_progress();
         let _ = sender;
         std::thread::spawn(move || {
-            let result = rust_commander::sfv::verify(&path, &pipes.cancel, &mut |progress| {
+            let result = if summed {
+                rust_commander::sum::verify(&path, &pipes.cancel, &mut |progress| {
+                    let _ = pipes.progress_tx.send(progress.clone());
+                })
+            } else {
+                rust_commander::sfv::verify(&path, &pipes.cancel, &mut |progress| {
+                    let _ = pipes.progress_tx.send(progress.clone());
+                })
+            };
+            let _ = pipes.done_tx.send(result.map_err(|err| err.to_string()));
+        });
+    }
+
+    pub(in crate::ui::app) fn spawn_sum(&mut self, dest: PathBuf, kind: rust_commander::sum::Kind, sender: &ComponentSender<Self>) {
+        let root = self.state.tab(self.state.active).path.clone();
+        let sources = self.state.selected_paths(self.state.active);
+        let Some(pipes) = self.open_job(Work::Sum) else { return };
+        let _ = sender;
+        spawn_worker(move || {
+            let result = rust_commander::sum::create(kind, &root, &sources, &dest, &pipes.cancel, &mut |progress| {
                 let _ = pipes.progress_tx.send(progress.clone());
             });
             let _ = pipes.done_tx.send(result.map_err(|err| err.to_string()));
         });
     }
 
-    fn sfv_to_check(&self) -> Result<PathBuf, &'static str> {
-        if let Some(path) = self.file_under_cursor().filter(|path| rust_commander::sfv::is_sfv(path)) {
-            return Ok(path);
+    pub(in crate::ui::app) fn spawn_shred(&mut self, paths: Vec<PathBuf>, sender: &ComponentSender<Self>) {
+        if paths.is_empty() {
+            return;
         }
+        let Some(pipes) = self.open_job(Work::Shred) else { return };
+        self.status = "Overwriting...".into();
+        self.ensure_progress();
+        let _ = sender;
+        spawn_worker(move || {
+            let total = paths.len() as u64;
+            for (done, path) in paths.iter().enumerate() {
+                if pipes.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = pipes.done_tx.send(Ok(rust_commander::ops::Report { cancelled: true, files: done as u64 }));
+                    return;
+                }
+                let _ = pipes.progress_tx.send(rust_commander::ops::Progress {
+                    done: done as u64,
+                    total,
+                    current: path.clone(),
+                    note: String::new(),
+                });
+                if let Err(err) = rust_commander::ops::shred(path, &pipes.cancel) {
+                    let _ = pipes.done_tx.send(Err(format!("{}: {err}", path.display())));
+                    return;
+                }
+            }
+            let _ = pipes.done_tx.send(Ok(rust_commander::ops::Report { cancelled: false, files: total }));
+        });
+    }
+
+    pub(in crate::ui::app) fn spawn_test(&mut self, sender: &ComponentSender<Self>) {
+        let Some(pending) = self.pending.clone() else { return };
+        let seven = rust_commander::pack::find_program(&self.cfg.seven_zip, rust_commander::pack::names(rust_commander::pack::Format::SevenZ));
+        let Some(pipes) = self.open_job(Work::Test) else {
+            self.pending = None;
+            return;
+        };
+        self.status = "Testing archive".into();
+        self.ensure_progress();
+        let _ = sender;
+        spawn_worker(move || {
+            let result = rust_commander::archive::test(
+                &pending.archive,
+                pending.password.as_deref(),
+                seven.as_deref(),
+                &pipes.cancel,
+                &mut |progress| {
+                    let _ = pipes.progress_tx.send(progress.clone());
+                },
+            );
+            let _ = pipes.done_tx.send(result.map_err(|err| err.to_string()));
+        });
+    }
+
+    pub(in crate::ui::app) fn spawn_encode(
+        &mut self,
+        codec: rust_commander::encode::Codec,
+        source: PathBuf,
+        dest: PathBuf,
+        sender: &ComponentSender<Self>,
+    ) {
+        let Some(pipes) = self.open_job(Work::Encode) else { return };
+        let _ = sender;
+        spawn_worker(move || {
+            let result = rust_commander::encode::encode(codec, &source, &dest, &pipes.cancel, &mut |progress| {
+                let _ = pipes.progress_tx.send(progress.clone());
+            });
+            let _ = pipes.done_tx.send(result.map_err(|err| err.to_string()));
+        });
+    }
+
+    pub(in crate::ui::app) fn spawn_decode(&mut self, source: PathBuf, dest_dir: PathBuf, sender: &ComponentSender<Self>) {
+        let Some(pipes) = self.open_job(Work::Encode) else { return };
+        let _ = sender;
+        spawn_worker(move || {
+            let result = rust_commander::encode::decode(&source, &dest_dir, &pipes.cancel, &mut |progress| {
+                let _ = pipes.progress_tx.send(progress.clone());
+            });
+            let _ = pipes.done_tx.send(result.map(|(report, _)| report).map_err(|err| err.to_string()));
+        });
+    }
+
+    fn sfv_to_check(&self) -> Result<PathBuf, &'static str> {
         let tab = self.state.tab(self.state.active);
         let mut found = None;
         for entry in &tab.entries {
-            if entry.is_dir() || !rust_commander::sfv::is_sfv(Path::new(entry.name.as_ref())) {
+            if entry.is_dir() || !is_check_file(Path::new(entry.name.as_ref())) {
                 continue;
             }
             if found.is_some() {
-                return Err("Select an SFV file");
+                return Err("Select a checksum file");
             }
             found = Some(rust_commander::listing::entry_path(&tab.path, entry));
         }
-        found.ok_or("No SFV file")
+        found.ok_or("No checksum file")
     }
 
     fn settle_sfv(
@@ -717,7 +853,7 @@ impl App {
         log: Option<&(gtk::Label, gtk::TextView)>,
         result: &Result<Report, String>,
     ) {
-        win.set_title(Some("SFV"));
+        win.set_title(Some("Checksum"));
         label.set_ellipsize(gtk::pango::EllipsizeMode::None);
         label.set_lines(-1);
         let cancelled = match result {
@@ -765,6 +901,7 @@ impl App {
         match self.queued.take() {
             Some(Queued::Pack(dest, opts)) => self.spawn_pack(dest, opts, sender),
             Some(Queued::Sfv(dest)) => self.spawn_sfv_create(dest, sender),
+            Some(Queued::Sum(dest, kind)) => self.spawn_sum(dest, kind, sender),
             None => {}
         }
     }
@@ -913,6 +1050,42 @@ impl App {
         self.dialog = Some(win);
     }
 
+    pub(in crate::ui::app) fn ask_confirm_detail(&mut self, title: &str, detail: &str, tx: relm4::Sender<Msg>) {
+        self.close_dialog();
+        let win = gtk::Window::new();
+        win.set_title(Some("Secure delete"));
+        win.set_modal(true);
+        win.set_transient_for(Some(&self.shell.window));
+        win.set_default_width(480);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let ok = gtk::Button::with_label("Delete");
+        let tx_ok = tx.clone();
+        crate::ui::shell::on_click(&ok, move || tx_ok.emit(Msg::Submit(String::new())));
+        let cancel = gtk::Button::with_label("Cancel");
+        let tx_esc = tx.clone();
+        crate::ui::shell::on_escape(&win, move || tx_esc.emit(Msg::CancelAsk));
+        crate::ui::shell::on_click(&cancel, move || tx.emit(Msg::CancelAsk));
+        row.append(&ok);
+        row.append(&cancel);
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        column.set_margin_all(12);
+        let heading = gtk::Label::new(Some(title));
+        heading.set_xalign(0.0);
+        heading.set_wrap(true);
+        heading.set_max_width_chars(60);
+        heading.add_css_class("dialog-title");
+        let body = gtk::Label::new(Some(detail));
+        body.set_xalign(0.0);
+        body.set_wrap(true);
+        body.set_max_width_chars(60);
+        column.append(&heading);
+        column.append(&body);
+        column.append(&row);
+        win.set_child(Some(&column));
+        win.present();
+        self.dialog = Some(win);
+    }
+
     pub(in crate::ui::app) fn ask_conflict(&mut self, src: &Path, dst: &Path, tx: relm4::Sender<Msg>) {
         self.close_dialog();
         let win = conflict_window(src, dst, &self.shell.window, move |choice| tx.emit(Msg::Conflict(choice)));
@@ -994,6 +1167,10 @@ impl App {
             win.close();
         }
     }
+}
+
+pub(in crate::ui::app) fn is_check_file(path: &Path) -> bool {
+    rust_commander::sfv::is_sfv(path) || rust_commander::sum::kind_of(path).is_some()
 }
 
 fn split_check(note: &str) -> (String, Option<(u64, String)>) {

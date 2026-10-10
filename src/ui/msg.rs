@@ -110,4 +110,9 @@ pub enum Msg {
     ShellExited(u64),
     SelectShell(u64),
     Smoke,
+    DirChanged(usize, std::path::PathBuf),
+    SearchFeed,
+    MakeLink { symbolic: bool, target: String, link: String },
+    SumKind(u8),
+    EncodePick { decode: bool, codec: u8 },
 }

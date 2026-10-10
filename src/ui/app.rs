@@ -32,7 +32,9 @@ mod queue;
 mod search;
 mod settings;
 mod term;
+mod tools;
 mod view;
+mod watch;
 
 // Targets are taken when the dialog opens, so a cursor move or a click behind it changes nothing.
 enum Ask {
@@ -46,6 +48,7 @@ enum Ask {
     Permanent(Vec<PathBuf>),
     Password,
     Overwrite,
+    Shred(Vec<PathBuf>),
 }
 
 struct QuickEdit {
@@ -64,13 +67,20 @@ enum Work {
     Pack,
     Sfv,
     Verify,
+    Sum,
+    Shred,
+    Test,
+    Encode,
 }
 
+#[derive(Clone, Copy)]
 enum Phase {
     List,
     Extract,
+    Test,
 }
 
+#[derive(Clone)]
 struct PendingUnpack {
     archive: PathBuf,
     dest: PathBuf,
@@ -84,6 +94,7 @@ struct PendingUnpack {
 enum Queued {
     Pack(PathBuf, rust_commander::pack::Options),
     Sfv(PathBuf),
+    Sum(PathBuf, rust_commander::sum::Kind),
 }
 
 struct JobOut {
@@ -202,6 +213,7 @@ pub struct App {
     preview_live: Arc<AtomicU64>,
     copy_gen: u64,
     loads: Vec<(u64, Arc<AtomicBool>)>,
+    watches: [Option<watch::DirWatch>; 2],
     search: Option<search::SearchUi>,
     search_gen: u64,
     search_target: Option<(PaneId, usize, u64, String)>,
@@ -358,6 +370,7 @@ impl SimpleComponent for App {
             preview_live: Arc::new(AtomicU64::new(0)),
             copy_gen: 0,
             loads: Vec::new(),
+            watches: [None, None],
             search: None,
             search_gen: 0,
             search_target: None,
@@ -406,6 +419,7 @@ impl SimpleComponent for App {
     fn update(&mut self, msg: Msg, sender: ComponentSender<Self>) {
         let idle_poll = matches!(msg, Msg::Poll);
         self.on_msg(msg, &sender);
+        self.arm_watches(&sender);
         self.kick_preview(&sender);
         if !(idle_poll && self.job.is_none() && !self.dirty.iter().any(|pane| *pane)) {
             self.sync();
@@ -632,6 +646,11 @@ impl App {
                 super::drives::release(&path, eject, move |result| tx.emit(Msg::DriveStatus(released(&name, result))));
             }
             Msg::Smoke => self.run_smoke(sender),
+            Msg::DirChanged(pane, path) => self.reload_watched(pane, &path, sender),
+            Msg::SearchFeed => self.show_search_feed(sender),
+            Msg::MakeLink { symbolic, target, link } => self.make_link(symbolic, target, link, sender),
+            Msg::SumKind(kind) => self.begin_checksum(kind, sender),
+            Msg::EncodePick { decode, codec } => self.begin_encode(decode, codec, sender),
         }
     }
 
@@ -728,10 +747,13 @@ impl App {
                 Key::F1 if shift => self.toggle_thumbs(),
                 Key::F3 => self.set_sort(rust_commander::listing::SortKey::Name),
                 Key::F4 => self.set_sort(rust_commander::listing::SortKey::Ext),
+                Key::F2 if shift => self.start_test(sender),
                 Key::F5 if shift => self.start_pack(true, sender),
                 Key::F5 => self.set_sort(rust_commander::listing::SortKey::Time),
                 Key::F6 => self.set_sort(rust_commander::listing::SortKey::Size),
+                Key::F7 if shift => self.ask_encode(sender),
                 Key::F7 => self.set_sort(rust_commander::listing::SortKey::Attr),
+                Key::Delete | Key::KP_Delete if !shift => self.ask_shred(sender),
                 Key::F9 if shift => self.start_verify(sender),
                 Key::F9 => self.new_shell(sender),
                 Key::s | Key::S => {
@@ -804,9 +826,10 @@ impl App {
             Key::F4 => self.on_fkey(4, shift, sender),
             Key::F5 => self.on_fkey(5, shift, sender),
             Key::F6 => self.on_fkey(6, shift, sender),
-            Key::F7 => self.on_fkey(7, shift, sender),
+            Key::F7 if shift => self.ask_link(sender),
+            Key::F7 => self.on_fkey(7, false, sender),
             Key::F8 | Key::Delete => self.on_fkey(8, shift, sender),
-            Key::F9 if shift => self.start_sfv(sender),
+            Key::F9 if shift => self.ask_checksum(sender),
             Key::F9 => self.toggle_panel_terminal(sender),
             Key::ISO_Left_Tab | Key::Tab if self.shell.editing.get() || self.state.quick_view => {}
             Key::ISO_Left_Tab | Key::Tab if self.state.panel_terminal => self.focus_across_shell(),
@@ -982,6 +1005,7 @@ impl App {
             }
             Some(Ask::Trash(paths)) => self.spawn_delete(paths, false, sender),
             Some(Ask::Permanent(paths)) => self.spawn_delete(paths, true, sender),
+            Some(Ask::Shred(paths)) => self.spawn_shred(paths, sender),
             Some(Ask::Password) => self.retry_password(text, sender),
             Some(Ask::Overwrite) => self.confirm_overwrite(sender),
             None => {}
@@ -996,6 +1020,7 @@ impl App {
         match result {
             Ok(entries) => {
                 if self.state.apply_listing(id, tab, token, entries) {
+                    self.drop_filter_box(id);
                     self.touch(id);
                     if let Some((target_id, target_tab, target_token, name)) = self.search_target.take() {
                         if (id, tab, token) == (target_id, target_tab, target_token) {
@@ -1074,7 +1099,11 @@ impl App {
     }
 
     fn activate_cursor(&mut self, sender: &ComponentSender<Self>) {
-        if self.file_under_cursor().is_some_and(|path| rust_commander::sfv::is_sfv(&path)) {
+        if self.state.tab(self.state.active).feed {
+            self.open_feed_hit(sender);
+            return;
+        }
+        if self.file_under_cursor().is_some_and(|path| jobs::is_check_file(&path)) {
             self.start_verify(sender);
             return;
         }
@@ -1604,7 +1633,7 @@ impl App {
         }
         self.close_dialog();
         let packed = right.join("smoke.zip");
-        self.confirm_pack(packed.clone(), rust_commander::pack::Options { level: 9, password: Some("smoke".into()) }, sender);
+        self.confirm_pack(packed.clone(), rust_commander::pack::Options { level: 9, password: Some("smoke".into()), volume: None }, sender);
         if !self.wait_job(sender) || !rust_commander::archive::list(&packed, None).is_ok_and(|listed| listed.needs_password) {
             errors.push("pack failed".into());
         }
@@ -1878,6 +1907,24 @@ impl App {
             self.focus_list();
         }
         self.touch(id);
+    }
+
+    // State drops the filter when the folder changes. The box has to follow.
+    fn drop_filter_box(&mut self, id: PaneId) {
+        if !self.state.pane(id).filter.is_empty() {
+            return;
+        }
+        let entry = &self.shell.panes[id.index()].filter;
+        if entry.text().is_empty() && !gtk::prelude::WidgetExt::is_visible(entry) {
+            return;
+        }
+        let focused = entry.has_focus();
+        if !entry.text().is_empty() {
+            entry.set_text("");
+        }
+        if !focused {
+            entry.set_visible(false);
+        }
     }
 
     // Ctrl+S opens the filter. A second press closes it only while it is empty.

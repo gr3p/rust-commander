@@ -379,6 +379,70 @@ pub fn format_stamp(secs: i64) -> String {
     )
 }
 
+/// Reads the form `format_stamp` writes. The zone is `UT+HHMM` or `UT-HHMM`.
+pub fn parse_stamp(text: &str) -> Option<i64> {
+    const MONTHS: [&str; 12] = [
+        "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November",
+        "December",
+    ];
+    let rest = text.trim().split_once(',').map(|(_, rest)| rest.trim()).unwrap_or(text.trim());
+    let mut parts = rest.split_whitespace();
+    let day: i32 = parts.next()?.parse().ok()?;
+    let month_name = parts.next()?;
+    let year: i32 = parts.next()?.parse().ok()?;
+    let clock = parts.next()?;
+    let zone = parts.next().unwrap_or("UT+0000");
+    let month = MONTHS.iter().position(|name| *name == month_name)? as i32;
+    let (hour, min, sec) = parse_hms(clock)?;
+    let offset = parse_zone(zone)?;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    tm.tm_mday = day;
+    tm.tm_mon = month;
+    tm.tm_year = year - 1900;
+    tm.tm_hour = hour;
+    tm.tm_min = min;
+    tm.tm_sec = sec;
+    let utc = unsafe { libc::timegm(&mut tm) };
+    // timegm rolls 31 February into March; a changed day means the date does not exist.
+    if utc < 0 || tm.tm_mday != day {
+        return None;
+    }
+    Some(utc - offset)
+}
+
+pub fn set_modified(path: &Path, secs: i64) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path)?;
+    let when = match secs {
+        0.. => UNIX_EPOCH + std::time::Duration::from_secs(secs as u64),
+        _ => UNIX_EPOCH - std::time::Duration::from_secs(secs.unsigned_abs()),
+    };
+    file.set_times(fs::FileTimes::new().set_modified(when))
+}
+
+fn parse_hms(text: &str) -> Option<(i32, i32, i32)> {
+    let mut parts = text.split(':');
+    let hour = parts.next()?.parse().ok()?;
+    let min = parts.next()?.parse().ok()?;
+    let sec = parts.next()?.parse().ok()?;
+    (hour < 24 && min < 60 && sec < 60).then_some((hour, min, sec))
+}
+
+fn parse_zone(text: &str) -> Option<i64> {
+    let rest = text.strip_prefix("UT")?;
+    let (sign, digits) = match (rest.strip_prefix('+'), rest.strip_prefix('-')) {
+        (Some(digits), _) => (1, digits),
+        (_, Some(digits)) => (-1, digits),
+        _ => return None,
+    };
+    if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let hours: i64 = digits[..2].parse().ok()?;
+    let mins: i64 = digits[2..].parse().ok()?;
+    (hours < 24 && mins < 60).then_some(sign * (hours * 3600 + mins * 60))
+}
+
 fn unix_secs(time: Option<SystemTime>) -> i64 {
     time.and_then(unix_opt).unwrap_or(0)
 }
@@ -407,6 +471,15 @@ mod tests {
         assert_eq!(parse_mode("07777"), None);
         assert_eq!(mode_text(0o644), "644");
         assert_eq!(mode_text(0o4755), "4755");
+    }
+
+    #[test]
+    fn stamps_parse_strictly() {
+        assert_eq!(parse_stamp("Thursday, 1 January 1970 00:00:00 UT+0000"), Some(0));
+        assert_eq!(parse_stamp("1 January 1970 01:00:00 UT+0100"), Some(0));
+        assert_eq!(parse_stamp("31 February 2024 10:00:00 UT+0000"), None);
+        assert_eq!(parse_stamp("1 January 2024 10:00:00 UT€0100"), None);
+        assert_eq!(parse_stamp("1 January 2024 10:00:00 UT+9999"), None);
     }
 
     #[test]

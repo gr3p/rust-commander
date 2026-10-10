@@ -62,11 +62,13 @@ Alt+F5 packs selected files. The extension chooses the format: `.zip` is built i
 
 Alt+F9 unpacks a zip, rar or tar into the other panel and shows the file list. Shift+Alt+F9 unpacks the whole archive in the panel where the archive is. When the cursor is on a zip, rar or tar archive, the upper button row at the bottom shows `Alt+F9 Unpack to right panel` (or left, depending on the active panel) and `Shift+Alt+F9 Extract here`. The F keys are on the row below. The progress window shows which rar volume is being read (`From:`), the target folder (`To:`), and which file is being unpacked. Broken files are skipped and listed when unpacking finishes. If a volume is missing, it says which one. Enter on a `.sfv` checks CRC32. Shift+F9 creates a `.sfv` for the selection.
 
+Alt+Enter on a folder can calculate its size. Shift+F7 creates a symbolic or hard link in the other panel. Ctrl+Delete overwrites a file once and then deletes it. Shift+F9 asks for CRC32, MD5, SHA1 or SHA256. Enter on `.sfv`, `.md5`, `.sha1` or `.sha256` checks it. Ctrl+Shift+F2 tests a zip, rar, tar or 7z without unpacking. Ctrl+Shift+F7 encodes or decodes Base64, UUE or MIME into the other panel. Search can look inside file text, limit by size and date, find duplicates, look inside archives, and show the hits in the panel.
+
 Ctrl+1 to Ctrl+9 selects a drive in the active panel. The number is shown before the icon. Hovering a drive shows its free space. Ctrl+I, or a right click on a drive, opens a disk info window with usage, file system, device, label, UUID, mount options and inodes. F9 opens a shell in the other panel in the active panel's directory. The bottom button reads F9 Shell, and F9 Shell Toggle while that shell is showing. F9 hides it and leaves it running. Ctrl+F9 opens another shell. Each shell is a numbered button to the right of the drives; Alt+1 to Alt+9 switches to it. Ctrl+W in the shell closes that shell and returns to the file list. `exit` does the same. Ctrl+W in the file list still closes a tab. Ctrl+F3 name, Ctrl+F4 extension, Ctrl+F5 time, Ctrl+F6 size. Alt+F1 and Alt+F2 are places. Alt+F3 is the external viewer. Ctrl+Q previews. There, left and right change the image in that folder. Ctrl+T new tab, Ctrl+W close tab, Alt+left and Alt+right are history.
 
 ## Not included
 
-Windows builds, network neighborhood, parallel port, USB cable, UAC, Windows context menu, WLX/WCX/WDX/WFX, and IrfanView/XnView. Search looks at file names, not file contents. An archive is unpacked. It is not opened as a folder.
+Windows builds, network neighborhood, parallel port, USB cable, UAC, Windows context menu, WLX/WCX/WDX/WFX, and IrfanView/XnView. An archive is unpacked. It is not opened as a folder.
 
 ## Themes
 

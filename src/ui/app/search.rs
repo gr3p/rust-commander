@@ -24,6 +24,14 @@ pub(super) struct SearchUi {
     hidden: gtk::CheckButton,
     files_only: gtk::CheckButton,
     case_sensitive: gtk::CheckButton,
+    text: gtk::Entry,
+    min_size: gtk::Entry,
+    max_size: gtk::Entry,
+    min_date: gtk::Entry,
+    max_date: gtk::Entry,
+    duplicates: gtk::CheckButton,
+    in_archives: gtk::CheckButton,
+    feed: gtk::Button,
     model: gtk::StringList,
     status: gtk::Label,
     start: gtk::Button,
@@ -75,6 +83,25 @@ impl App {
         });
         root_row.append(&choose);
         content.append(&labeled_row("Search for", &query));
+        let text = gtk::Entry::new();
+        text.set_placeholder_text(Some("Text inside the file, optional"));
+        content.append(&labeled_row("Containing", &text));
+        let min_size = gtk::Entry::new();
+        min_size.set_placeholder_text(Some("Bytes, optional"));
+        let max_size = gtk::Entry::new();
+        max_size.set_placeholder_text(Some("Bytes, optional"));
+        let sizes = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        sizes.append(&labeled_row("Min size", &min_size));
+        sizes.append(&labeled_row("Max size", &max_size));
+        content.append(&sizes);
+        let min_date = gtk::Entry::new();
+        min_date.set_placeholder_text(Some("YYYY-MM-DD"));
+        let max_date = gtk::Entry::new();
+        max_date.set_placeholder_text(Some("YYYY-MM-DD"));
+        let dates = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        dates.append(&labeled_row("From", &min_date));
+        dates.append(&labeled_row("To", &max_date));
+        content.append(&dates);
         content.append(&root_row);
 
         let options = gtk::Box::new(gtk::Orientation::Horizontal, 16);
@@ -84,7 +111,10 @@ impl App {
         hidden.set_active(self.state.show_hidden);
         let files_only = gtk::CheckButton::with_label("Files only");
         let case_sensitive = gtk::CheckButton::with_label("Case sensitive");
-        for check in [&recursive, &hidden, &files_only, &case_sensitive] {
+        let duplicates = gtk::CheckButton::with_label("Duplicates");
+        let in_archives = gtk::CheckButton::with_label("Inside archives");
+        in_archives.set_active(true);
+        for check in [&recursive, &hidden, &files_only, &case_sensitive, &duplicates, &in_archives] {
             options.append(check);
         }
         content.append(&options);
@@ -189,6 +219,11 @@ impl App {
         let close = gtk::Button::with_label("Close");
         let tx = sender.input_sender().clone();
         crate::ui::shell::on_click(&close, move || tx.emit(Msg::CloseSearch));
+        let feed = gtk::Button::with_label("Show in panel");
+        feed.set_sensitive(false);
+        let tx = sender.input_sender().clone();
+        crate::ui::shell::on_click(&feed, move || tx.emit(Msg::SearchFeed));
+        footer.append(&feed);
         footer.append(&go);
         footer.append(&close);
         content.append(&footer);
@@ -218,16 +253,47 @@ impl App {
         query.grab_focus();
         self.search = Some(SearchUi {
             window, source: self.state.active, query, root, recursive, hidden, files_only,
-            case_sensitive, model, status, start, cancel, go, results: Vec::new(), stop: None,
+            case_sensitive, text, min_size, max_size, min_date, max_date, duplicates, in_archives, feed,
+            model, status, start, cancel, go, results: Vec::new(), stop: None,
         });
     }
 
     pub(super) fn start_search(&mut self, sender: &ComponentSender<Self>) {
         let Some(ui) = self.search.as_mut() else { return };
         let query = ui.query.text().trim().to_string();
+        let text = ui.text.text().trim().to_string();
         let root = PathBuf::from(ui.root.text().trim());
-        if query.is_empty() {
-            ui.status.set_text("Enter a name to search for");
+        let min_size = match parse_u64(&ui.min_size.text()) {
+            Ok(value) => value,
+            Err(()) => {
+                ui.status.set_text("Min size is a number of bytes");
+                return;
+            }
+        };
+        let max_size = match parse_u64(&ui.max_size.text()) {
+            Ok(value) => value,
+            Err(()) => {
+                ui.status.set_text("Max size is a number of bytes");
+                return;
+            }
+        };
+        let min_mtime = match parse_day(&ui.min_date.text(), false) {
+            Ok(value) => value,
+            Err(()) => {
+                ui.status.set_text("From is YYYY-MM-DD");
+                return;
+            }
+        };
+        let max_mtime = match parse_day(&ui.max_date.text(), true) {
+            Ok(value) => value,
+            Err(()) => {
+                ui.status.set_text("To is YYYY-MM-DD");
+                return;
+            }
+        };
+        let duplicates = ui.duplicates.is_active();
+        if query.is_empty() && text.is_empty() && !duplicates && min_size.is_none() && max_size.is_none() && min_mtime.is_none() && max_mtime.is_none() {
+            ui.status.set_text("Enter a name, text, size, date, or duplicates");
             return;
         }
         if !root.is_absolute() || !root.is_dir() {
@@ -240,12 +306,15 @@ impl App {
         ui.model.splice(0, ui.model.n_items(), &[]);
         ui.results.clear();
         ui.go.set_sensitive(false);
+        ui.feed.set_sensitive(false);
         ui.status.set_text("Searching...");
         ui.start.set_sensitive(false);
         ui.cancel.set_sensitive(true);
         let options = Options {
             root, query, recursive: ui.recursive.is_active(), hidden: ui.hidden.is_active(),
             files_only: ui.files_only.is_active(), case_sensitive: ui.case_sensitive.is_active(),
+            text, min_size, max_size, min_mtime, max_mtime, duplicates,
+            in_archives: ui.in_archives.is_active(),
         };
         self.search_gen = self.search_gen.wrapping_add(1);
         let generation = self.search_gen;
@@ -287,6 +356,7 @@ impl App {
                 ui.model.splice(ui.model.n_items(), 0, &texts);
                 ui.results.extend(paths);
                 ui.go.set_sensitive(!ui.results.is_empty());
+                ui.feed.set_sensitive(!ui.results.is_empty());
                 ui.status.set_text(&format!("Searching... {} results", ui.results.len()));
             }
             Event::Finished { errors, cancelled } => {
@@ -334,6 +404,24 @@ impl App {
     }
 
     // Hides the window and keeps query, options and results for the next time. A running search is stopped.
+    pub(super) fn feed_search(&mut self, sender: &ComponentSender<Self>) {
+        let Some(ui) = &self.search else { return };
+        if ui.results.is_empty() {
+            self.status = "No results".into();
+            return;
+        }
+        let paths = ui.results.clone();
+        let source = ui.source;
+        self.close_search();
+        self.state.show_hits(source, &paths);
+        self.state.active = source;
+        self.shell.active.set(source.index());
+        self.touch(source);
+        self.focus_list();
+        self.status = format!("{} results in the panel", paths.len());
+        let _ = sender;
+    }
+
     pub(super) fn close_search(&mut self) {
         self.cancel_search();
         if let Some(ui) = &self.search {
@@ -361,6 +449,40 @@ fn pick_result(selection: &gtk::SingleSelection, shown: &Shown, position: u32, t
         Some(row) => crate::ui::shell::blink_then(&row, go),
         None => go(),
     }
+}
+
+fn parse_u64(text: &gtk::glib::GString) -> Result<Option<u64>, ()> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    text.parse().map(Some).map_err(|_| ())
+}
+
+fn parse_day(text: &gtk::glib::GString, end: bool) -> Result<Option<i64>, ()> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let mut parts = text.split('-');
+    let year: i32 = parts.next().and_then(|part| part.parse().ok()).ok_or(())?;
+    let month: i32 = parts.next().and_then(|part| part.parse().ok()).ok_or(())?;
+    let day: i32 = parts.next().and_then(|part| part.parse().ok()).ok_or(())?;
+    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return Err(());
+    }
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    tm.tm_year = year - 1900;
+    tm.tm_mon = month - 1;
+    tm.tm_mday = day;
+    tm.tm_isdst = -1;
+    if end {
+        tm.tm_hour = 23;
+        tm.tm_min = 59;
+        tm.tm_sec = 59;
+    }
+    let secs = unsafe { libc::mktime(&mut tm) };
+    if secs < 0 { Err(()) } else { Ok(Some(secs)) }
 }
 
 fn labeled_row(label: &str, field: &gtk::Entry) -> gtk::Box {

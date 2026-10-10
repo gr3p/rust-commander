@@ -101,9 +101,14 @@ pub fn verify(sfv: &Path, cancel: &AtomicBool, progress: &mut dyn FnMut(&Progres
     Err(Fail::Message(text))
 }
 
-const ISSUE_LIMIT: usize = 400;
+pub(crate) const ISSUE_LIMIT: usize = 400;
 
-fn check_note(done: u64, total: u64, name: &str, issues: &[String]) -> String {
+/// False when a symlink on the way leaves `root`.
+pub(crate) fn inside(root: &Path, path: &Path) -> bool {
+    stays_inside(root, path).is_ok()
+}
+
+pub(crate) fn check_note(done: u64, total: u64, name: &str, issues: &[String]) -> String {
     let mut text = format!("Checking {done}/{total}\n{name}\n\n{}", issues.len());
     if issues.is_empty() {
         return text;
@@ -117,7 +122,7 @@ fn check_note(done: u64, total: u64, name: &str, issues: &[String]) -> String {
     text
 }
 
-fn collect(path: &Path, root: &Path, dest: &Path, out: &mut Vec<(PathBuf, String)>) -> Result<(), Fail> {
+pub(crate) fn collect(path: &Path, root: &Path, dest: &Path, out: &mut Vec<(PathBuf, String)>) -> Result<(), Fail> {
     if path == dest {
         return Ok(());
     }
@@ -142,7 +147,7 @@ fn collect(path: &Path, root: &Path, dest: &Path, out: &mut Vec<(PathBuf, String
         }
         return Ok(());
     }
-    if is_sfv(path) {
+    if is_sfv(path) || crate::sum::kind_of(path).is_some() {
         return Ok(());
     }
     out.push((path.to_path_buf(), rel));
@@ -240,7 +245,7 @@ fn slash(path: &Path) -> String {
     out
 }
 
-fn safe_rel(name: &str) -> Option<PathBuf> {
+pub(crate) fn safe_rel(name: &str) -> Option<PathBuf> {
     if name.is_empty() || name.contains('\0') {
         return None;
     }

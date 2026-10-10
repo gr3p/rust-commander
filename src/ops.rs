@@ -656,3 +656,99 @@ pub fn delete_paths(
     }
     Ok(())
 }
+
+/// One random pass, then the file is removed. A symlink is refused so the target stays.
+pub fn shred(path: &Path, cancel: &AtomicBool) -> io::Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+    }
+    let meta = fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("refusing symlink {}", path.display())));
+    }
+    if meta.is_dir() {
+        let mut files = Vec::new();
+        let mut dirs = vec![path.to_path_buf()];
+        let mut stack = vec![path.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in fs::read_dir(&dir)? {
+                let entry = entry?;
+                let child = entry.path();
+                let meta = fs::symlink_metadata(&child)?;
+                if meta.file_type().is_symlink() {
+                    return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("refusing symlink {}", child.display())));
+                }
+                if meta.is_dir() {
+                    stack.push(child.clone());
+                    dirs.push(child);
+                } else {
+                    files.push(child);
+                }
+            }
+        }
+        for file in &files {
+            shred_file(file, cancel)?;
+        }
+        dirs.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
+        for dir in dirs {
+            fs::remove_dir(&dir)?;
+        }
+        return Ok(());
+    }
+    shred_file(path, cancel)
+}
+
+fn shred_file(path: &Path, cancel: &AtomicBool) -> io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let mut file = fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_NOFOLLOW).open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("not a regular file {}", path.display())));
+    }
+    // Overwriting a hard-linked file would destroy the other names too.
+    if meta.nlink() > 1 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{} has other hard links", path.display())));
+    }
+    let len = meta.len();
+    let mut random = File::open("/dev/urandom")?;
+    let mut buf = vec![0u8; CHUNK];
+    let mut left = len;
+    while left > 0 {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        let n = buf.len().min(left as usize);
+        random.read_exact(&mut buf[..n])?;
+        file.write_all(&buf[..n])?;
+        left -= n as u64;
+    }
+    file.sync_all()?;
+    drop(file);
+    fs::remove_file(path)
+}
+
+#[cfg(test)]
+mod shred_tests {
+    use super::*;
+
+    #[test]
+    fn shred_removes_files_but_refuses_hard_links_and_symlinks() {
+        let dir = std::env::temp_dir().join(format!("rc-shred-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("tree/sub")).unwrap();
+        fs::write(dir.join("tree/sub/a.txt"), b"secret").unwrap();
+        let cancel = AtomicBool::new(false);
+        shred(&dir.join("tree"), &cancel).unwrap();
+        assert!(!dir.join("tree").exists());
+
+        fs::write(dir.join("keep.txt"), b"keep").unwrap();
+        fs::hard_link(dir.join("keep.txt"), dir.join("twin.txt")).unwrap();
+        assert!(shred(&dir.join("keep.txt"), &cancel).is_err());
+        assert_eq!(fs::read(dir.join("twin.txt")).unwrap(), b"keep");
+
+        std::os::unix::fs::symlink(dir.join("twin.txt"), dir.join("link")).unwrap();
+        assert!(shred(&dir.join("link"), &cancel).is_err());
+        assert_eq!(fs::read(dir.join("twin.txt")).unwrap(), b"keep");
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

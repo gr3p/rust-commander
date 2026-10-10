@@ -7,8 +7,11 @@ use std::os::raw::c_int;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use crate::ops::{Choice, Progress, Report};
 
@@ -95,6 +98,10 @@ pub fn is_archive(path: &Path) -> bool {
         Some("zip" | "rar" | "tar" | "tgz") => true,
         _ => false,
     }
+}
+
+pub fn is_testable(path: &Path) -> bool {
+    is_archive(path) || path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("7z"))
 }
 
 pub fn list(path: &Path, password: Option<&str>) -> Result<Listed, Fail> {
@@ -1052,6 +1059,481 @@ fn write_reader(
     result
 }
 
+const MEMBER_CAP: u64 = 8 * 1024 * 1024;
+
+pub fn test(
+    path: &Path,
+    password: Option<&str>,
+    seven_zip: Option<&Path>,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(&Progress),
+) -> Result<Report, Fail> {
+    match extension(path) {
+        Some("zip") => test_zip(path, password, cancel, progress),
+        Some("rar") => test_rar(path, password, cancel, progress),
+        Some("tar" | "tgz") => test_tar(path, cancel, progress),
+        _ if is_testable(path) => {
+            let Some(bin) = seven_zip else {
+                return Err(Fail::Message(crate::pack::SEVEN_ZIP_HINT.into()));
+            };
+            test_7z(path, bin, password, cancel, progress)
+        }
+        _ => Err(Fail::Message("Not an archive".into())),
+    }
+}
+
+pub fn archive_hit(
+    path: &Path,
+    name_needle: &str,
+    text_needle: &str,
+    case_sensitive: bool,
+    cancel: &dyn Fn() -> bool,
+) -> Result<bool, Fail> {
+    if name_needle.is_empty() && text_needle.is_empty() {
+        return Ok(false);
+    }
+    match extension(path) {
+        Some("zip") => hit_zip(path, name_needle, text_needle, case_sensitive, cancel),
+        Some("rar") => hit_rar(path, name_needle, text_needle, case_sensitive, cancel),
+        Some("tar" | "tgz") => hit_tar(path, name_needle, text_needle, case_sensitive, cancel),
+        _ => Ok(false),
+    }
+}
+
+fn test_zip(path: &Path, password: Option<&str>, cancel: &AtomicBool, progress: &mut dyn FnMut(&Progress)) -> Result<Report, Fail> {
+    let mut archive = zip::ZipArchive::new(File::open(path)?)?;
+    let total = archive.len() as u64;
+    let mut files = 0u64;
+    let mut damaged = Vec::new();
+    for index in 0..archive.len() {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(Report { cancelled: true, files });
+        }
+        let name = archive.by_index_raw(index).ok().and_then(|file| zip_name(&file)).unwrap_or_else(|| format!("#{index}"));
+        progress(&Progress { done: files, total, current: PathBuf::from(&name), note: String::new() });
+        match zip_at(&mut archive, index, password) {
+            Ok(mut file) => {
+                if file.is_dir() || file.is_symlink() {
+                    continue;
+                }
+                let mut buf = vec![0u8; 64 * 1024];
+                loop {
+                    match file.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(err) => {
+                            let fail = Fail::from(err);
+                            if matches!(fail, Fail::NeedPassword | Fail::BadPassword) {
+                                return Err(fail);
+                            }
+                            damaged.push(name.clone());
+                            break;
+                        }
+                    }
+                }
+                files += 1;
+            }
+            Err(err @ (Fail::NeedPassword | Fail::BadPassword)) => return Err(err),
+            Err(err) => damaged.push(format!("{name} ({err})")),
+        }
+    }
+    finish(files, damaged)
+}
+
+fn test_tar(path: &Path, cancel: &AtomicBool, progress: &mut dyn FnMut(&Progress)) -> Result<Report, Fail> {
+    let mut archive = open_tar(path)?;
+    let mut files = 0u64;
+    let mut damaged = Vec::new();
+    for entry in archive.entries()? {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(Report { cancelled: true, files });
+        }
+        let mut entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                damaged.push(err.to_string());
+                break;
+            }
+        };
+        let name = classify(&entry)?.map(|seen| match seen {
+            Seen::File { name, .. } | Seen::Dir { name } | Seen::Skip { name, .. } => name,
+        });
+        let Some(name) = name else { continue };
+        progress(&Progress { done: files, total: 0, current: PathBuf::from(&name), note: String::new() });
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            match entry.read(&mut buf) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(err) => {
+                    damaged.push(format!("{name} ({err})"));
+                    break;
+                }
+            }
+        }
+        files += 1;
+    }
+    finish(files, damaged)
+}
+
+fn test_rar(path: &Path, password: Option<&str>, cancel: &AtomicBool, progress: &mut dyn FnMut(&Progress)) -> Result<Report, Fail> {
+    let owned = rar_path(path);
+    let listed = list_rar(&owned, password)?;
+    if listed.needs_password && password.is_none() {
+        return Err(Fail::NeedPassword);
+    }
+    let handle = open_rar_extract(&owned, password)?;
+    unsafe { unrar_ng_sys::RARSetCallback(handle.0, Some(on_test_event), cancel as *const AtomicBool as unrar_ng_sys::LPARAM) };
+    let total = listed.members.iter().filter(|member| !member.dir).count() as u64;
+    let mut header = Box::new(unrar_ng_sys::HeaderDataEx::default());
+    let mut files = 0u64;
+    let mut damaged = Vec::new();
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(Report { cancelled: true, files });
+        }
+        match unsafe { unrar_ng_sys::RARReadHeaderEx(handle.0, &raw mut *header) } {
+            unrar_ng_sys::ERAR_SUCCESS => {}
+            unrar_ng_sys::ERAR_END_ARCHIVE => break,
+            code => return Err(rar_fail(code, unrar_ng::error::When::Read)),
+        }
+        let dir = header.flags & unrar_ng_sys::RHDF_DIRECTORY != 0;
+        let name = rar_header_name(&header).unwrap_or_else(|| "?".into());
+        let op = if dir || rar_symlink(header.file_attr) { unrar_ng_sys::RAR_SKIP } else { unrar_ng_sys::RAR_TEST };
+        let code = unsafe { unrar_ng_sys::RARProcessFile(handle.0, op, ptr::null(), ptr::null()) };
+        if op == unrar_ng_sys::RAR_SKIP {
+            continue;
+        }
+        if code == unrar_ng_sys::ERAR_SUCCESS {
+            files += 1;
+        } else if cancel.load(Ordering::Relaxed) {
+            return Ok(Report { cancelled: true, files });
+        } else if code == unrar_ng_sys::ERAR_BAD_DATA && header.flags & unrar_ng_sys::RHDF_ENCRYPTED != 0 && password.is_some() {
+            return Err(Fail::BadPassword);
+        } else {
+            damaged.push(name.clone());
+        }
+        progress(&Progress { done: files, total, current: PathBuf::from(&name), note: String::new() });
+    }
+    finish(files, damaged)
+}
+
+extern "C" fn on_test_event(
+    _msg: unrar_ng_sys::UINT,
+    user: unrar_ng_sys::LPARAM,
+    _p1: unrar_ng_sys::LPARAM,
+    _p2: unrar_ng_sys::LPARAM,
+) -> c_int {
+    if user == 0 {
+        return 0;
+    }
+    let cancel = unsafe { &*(user as *const AtomicBool) };
+    if cancel.load(Ordering::Relaxed) { -1 } else { 0 }
+}
+
+fn test_7z(
+    path: &Path,
+    bin: &Path,
+    password: Option<&str>,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(&Progress),
+) -> Result<Report, Fail> {
+    progress(&Progress { done: 0, total: 0, current: path.to_path_buf(), note: "Testing".into() });
+    let mut cmd = Command::new(bin);
+    cmd.arg("t").arg("-y").arg("-bso1").arg("-bsp0");
+    if password.is_some() {
+        cmd.arg("-p");
+    }
+    cmd.arg(path).stdin(if password.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|err| Fail::Message(err.to_string()))?;
+    if let (Some(password), Some(mut input)) = (password, child.stdin.take()) {
+        let _ = input.write_all(format!("{password}\n").as_bytes());
+    }
+    let (out_tx, out_rx) = mpsc::channel();
+    let (err_tx, err_rx) = mpsc::channel();
+    if let Some(pipe) = child.stdout.take() {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let mut pipe = pipe;
+            let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+            let _ = out_tx.send(buf);
+        });
+    }
+    if let Some(pipe) = child.stderr.take() {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let mut pipe = pipe;
+            let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+            let _ = err_tx.send(buf);
+        });
+    }
+    let status = loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Fail::Cancelled);
+        }
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    };
+    let err = err_rx.recv().unwrap_or_default();
+    let _ = out_rx.recv();
+    if status.success() {
+        return Ok(Report { cancelled: false, files: 1 });
+    }
+    let text = String::from_utf8_lossy(&err).to_string();
+    let lower = text.to_lowercase();
+    if lower.contains("wrong password") {
+        return Err(Fail::BadPassword);
+    }
+    if lower.contains("enter password") || lower.contains("can not open encrypted") {
+        return Err(Fail::NeedPassword);
+    }
+    let tail: String = text.chars().take(400).collect();
+    Err(Fail::Message(if tail.trim().is_empty() {
+        format!("7z test failed ({})", status.code().unwrap_or(-1))
+    } else {
+        tail
+    }))
+}
+
+fn hit_zip(path: &Path, name_needle: &str, text_needle: &str, case_sensitive: bool, cancel: &dyn Fn() -> bool) -> Result<bool, Fail> {
+    let mut archive = zip::ZipArchive::new(File::open(path)?)?;
+    for index in 0..archive.len() {
+        if cancel() {
+            return Err(Fail::Cancelled);
+        }
+        let file = archive.by_index_raw(index)?;
+        if file.encrypted() {
+            return Err(Fail::NeedPassword);
+        }
+        let name = zip_name(&file).unwrap_or_default();
+        let dir = file.is_dir();
+        let size = file.size();
+        drop(file);
+        // Name and text must hit the same member.
+        if !name_hit(&name, name_needle, case_sensitive) {
+            continue;
+        }
+        if text_needle.is_empty() {
+            return Ok(true);
+        }
+        if dir || size > MEMBER_CAP {
+            continue;
+        }
+        let mut file = archive.by_index(index)?;
+        if file.is_symlink() {
+            continue;
+        }
+        if read_has(&mut file, text_needle, !case_sensitive, cancel)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn hit_tar(path: &Path, name_needle: &str, text_needle: &str, case_sensitive: bool, cancel: &dyn Fn() -> bool) -> Result<bool, Fail> {
+    let mut archive = open_tar(path)?;
+    for entry in archive.entries()? {
+        if cancel() {
+            return Err(Fail::Cancelled);
+        }
+        let mut entry = entry?;
+        let Some(seen) = classify(&entry)? else { continue };
+        let (name, file, size) = match seen {
+            Seen::File { name, size } => (name, true, size),
+            Seen::Dir { name } => (name, false, 0),
+            Seen::Skip { name, .. } => (name, false, 0),
+        };
+        if !name_hit(&name, name_needle, case_sensitive) {
+            continue;
+        }
+        if text_needle.is_empty() {
+            return Ok(true);
+        }
+        if file && size <= MEMBER_CAP && read_has(&mut entry, text_needle, !case_sensitive, cancel)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn hit_rar(path: &Path, name_needle: &str, text_needle: &str, case_sensitive: bool, cancel: &dyn Fn() -> bool) -> Result<bool, Fail> {
+    let owned = rar_path(path);
+    let listed = list_rar(&owned, None)?;
+    if listed.needs_password {
+        return Err(Fail::NeedPassword);
+    }
+    if text_needle.is_empty() {
+        return Ok(listed.members.iter().any(|member| name_hit(&member.name, name_needle, case_sensitive)));
+    }
+    let needle = if case_sensitive { text_needle.as_bytes().to_vec() } else { text_needle.to_ascii_lowercase().into_bytes() };
+    let job = HitScan {
+        cancel,
+        needle: &needle,
+        fold: !case_sensitive,
+        found: Cell::new(false),
+        skip: Cell::new(false),
+        seen: Cell::new(0),
+        carry: RefCell::new(Vec::new()),
+    };
+    let handle = open_rar_extract(&owned, None)?;
+    unsafe { unrar_ng_sys::RARSetCallback(handle.0, Some(on_hit_event), &raw const job as unrar_ng_sys::LPARAM) };
+    let mut header = Box::new(unrar_ng_sys::HeaderDataEx::default());
+    loop {
+        if cancel() {
+            return Err(Fail::Cancelled);
+        }
+        match unsafe { unrar_ng_sys::RARReadHeaderEx(handle.0, &raw mut *header) } {
+            unrar_ng_sys::ERAR_SUCCESS => {}
+            unrar_ng_sys::ERAR_END_ARCHIVE => break,
+            code => return Err(rar_fail(code, unrar_ng::error::When::Read)),
+        }
+        let size = ((header.unp_size_high as u64) << 32) | header.unp_size as u64;
+        let dir = header.flags & unrar_ng_sys::RHDF_DIRECTORY != 0;
+        let named = name_hit(&rar_header_name(&header).unwrap_or_default(), name_needle, case_sensitive);
+        let op = if !named || dir || rar_symlink(header.file_attr) || size > MEMBER_CAP {
+            unrar_ng_sys::RAR_SKIP
+        } else {
+            job.skip.set(false);
+            job.seen.set(0);
+            job.carry.borrow_mut().clear();
+            unrar_ng_sys::RAR_TEST
+        };
+        let code = unsafe { unrar_ng_sys::RARProcessFile(handle.0, op, ptr::null(), ptr::null()) };
+        if job.found.get() {
+            return Ok(true);
+        }
+        if code != unrar_ng_sys::ERAR_SUCCESS && op == unrar_ng_sys::RAR_TEST && !cancel() {
+            return Err(rar_fail(code, unrar_ng::error::When::Process));
+        }
+    }
+    Ok(false)
+}
+
+struct HitScan<'a> {
+    cancel: &'a dyn Fn() -> bool,
+    needle: &'a [u8],
+    fold: bool,
+    found: Cell<bool>,
+    skip: Cell<bool>,
+    seen: Cell<u64>,
+    carry: RefCell<Vec<u8>>,
+}
+
+extern "C" fn on_hit_event(
+    msg: unrar_ng_sys::UINT,
+    user: unrar_ng_sys::LPARAM,
+    p1: unrar_ng_sys::LPARAM,
+    p2: unrar_ng_sys::LPARAM,
+) -> c_int {
+    if user == 0 {
+        return -1;
+    }
+    let job = unsafe { &*(user as *const HitScan<'_>) };
+    if (job.cancel)() || job.found.get() {
+        return -1;
+    }
+    if msg != unrar_ng_sys::UCM_PROCESSDATA || job.skip.get() || p1 == 0 || p2 <= 0 {
+        return 0;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(p1 as *const u8, p2 as usize) };
+    if job.seen.get() == 0 && bytes.contains(&0) {
+        job.skip.set(true);
+        return 0;
+    }
+    let seen = job.seen.get().saturating_add(bytes.len() as u64);
+    job.seen.set(seen);
+    if seen > MEMBER_CAP {
+        job.skip.set(true);
+        return 0;
+    }
+    let mut carry = job.carry.borrow_mut();
+    let mut hay = Vec::with_capacity(carry.len() + bytes.len());
+    hay.extend_from_slice(&carry);
+    hay.extend_from_slice(bytes);
+    let needle = job.needle;
+    let hit = hay.len() >= needle.len() && hay.windows(needle.len()).any(|window| {
+        if job.fold {
+            window.iter().zip(needle).all(|(a, b)| a.to_ascii_lowercase() == *b)
+        } else {
+            window == needle
+        }
+    });
+    if hit {
+        job.found.set(true);
+        return -1;
+    }
+    let keep = needle.len().saturating_sub(1).min(hay.len());
+    carry.clear();
+    carry.extend_from_slice(&hay[hay.len() - keep..]);
+    0
+}
+
+fn read_has(read: &mut dyn Read, needle: &str, fold: bool, cancel: &dyn Fn() -> bool) -> Result<bool, Fail> {
+    if needle.is_empty() {
+        return Ok(false);
+    }
+    let needle_bytes = if fold { needle.to_ascii_lowercase().into_bytes() } else { needle.as_bytes().to_vec() };
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut carry = Vec::new();
+    let mut seen = 0u64;
+    let mut first = true;
+    loop {
+        if cancel() {
+            return Err(Fail::Cancelled);
+        }
+        let n = read.read(&mut buf)?;
+        if n == 0 {
+            return Ok(false);
+        }
+        if first && buf[..n].contains(&0) {
+            return Ok(false);
+        }
+        first = false;
+        seen = seen.saturating_add(n as u64);
+        if seen > MEMBER_CAP {
+            return Ok(false);
+        }
+        let mut hay = Vec::with_capacity(carry.len() + n);
+        hay.extend_from_slice(&carry);
+        hay.extend_from_slice(&buf[..n]);
+        let hit = hay.windows(needle_bytes.len()).any(|window| {
+            if fold {
+                window.iter().zip(&needle_bytes).all(|(a, b)| a.to_ascii_lowercase() == *b)
+            } else {
+                window == needle_bytes
+            }
+        });
+        if hit {
+            return Ok(true);
+        }
+        let keep = needle_bytes.len().saturating_sub(1).min(hay.len());
+        carry.clear();
+        carry.extend_from_slice(&hay[hay.len() - keep..]);
+    }
+}
+
+fn name_hit(name: &str, needle: &str, case_sensitive: bool) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let (name, needle) = if case_sensitive {
+        (name.to_string(), needle.to_string())
+    } else {
+        (name.to_lowercase(), needle.to_lowercase())
+    };
+    let file = name.rsplit('/').next().unwrap_or(name.as_str());
+    if needle.contains('*') || needle.contains('?') {
+        let pattern: Vec<char> = needle.chars().collect();
+        crate::listing::wildcard_match(&pattern, &name) || crate::listing::wildcard_match(&pattern, file)
+    } else {
+        name.contains(&needle)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1429,5 +1911,41 @@ mod tests {
         assert!(matches!(err, Err(Fail::Message(msg)) if msg.contains("larger than the archive declares")));
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tests_zip_without_writing_and_finds_member_text() {
+        let dir = tmp("test-zip");
+        let archive = dir.join("notes.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        zip.start_file("a.txt", opts).unwrap();
+        zip.write_all(b"hello secret").unwrap();
+        zip.finish().unwrap();
+        let cancel = AtomicBool::new(false);
+        let report = test(&archive, None, None, &cancel, &mut |_| {}).unwrap();
+        assert!(!report.cancelled);
+        assert!(archive_hit(&archive, "", "secret", false, &|| false).unwrap());
+        assert!(!archive_hit(&archive, "", "missing", false, &|| false).unwrap());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archive_hit_needs_name_and_text_on_the_same_member() {
+        let dir = tmp("hit-and");
+        let archive = zip_with(&dir, &[("a.txt", "alpha"), ("b.log", "secret")], None);
+        assert!(archive_hit(&archive, "b.log", "secret", false, &|| false).unwrap());
+        assert!(!archive_hit(&archive, "a.txt", "secret", false, &|| false).unwrap());
+        assert!(archive_hit(&archive, "a.txt", "", false, &|| false).unwrap());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archive_hit_reads_rar_members() {
+        let archive = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/version.rar");
+        assert!(archive_hit(&archive, "version", "unrar-0.4", false, &|| false).unwrap());
+        assert!(!archive_hit(&archive, "nothing", "unrar-0.4", false, &|| false).unwrap());
+        assert!(!archive_hit(&archive, "version", "absent", false, &|| false).unwrap());
     }
 }

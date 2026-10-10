@@ -49,7 +49,7 @@ pub struct Shell {
     pub mode_bar: gtk::Stack,
     pub image_scale: gtk::Button,
     pub text_modes: CharsetBar,
-    pub hints: [Hint; 6],
+    pub hints: [Hint; rust_commander::commands::HINT_SLOTS],
     pub active: Rc<Cell<usize>>,
     pub drives: Vec<(PathBuf, gtk::Button)>,
     pub idle_drives: Vec<gtk::Button>,

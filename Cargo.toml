@@ -2,6 +2,7 @@
 name = "rust-commander"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [profile.release]
 opt-level = 3
@@ -14,6 +15,9 @@ harness = false
 
 [dependencies]
 crc32fast = "1.5.2"
+md-5 = "0.10"
+sha1 = "0.10"
+sha2 = "0.10"
 flate2 = "1.1.10"
 gtk4 = { version = "0.11.5", features = ["v4_10"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff", "ico"] }

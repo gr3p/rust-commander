@@ -1,7 +1,7 @@
 use crate::listing;
 
-// Higher is more likely on the context row. Several marked files outrank the
-// file type. Unpack still follows an archive under the cursor.
+// The context row is for everyday commands. Special commands stay in the F1 menu.
+// Higher is more likely. Several marked files outrank the file type.
 const HINTS: &[Act] = &[
     Act::Copy,
     Act::Move,
@@ -9,6 +9,7 @@ const HINTS: &[Act] = &[
     Act::PackHere,
     Act::Unpack,
     Act::UnpackHere,
+    Act::TestArchive,
     Act::Verify,
     Act::View,
     Act::Edit,
@@ -19,6 +20,9 @@ const HINTS: &[Act] = &[
     Act::Search,
     Act::DiskInfo,
 ];
+
+/// Buttons on the context row, including Quick view in the last slot.
+pub const HINT_SLOTS: usize = 9;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Group {
@@ -55,6 +59,9 @@ pub enum Act {
     Mkdir,
     Trash,
     Delete,
+    NewLink,
+    Shred,
+    Encode,
     CopyAs,
     Rename,
     SelectAll,
@@ -64,6 +71,7 @@ pub enum Act {
     PackHere,
     Unpack,
     UnpackHere,
+    TestArchive,
     MakeSfv,
     Verify,
     OtherPane,
@@ -119,7 +127,7 @@ pub enum Act {
 }
 
 impl Act {
-    pub const ALL: [Act; 71] = [
+    pub const ALL: [Act; 75] = [
         Act::Refresh,
         Act::View,
         Act::Edit,
@@ -130,6 +138,9 @@ impl Act {
         Act::Mkdir,
         Act::Trash,
         Act::Delete,
+        Act::NewLink,
+        Act::Shred,
+        Act::Encode,
         Act::CopyAs,
         Act::Rename,
         Act::SelectAll,
@@ -139,6 +150,7 @@ impl Act {
         Act::PackHere,
         Act::Unpack,
         Act::UnpackHere,
+        Act::TestArchive,
         Act::MakeSfv,
         Act::Verify,
         Act::OtherPane,
@@ -209,6 +221,8 @@ pub struct Cue {
     pub editing: bool,
     // The active panel stands at the root of a drive, as right after picking one.
     pub drive: bool,
+    // zip, rar, tar and 7z. Unpack stays on `archive`, which does not include 7z.
+    pub testable: bool,
 }
 
 impl Cue {
@@ -226,6 +240,7 @@ impl Cue {
             quick_view: false,
             editing: false,
             drive: false,
+            testable: false,
         }
     }
 }
@@ -261,7 +276,7 @@ pub fn rank(cue: &Cue) -> Vec<Act> {
     // F3 View, F4 Edit, F5 Copy and F6 Move already sit on the key row.
     scored.retain(|(_, _, act)| !matches!(act, Act::View | Act::Edit | Act::Copy | Act::Move));
     // Quick view takes the last slot every time, so it is always in the same place.
-    let keep = if cue.editing { 6 } else { 5 };
+    let keep = if cue.editing { HINT_SLOTS } else { HINT_SLOTS - 1 };
     let mut ranked: Vec<Act> = scored.into_iter().take(keep).map(|(_, _, act)| act).collect();
     if !cue.editing {
         ranked.push(Act::QuickView);
@@ -304,7 +319,6 @@ pub fn hint_label(act: Act, side: &str) -> String {
         Act::Copy => caption("F5", "Copy"),
         Act::Move => caption("F6", "Move"),
         Act::CopyPaths => caption("Ctrl+Shift+C", "Copy path"),
-        Act::CopyDir => caption("Alt+Shift+C", "Copy folder"),
         Act::Properties => caption("Alt+Enter", "Properties"),
         Act::Filter => caption("Ctrl+S", "Filter"),
         Act::Search => caption("Ctrl+Shift+S", "Search"),
@@ -320,7 +334,10 @@ pub fn applies(act: Act, cue: &Cue) -> bool {
     match act {
         Act::Unpack | Act::UnpackHere => cue.archive,
         Act::Verify => cue.sfv,
-        Act::Pack | Act::PackHere | Act::MakeSfv => cue.marks > 0 || cue.file || cue.dir,
+        Act::Pack | Act::PackHere | Act::MakeSfv | Act::Shred => cue.marks > 0 || cue.file || cue.dir,
+        Act::NewLink => cue.file || cue.dir,
+        Act::Encode => cue.file,
+        Act::TestArchive => cue.testable,
         Act::CopyPaths => cue.marks > 0 || cue.file || cue.dir,
         Act::Properties | Act::CopyAs | Act::Rename => cue.file || cue.dir,
         Act::View | Act::Edit => cue.file,
@@ -346,6 +363,7 @@ fn score(act: Act, cue: &Cue) -> i32 {
         Act::PackHere if multi => 70,
         Act::Unpack if cue.archive => 60,
         Act::UnpackHere if cue.archive => 58,
+        Act::TestArchive if cue.testable || cue.archive => 54,
         Act::Verify if cue.sfv => 56,
         Act::Pack if marked => 50,
         Act::PackHere if marked => 48,
@@ -376,6 +394,9 @@ const CATALOG: &[Item] = &[
     Item { act: Act::Mkdir, keys: "F7", label: "New folder", group: Group::Files },
     Item { act: Act::Trash, keys: "F8 / Delete", label: "Trash", group: Group::Files },
     Item { act: Act::Delete, keys: "Shift+F8", label: "Delete", group: Group::Files },
+    Item { act: Act::NewLink, keys: "Shift+F7", label: "New link", group: Group::Files },
+    Item { act: Act::Shred, keys: "Ctrl+Delete", label: "Secure delete", group: Group::Files },
+    Item { act: Act::Encode, keys: "Ctrl+Shift+F7", label: "Encode", group: Group::Files },
     Item { act: Act::CopyAs, keys: "Shift+F5", label: "Copy as", group: Group::Files },
     Item { act: Act::Rename, keys: "Shift+F6", label: "Rename", group: Group::Files },
     Item { act: Act::SelectAll, keys: "Ctrl+A", label: "Select all", group: Group::Files },
@@ -386,8 +407,9 @@ const CATALOG: &[Item] = &[
     Item { act: Act::PackHere, keys: "Ctrl+Shift+F5", label: "Pack here", group: Group::Archive },
     Item { act: Act::Unpack, keys: "Alt+F9", label: "Unpack to other panel", group: Group::Archive },
     Item { act: Act::UnpackHere, keys: "Shift+Alt+F9", label: "Extract here", group: Group::Archive },
-    Item { act: Act::MakeSfv, keys: "Shift+F9", label: "Create SFV", group: Group::Archive },
-    Item { act: Act::Verify, keys: "Ctrl+Shift+F9", label: "Verify SFV", group: Group::Archive },
+    Item { act: Act::TestArchive, keys: "Ctrl+Shift+F2", label: "Test archive", group: Group::Archive },
+    Item { act: Act::MakeSfv, keys: "Shift+F9", label: "Create checksum", group: Group::Archive },
+    Item { act: Act::Verify, keys: "Ctrl+Shift+F9", label: "Verify checksum", group: Group::Archive },
     Item { act: Act::OtherPane, keys: "Tab", label: "Other pane", group: Group::Navigate },
     Item { act: Act::NextTab, keys: "Ctrl+Tab", label: "Next tab", group: Group::Navigate },
     Item { act: Act::NewTab, keys: "Ctrl+T", label: "New tab", group: Group::Navigate },
@@ -412,7 +434,7 @@ const CATALOG: &[Item] = &[
     Item { act: Act::SortAttr, keys: "Ctrl+F7", label: "Sort by attributes", group: Group::Navigate },
     Item { act: Act::CopyPaths, keys: "Ctrl+Shift+C", label: "Copy path", group: Group::Clipboard },
     Item { act: Act::CopyImage, keys: "Ctrl+C", label: "Copy image", group: Group::Clipboard },
-    Item { act: Act::CopyDir, keys: "Alt+Shift+C", label: "Copy folder path", group: Group::Clipboard },
+    Item { act: Act::CopyDir, keys: "Alt+Shift+C", label: "Copy dir path", group: Group::Clipboard },
     Item { act: Act::Filter, keys: "Ctrl+S", label: "Filter", group: Group::View },
     Item { act: Act::Search, keys: "Ctrl+Shift+S", label: "Search", group: Group::View },
     Item { act: Act::Hidden, keys: "Ctrl+H", label: "Hidden", group: Group::View },
@@ -475,8 +497,8 @@ mod tests {
         }));
         assert_eq!(ranked[0], Act::Unpack);
         assert_eq!(ranked[1], Act::UnpackHere);
-        assert!(ranked.contains(&Act::Filter));
-        assert!(ranked.len() <= 6);
+        assert!(ranked.contains(&Act::TestArchive));
+        assert_eq!(ranked.len(), HINT_SLOTS);
     }
 
     #[test]
@@ -485,7 +507,9 @@ mod tests {
             cue.text = true;
             cue.file = true;
         }));
-        assert_eq!(&ranked[..3], &[Act::CopyPaths, Act::Properties, Act::Filter]);
+        assert_eq!(ranked[0], Act::CopyPaths);
+        assert!(ranked.contains(&Act::Properties));
+        assert!(ranked.contains(&Act::Filter));
         assert!(!ranked.contains(&Act::View));
         assert!(!ranked.contains(&Act::Edit));
     }
@@ -508,8 +532,8 @@ mod tests {
             cue.marks = 2;
         }));
         assert_eq!(&ranked[..4], &[Act::Pack, Act::PackHere, Act::Unpack, Act::UnpackHere]);
-        assert!(ranked.contains(&Act::Unpack));
-        assert_eq!(ranked.len(), 6);
+        assert!(ranked.contains(&Act::TestArchive));
+        assert_eq!(ranked.len(), HINT_SLOTS);
     }
 
     #[test]
@@ -519,6 +543,20 @@ mod tests {
             cue.file = true;
         }));
         assert_eq!(ranked[0], Act::Verify);
+    }
+
+    #[test]
+    fn special_commands_stay_off_the_context_row() {
+        let file = rank(&cue(|cue| cue.file = true));
+        let folder = rank(&cue(|cue| cue.dir = true));
+        for act in [Act::NewLink, Act::MakeSfv, Act::Shred, Act::Encode] {
+            assert!(!file.contains(&act), "{act:?}");
+            assert!(!folder.contains(&act), "{act:?}");
+        }
+        assert!(!file.contains(&Act::TestArchive));
+
+        assert!(applies(Act::TestArchive, &cue(|cue| cue.testable = true)));
+        assert!(!applies(Act::TestArchive, &cue(|cue| cue.file = true)));
     }
 
     #[test]

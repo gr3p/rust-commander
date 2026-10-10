@@ -1,0 +1,25 @@
+#!/usr/bin/make -f
+
+# Keep the package build out of target/, which cargo run uses.
+export CARGO_HOME = $(CURDIR)/debian/cargo-home
+export CARGO_TARGET_DIR = $(CURDIR)/debian/target
+
+%:
+	dh $@
+
+override_dh_auto_clean:
+	rm -rf debian/target debian/cargo-home
+
+override_dh_auto_build:
+	cargo build --release --locked
+
+override_dh_auto_test:
+	# Acceptance tests belong to scripts/test-sandbox.sh, not the package build.
+
+override_dh_auto_install:
+	install -Dm755 debian/target/release/rust-commander \
+		debian/rust-commander/usr/bin/rust-commander
+	install -Dm644 data/rust-commander.desktop \
+		debian/rust-commander/usr/share/applications/se.rustcommander.RustCommander.desktop
+	install -Dm644 img/rust-commander.png \
+		debian/rust-commander/usr/share/icons/hicolor/512x512/apps/rust-commander.png

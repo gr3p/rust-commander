@@ -958,6 +958,8 @@ fn search_nested_names(dir: &Path) -> Result<(), String> {
     let options = |query: &str| Options {
         root: dir.to_path_buf(), query: query.into(), recursive: true,
         hidden: false, files_only: false, case_sensitive: false,
+        text: String::new(), min_size: None, max_size: None, min_mtime: None, max_mtime: None,
+        duplicates: false, in_archives: false,
     };
     let collect = |options| {
         let mut found = Vec::new();
@@ -1001,6 +1003,8 @@ fn search_cancelled(dir: &Path) -> Result<(), String> {
     search::run(Options {
         root: dir.to_path_buf(), query: "result".into(), recursive: true,
         hidden: false, files_only: true, case_sensitive: false,
+        text: String::new(), min_size: None, max_size: None, min_mtime: None, max_mtime: None,
+        duplicates: false, in_archives: false,
     }, || stopped.get(), |event| match event {
         Event::Matches(_) => {
             batches += 1;
@@ -1021,6 +1025,8 @@ fn search_stops_at_limit(dir: &Path) -> Result<(), String> {
     search::run(Options {
         root: dir.to_path_buf(), query: "hit".into(), recursive: true,
         hidden: false, files_only: true, case_sensitive: false,
+        text: String::new(), min_size: None, max_size: None, min_mtime: None, max_mtime: None,
+        duplicates: false, in_archives: false,
     }, || false, |event| match event {
         Event::Matches(paths) => found += paths.len(),
         Event::Finished { errors, cancelled } => finished = Some((errors, cancelled)),

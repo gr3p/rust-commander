@@ -1,0 +1,46 @@
+# Maintainer: Marcus Wallén <sysopt@protonmail.com>
+# Tag v0.1.0 unpacks as rust-commander-0.1.0.
+# Replace SKIP with `makepkg -g` after that tag is on GitHub, before an AUR upload.
+pkgname=rust-commander
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Dual-pane file manager'
+arch=('x86_64')
+url='https://github.com/gr3p/rust-commander'
+license=('MIT')
+depends=('gtk4' 'vte4' 'hicolor-icon-theme')
+makedepends=('cargo' 'pkgconf')
+optdepends=('p7zip: 7z archives' 'rar: rar archives')
+options=('!lto')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+	cd "$pkgname-$pkgver"
+	export RUSTUP_TOOLCHAIN=stable
+	cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+	cd "$pkgname-$pkgver"
+	export RUSTUP_TOOLCHAIN=stable
+	export CARGO_TARGET_DIR=target
+	cargo build --frozen --release
+}
+
+check() {
+	cd "$pkgname-$pkgver"
+	export RUSTUP_TOOLCHAIN=stable
+	export CARGO_TARGET_DIR=target
+	# The acceptance harness needs the sandbox script.
+	cargo test --frozen --release --lib
+}
+
+package() {
+	cd "$pkgname-$pkgver"
+	install -Dm755 "target/release/$pkgname" -t "$pkgdir/usr/bin/"
+	install -Dm644 data/rust-commander.desktop \
+		"$pkgdir/usr/share/applications/se.rustcommander.RustCommander.desktop"
+	install -Dm644 img/rust-commander.png \
+		"$pkgdir/usr/share/icons/hicolor/512x512/apps/$pkgname.png"
+}

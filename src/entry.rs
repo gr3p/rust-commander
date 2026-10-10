@@ -1,6 +1,8 @@
 pub const DIR: u8 = 1;
 pub const LINK: u8 = 2;
 pub const HIDDEN: u8 = 4;
+/// `raw` is an absolute path, not a file name. Used for a flat hit list.
+pub const FEED: u8 = 8;
 
 #[derive(Clone, Debug)]
 pub struct Entry {

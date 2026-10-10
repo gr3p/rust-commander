@@ -97,8 +97,10 @@ impl EntryObject {
 fn size_text(entry: &Entry, skip: bool) -> String {
     if skip {
         String::new()
-    } else if entry.is_dir() {
+    } else if entry.is_dir() && entry.size == 0 {
         "<DIR>".into()
+    } else if entry.is_dir() {
+        listing::format_size(entry.size)
     } else {
         listing::format_size(entry.size)
     }

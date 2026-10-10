@@ -22,11 +22,13 @@ pub struct Options {
     /// 0 stores, 9 is the strongest.
     pub level: u8,
     pub password: Option<String>,
+    /// Split 7z and rar into volumes of this many bytes. Zip stays one file.
+    pub volume: Option<u64>,
 }
 
 impl std::fmt::Debug for Options {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Options").field("level", &self.level).field("password", &self.password.is_some()).finish()
+        f.debug_struct("Options").field("level", &self.level).field("password", &self.password.is_some()).field("volume", &self.volume).finish()
     }
 }
 
@@ -106,6 +108,15 @@ pub fn pack(
         return Err(Fail::Message("Password cannot contain line breaks".into()));
     }
     let level = opts.level.min(9);
+    if let Some(bytes) = opts.volume {
+        if bytes == 0 {
+            return Err(Fail::Message("Volume size must be at least 1 byte".into()));
+        }
+        if format == Format::Zip {
+            return Err(Fail::Message("Zip is one file. Volume size needs 7z or rar.".into()));
+        }
+        return pack_volumes(format, bin, sources, cwd, dest, level, password, bytes, cancel, progress);
+    }
     let Some(parent) = dest.parent() else {
         return Err(Fail::Message("missing destination folder".into()));
     };
@@ -121,7 +132,7 @@ pub fn pack(
             let Some(bin) = bin else {
                 return Err(Fail::Message(hint(format).into()));
             };
-            run_tool(format, bin, sources, cwd, &part, level, password, cancel, progress)
+            run_tool(format, bin, sources, cwd, &part, level, password, None, cancel, progress)
         }
     };
     match packed {
@@ -269,6 +280,58 @@ fn rel_slash(path: &Path) -> String {
     out
 }
 
+fn pack_volumes(
+    format: Format,
+    bin: Option<&Path>,
+    sources: &[PathBuf],
+    cwd: &Path,
+    dest: &Path,
+    level: u8,
+    password: Option<&str>,
+    bytes: u64,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(&Progress),
+) -> Result<Report, Fail> {
+    let Some(bin) = bin else {
+        return Err(Fail::Message(hint(format).into()));
+    };
+    let Some(parent) = dest.parent() else {
+        return Err(Fail::Message("missing destination folder".into()));
+    };
+    let staging = crate::ops::partial_path(dest).with_extension("d");
+    let _ = fs::remove_dir_all(&staging);
+    fs::create_dir(&staging)?;
+    let staged = staging.join(dest.file_name().unwrap_or(std::ffi::OsStr::new("archive")));
+    let packed = run_tool(format, bin, sources, cwd, &staged, level, password, Some(bytes), cancel, progress);
+    let moved = packed.and_then(|files| {
+        let mut parts = Vec::new();
+        for entry in fs::read_dir(&staging)? {
+            let entry = entry?;
+            let target = parent.join(entry.file_name());
+            // A half-moved set would be worse than none, so check every name first.
+            if fs::symlink_metadata(&target).is_ok() {
+                return Err(Fail::Message(format!("{} already exists", target.display())));
+            }
+            parts.push((entry.path(), target));
+        }
+        for (done, (from, to)) in parts.iter().enumerate() {
+            if let Err(err) = fs::rename(from, to) {
+                for (_, moved) in &parts[..done] {
+                    let _ = fs::remove_file(moved);
+                }
+                return Err(err.into());
+            }
+        }
+        Ok(files)
+    });
+    let _ = fs::remove_dir_all(&staging);
+    match moved {
+        Ok(files) => Ok(Report { cancelled: false, files }),
+        Err(Fail::Cancelled) => Ok(Report { cancelled: true, files: 0 }),
+        Err(err) => Err(err),
+    }
+}
+
 fn run_tool(
     format: Format,
     bin: &Path,
@@ -277,6 +340,7 @@ fn run_tool(
     part: &Path,
     level: u8,
     password: Option<&str>,
+    volume: Option<u64>,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(&Progress),
 ) -> Result<u64, Fail> {
@@ -311,6 +375,9 @@ fn run_tool(
                 }
             }
             Format::Zip => {}
+        }
+        if let Some(bytes) = volume {
+            cmd.arg(format!("-v{bytes}b"));
         }
         cmd.arg(part).arg(format!("@{}", list.display()));
         use std::os::unix::process::CommandExt;
@@ -498,7 +565,7 @@ mod tests {
         File::options().write(true).open(&script).unwrap().set_modified(when).unwrap();
         let dest = dir.join("out.zip");
         let cancel = AtomicBool::new(false);
-        let opts = Options { level: 5, password: None };
+        let opts = Options { volume: None, level: 5, password: None };
         pack(Format::Zip, None, &[dir.join("a.txt"), dir.join("sub"), script], &dir, &dest, &opts, &cancel, &mut |_| {}).unwrap();
         let out = dir.join("unpacked");
         fs::create_dir(&out).unwrap();
@@ -518,7 +585,7 @@ mod tests {
         fs::write(dir.join("a.txt"), b"alpha alpha alpha").unwrap();
         let dest = dir.join("out.zip");
         let cancel = AtomicBool::new(false);
-        let opts = Options { level: 0, password: Some("hemligt".into()) };
+        let opts = Options { volume: None, level: 0, password: Some("hemligt".into()) };
         pack(Format::Zip, None, &[dir.join("a.txt")], &dir, &dest, &opts, &cancel, &mut |_| {}).unwrap();
         let listed = archive::list(&dest, None).unwrap();
         assert!(listed.needs_password);
@@ -537,7 +604,7 @@ mod tests {
         fs::write(dir.join("a.txt"), b"alpha").unwrap();
         // Browsers name unfinished downloads like this.
         fs::write(dir.join("out.zip.part"), b"download").unwrap();
-        let opts = Options { level: 5, password: None };
+        let opts = Options { volume: None, level: 5, password: None };
         let report = pack(Format::Zip, None, &[dir.join("a.txt")], &dir, &dir.join("out.zip"), &opts, &AtomicBool::new(true), &mut |_| {}).unwrap();
         assert!(report.cancelled);
         assert_eq!(fs::read(dir.join("out.zip.part")).unwrap(), b"download");
@@ -563,7 +630,7 @@ mod tests {
     fn rejects_password_with_newline() {
         let dir = tmp("zipnl");
         fs::write(dir.join("a.txt"), b"a").unwrap();
-        let opts = Options { level: 5, password: Some("a\nb".into()) };
+        let opts = Options { volume: None, level: 5, password: Some("a\nb".into()) };
         let err = pack(Format::Zip, None, &[dir.join("a.txt")], &dir, &dir.join("out.zip"), &opts, &AtomicBool::new(false), &mut |_| {});
         assert!(err.is_err());
         let _ = fs::remove_dir_all(&dir);
@@ -577,7 +644,7 @@ mod tests {
         File::create(&big).unwrap().set_len(4608 * 1024 * 1024).unwrap();
         fs::write(dir.join("small.txt"), b"small").unwrap();
         let dest = dir.join("out.zip");
-        let opts = Options { level: 1, password: None };
+        let opts = Options { volume: None, level: 1, password: None };
         pack(Format::Zip, None, &[big.clone(), dir.join("small.txt")], &dir, &dest, &opts, &AtomicBool::new(false), &mut |_| {}).unwrap();
         let listed = archive::list(&dest, None).unwrap();
         let member = listed.members.iter().find(|member| member.name == "big.bin").unwrap();
@@ -599,7 +666,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         for (name, password) in [("plain.rar", None), ("secret.rar", Some("hemligt"))] {
             let dest = dir.join(name);
-            let opts = Options { level: 5, password: password.map(String::from) };
+            let opts = Options { volume: None, level: 5, password: password.map(String::from) };
             pack(Format::Rar, Some(&bin), &[dir.join("a.txt"), dir.join("sub")], &dir, &dest, &opts, &cancel, &mut |_| {}).unwrap();
             if password.is_some() {
                 assert!(archive::list(&dest, None).is_err() || archive::list(&dest, None).unwrap().needs_password);
@@ -621,14 +688,14 @@ mod tests {
         fs::write(dir.join("note.txt"), b"seven").unwrap();
         let dest = dir.join("out.7z");
         let cancel = AtomicBool::new(false);
-        let opts = Options { level: 9, password: None };
+        let opts = Options { volume: None, level: 9, password: None };
         pack(Format::SevenZ, Some(&bin), &[dir.join("note.txt")], &dir, &dest, &opts, &cancel, &mut |_| {}).unwrap();
         assert!(dest.is_file());
         let listed = Command::new(&bin).args(["l", dest.to_str().unwrap()]).output().unwrap();
         let text = String::from_utf8_lossy(&listed.stdout);
         assert!(text.contains("note.txt"), "{text}");
         let secret = dir.join("secret.7z");
-        let opts = Options { level: 1, password: Some("hemligt".into()) };
+        let opts = Options { volume: None, level: 1, password: Some("hemligt".into()) };
         pack(Format::SevenZ, Some(&bin), &[dir.join("note.txt")], &dir, &secret, &opts, &cancel, &mut |_| {}).unwrap();
         let locked = Command::new(&bin).args(["l", "-pfel", secret.to_str().unwrap()]).output().unwrap();
         assert!(!locked.status.success());

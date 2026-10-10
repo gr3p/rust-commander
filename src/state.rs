@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -52,6 +53,8 @@ pub struct Tab {
     pub back: Vec<PathBuf>,
     pub forward: Vec<PathBuf>,
     pub token: u64,
+    /// Flat hit list. Entry paths are absolute (`FEED`), not children of `path`.
+    pub feed: bool,
     // The tab stays in the old folder until the listing for `token` arrives.
     pending: Option<(PathBuf, Step)>,
 }
@@ -66,6 +69,7 @@ impl Tab {
             back: Vec::new(),
             forward: Vec::new(),
             token: fresh_token(),
+            feed: false,
             pending: None,
         }
     }
@@ -185,6 +189,15 @@ impl AppState {
         let vis = self.visible(id);
         let cursor = self.tab(id).cursor;
         vis.get(cursor).and_then(|&i| self.tab(id).entries.get(i))
+    }
+
+    pub fn show_hits(&mut self, id: PaneId, paths: &[PathBuf]) {
+        let entries = paths.iter().filter_map(|path| hit_entry(path)).collect();
+        let tab = self.tab_mut(id);
+        tab.feed = true;
+        tab.entries = entries;
+        tab.cursor = 0;
+        tab.marked.clear();
     }
 
     pub fn selected_paths(&self, id: PaneId) -> Vec<PathBuf> {
@@ -339,15 +352,29 @@ impl AppState {
             return false;
         };
         let _ = tab_index;
+        // A reload of the same folder keeps the cursor on its file, not on its row number.
+        let kept = tab.pending.is_none().then(|| {
+            let visible = listing::visible_indices(&tab.entries, sort, ascending, show_hidden, &filter);
+            visible.get(tab.cursor).map(|&slot| tab.entries[slot].name.clone())
+        });
+        // The filter belongs to the folder on screen. A new folder starts unfiltered.
+        let left = tab.pending.as_ref().is_some_and(|(next, _)| next != &tab.path);
         if let Some((path, step)) = tab.pending.take() {
             tab.commit(path, step);
         }
+        tab.feed = false;
         tab.entries = entries;
-        let vis_len = listing::visible_indices(&tab.entries, sort, ascending, show_hidden, &filter).len();
-        if vis_len == 0 {
+        let shown = if left { "" } else { filter.as_str() };
+        let visible = listing::visible_indices(&tab.entries, sort, ascending, show_hidden, shown);
+        if let Some(at) = kept.flatten().and_then(|name| visible.iter().position(|&slot| tab.entries[slot].name == name)) {
+            tab.cursor = at;
+        } else if visible.is_empty() {
             tab.cursor = 0;
-        } else if tab.cursor >= vis_len {
-            tab.cursor = vis_len - 1;
+        } else if tab.cursor >= visible.len() {
+            tab.cursor = visible.len() - 1;
+        }
+        if left {
+            pane.filter.clear();
         }
         true
     }
@@ -440,10 +467,37 @@ impl AppState {
     }
 }
 
+fn hit_entry(path: &Path) -> Option<Entry> {
+    use std::os::unix::fs::MetadataExt;
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let meta = fs::symlink_metadata(path).ok()?;
+    let mut flags = crate::entry::FEED;
+    if meta.is_dir() && !meta.file_type().is_symlink() {
+        flags |= crate::entry::DIR;
+    }
+    if meta.file_type().is_symlink() {
+        flags |= crate::entry::LINK;
+    }
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|dur| dur.as_secs() as i64)
+        .unwrap_or(0);
+    Some(Entry {
+        name: name.into(),
+        raw: Some(path.as_os_str().into()),
+        size: meta.len(),
+        mtime,
+        mode: meta.mode(),
+        flags,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entry::Entry;
+    use crate::entry::{Entry, DIR};
 
     fn file(name: &str) -> Entry {
         Entry {
@@ -478,6 +532,50 @@ mod tests {
         let marked = &state.tab(PaneId::Left).marked;
         assert!(marked.contains(&PathBuf::from("/left/a.txt")));
         assert!(!marked.contains(&PathBuf::from("/left/b.txt")));
+    }
+
+    fn dir(name: &str) -> Entry {
+        Entry { flags: DIR, ..file(name) }
+    }
+
+    #[test]
+    fn directory_change_drops_the_filter() {
+        let mut state = AppState::new("/left".into(), "/right".into());
+        state.tab_mut(PaneId::Left).entries = vec![Entry::dotdot(), dir("Documents"), file("notes.txt")];
+        state.pane_mut(PaneId::Left).filter = "d".into();
+        state.set_cursor(1);
+        let (_, path, token) = state.enter().unwrap();
+        assert_eq!(path, PathBuf::from("/left/Documents"));
+        assert!(state.apply_listing(
+            PaneId::Left,
+            0,
+            token,
+            vec![Entry::dotdot(), file("budget.txt"), file("draft.txt")]
+        ));
+        assert!(state.pane(PaneId::Left).filter.is_empty());
+        assert_eq!(state.visible(PaneId::Left).len(), 3);
+
+        state.pane_mut(PaneId::Left).filter = "b".into();
+        let (_, token) = state.refresh(PaneId::Left);
+        assert!(state.apply_listing(
+            PaneId::Left,
+            0,
+            token,
+            vec![Entry::dotdot(), file("budget.txt"), file("draft.txt")]
+        ));
+        assert_eq!(state.pane(PaneId::Left).filter, "b");
+        assert_eq!(state.visible(PaneId::Left).len(), 2);
+    }
+
+    #[test]
+    fn failed_enter_keeps_the_filter() {
+        let mut state = AppState::new("/left".into(), "/right".into());
+        state.tab_mut(PaneId::Left).entries = vec![Entry::dotdot(), dir("Documents")];
+        state.pane_mut(PaneId::Left).filter = "d".into();
+        state.set_cursor(1);
+        let (_, _, token) = state.enter().unwrap();
+        assert!(state.cancel_load(PaneId::Left, token));
+        assert_eq!(state.pane(PaneId::Left).filter, "d");
     }
 
     #[test]

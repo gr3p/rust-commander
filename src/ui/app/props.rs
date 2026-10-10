@@ -1,5 +1,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use relm4::gtk;
 use relm4::gtk::prelude::*;
@@ -32,13 +34,20 @@ impl App {
         win.set_default_width(520);
         win.set_default_height(560);
         let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-        let heading = gtk::Label::new(Some(&name));
-        heading.set_xalign(0.0);
-        heading.add_css_class("cmd-head");
+        let heading = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        let kind = gtk::Label::new(Some(facts.kind));
+        kind.set_xalign(0.0);
+        kind.add_css_class("dim-label");
+        let title = gtk::Label::new(Some(&name));
+        title.set_xalign(0.0);
+        title.add_css_class("dialog-title");
+        heading.append(&kind);
+        heading.append(&title);
         let (mime, _) = gtk::gio::content_type_guess(Some(&path), None::<&[u8]>);
         let notebook = gtk::Notebook::new();
         notebook.set_vexpand(true);
-        notebook.append_page(&scrolled(&facts_page(&path, &facts, mime.as_str())), Some(&gtk::Label::new(Some("Properties"))));
+        let (facts_grid, modified, size_cancel) = facts_page(&path, &facts, mime.as_str());
+        notebook.append_page(&scrolled(&facts_grid), Some(&gtk::Label::new(Some("Properties"))));
         let (attr_page, octal, owner, group, uids, gids) = attr_page(&facts);
         notebook.append_page(&scrolled(&attr_page), Some(&gtk::Label::new(Some("Attributes"))));
         notebook.append_page(&scrolled(&details_page(&path, &name, mime.as_str())), Some(&gtk::Label::new(Some("Details"))));
@@ -82,18 +91,48 @@ impl App {
             };
             let uid = uids.get(owner.selected() as usize).copied().unwrap_or(facts.uid);
             let gid = gids.get(group.selected() as usize).copied().unwrap_or(facts.gid);
-            if mode == facts.mode && uid == facts.uid && gid == facts.gid {
+            let stamp_text = modified.text().to_string();
+            let stamp_changed = stamp_text != props::format_stamp(facts.modified);
+            let stamp = if stamp_changed {
+                match props::parse_stamp(&stamp_text) {
+                    Some(secs) => Some(secs),
+                    None => {
+                        error_ok.set_text("Modified time uses the form shown, for example Mon, 10 October 2026 08:41:00 UT+0200");
+                        error_ok.set_visible(true);
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            if mode == facts.mode && uid == facts.uid && gid == facts.gid && stamp.is_none() {
                 win_ok.close();
                 return;
             }
-            if let Err(err) = props::apply(&path, &facts, mode, uid, gid) {
-                error_ok.set_text(&err.to_string());
-                error_ok.set_visible(true);
-                tx_ok.emit(Msg::RefreshActive);
-                return;
+            if mode != facts.mode || uid != facts.uid || gid != facts.gid {
+                if let Err(err) = props::apply(&path, &facts, mode, uid, gid) {
+                    error_ok.set_text(&err.to_string());
+                    error_ok.set_visible(true);
+                    tx_ok.emit(Msg::RefreshActive);
+                    return;
+                }
+            }
+            if let Some(secs) = stamp {
+                if let Err(err) = props::set_modified(&path, secs) {
+                    error_ok.set_text(&err.to_string());
+                    error_ok.set_visible(true);
+                    tx_ok.emit(Msg::RefreshActive);
+                    return;
+                }
             }
             tx_ok.emit(Msg::PropsSaved);
         });
+        if let Some(cancel) = size_cancel {
+            win.connect_close_request(move |_| {
+                cancel.store(true, Ordering::Relaxed);
+                gtk::glib::Propagation::Proceed
+            });
+        }
         win.present();
         self.dialog = Some(win);
     }
@@ -112,7 +151,7 @@ fn scrolled(page: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
     scroll
 }
 
-fn facts_page(path: &std::path::Path, facts: &Facts, mime: &str) -> gtk::Grid {
+fn facts_page(path: &std::path::Path, facts: &Facts, mime: &str) -> (gtk::Grid, gtk::Entry, Option<Arc<AtomicBool>>) {
     let grid = gtk::Grid::new();
     grid.set_column_spacing(18);
     grid.set_row_spacing(6);
@@ -144,14 +183,74 @@ fn facts_page(path: &std::path::Path, facts: &Facts, mime: &str) -> gtk::Grid {
     row += 1;
     add(&grid, row, "Size on disk", &props::size_line(facts.disk));
     row += 1;
+    let size_cancel = (facts.kind == "Directory").then(|| folder_size_row(&grid, &mut row, path));
     add(&grid, row, "Created", &props::format_stamp(facts.created.unwrap_or(0)));
     row += 1;
-    add(&grid, row, "Modified", &props::format_stamp(facts.modified));
+    let modified = gtk::Entry::new();
+    modified.set_text(&props::format_stamp(facts.modified));
+    modified.set_hexpand(true);
+    let modified_name = gtk::Label::new(Some("Modified"));
+    modified_name.set_xalign(0.0);
+    modified_name.add_css_class("dim-label");
+    grid.attach(&modified_name, 0, row, 1, 1);
+    grid.attach(&modified, 1, row, 1, 1);
     row += 1;
     add(&grid, row, "Accessed", &props::format_stamp(facts.accessed));
     row += 1;
     add(&grid, row, "Status changed", &props::format_stamp(facts.changed));
-    grid
+    (grid, modified, size_cancel)
+}
+
+fn folder_size_row(grid: &gtk::Grid, row: &mut i32, path: &std::path::Path) -> Arc<AtomicBool> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let name = gtk::Label::new(Some("Folder size"));
+    name.set_xalign(0.0);
+    name.add_css_class("dim-label");
+    let button = gtk::Button::with_label("Calculate folder size");
+    let spinner = gtk::Spinner::new();
+    spinner.set_visible(false);
+    let result = gtk::Label::new(None);
+    result.set_xalign(0.0);
+    result.set_hexpand(true);
+    let path = path.to_path_buf();
+    let (button_run, spinner_run, result_run, cancel_run) = (button.clone(), spinner.clone(), result.clone(), Arc::clone(&cancel));
+    crate::ui::shell::on_click(&button, move || {
+        button_run.set_sensitive(false);
+        result_run.set_text("");
+        spinner_run.set_visible(true);
+        spinner_run.start();
+        cancel_run.store(false, Ordering::Relaxed);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (path, cancel) = (path.clone(), Arc::clone(&cancel_run));
+        std::thread::spawn(move || {
+            let _ = tx.send(rust_commander::sizes::folder_bytes(&path, &cancel));
+        });
+        let (button_ui, spinner_ui, result_ui, cancel_ui) = (button_run.clone(), spinner_run.clone(), result_run.clone(), Arc::clone(&cancel_run));
+        gtk::glib::timeout_add_local(std::time::Duration::from_millis(100), move || match rx.try_recv() {
+            Ok(counted) => {
+                spinner_ui.stop();
+                spinner_ui.set_visible(false);
+                button_ui.set_sensitive(true);
+                if !cancel_ui.load(Ordering::Relaxed) {
+                    match counted {
+                        Ok(bytes) => result_ui.set_text(&rust_commander::sizes::folder_size_text(bytes)),
+                        Err(err) => result_ui.set_text(&err.to_string()),
+                    }
+                }
+                gtk::glib::ControlFlow::Break
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => gtk::glib::ControlFlow::Break,
+        });
+    });
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    line.append(&button);
+    line.append(&spinner);
+    line.append(&result);
+    grid.attach(&name, 0, *row, 1, 1);
+    grid.attach(&line, 1, *row, 1, 1);
+    *row += 1;
+    cancel
 }
 
 fn details_page(path: &std::path::Path, name: &str, mime: &str) -> gtk::Grid {

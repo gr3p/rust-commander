@@ -18,10 +18,11 @@ impl App {
         let file = entry.is_some_and(|entry| !entry.is_dir() && entry.name.as_ref() != "..");
         let dir = entry.is_some_and(|entry| entry.is_dir() && entry.name.as_ref() != "..");
         let archive = file && rust_commander::archive::is_archive(std::path::Path::new(name));
+        let testable = file && rust_commander::archive::is_testable(std::path::Path::new(name));
         let text = file && commands::is_text(name);
         let image = file && rust_commander::imageview::is_image(name);
         let sfv = self.state.tab(id).entries.iter().any(|entry| {
-            !entry.is_dir() && rust_commander::sfv::is_sfv(std::path::Path::new(entry.name.as_ref()))
+            !entry.is_dir() && super::jobs::is_check_file(std::path::Path::new(entry.name.as_ref()))
         });
         Cue {
             archive,
@@ -36,6 +37,7 @@ impl App {
             quick_view: self.state.quick_view,
             editing: self.shell.editing.get(),
             drive: self.shell.drives.iter().any(|(path, _)| path == &self.state.tab(id).path),
+            testable,
         }
     }
 
@@ -119,7 +121,11 @@ impl App {
             Act::PackHere => self.start_pack(true, sender),
             Act::Unpack => self.begin_unpack(true, sender),
             Act::UnpackHere => self.begin_unpack(false, sender),
-            Act::MakeSfv => self.start_sfv(sender),
+            Act::NewLink => self.ask_link(sender),
+            Act::Shred => self.ask_shred(sender),
+            Act::Encode => self.ask_encode(sender),
+            Act::TestArchive => self.start_test(sender),
+            Act::MakeSfv => self.ask_checksum(sender),
             Act::Verify => self.start_verify(sender),
             Act::OtherPane => {
                 self.state.active = self.state.active.other();

@@ -342,7 +342,7 @@ pub fn column_chars(entries: &[Entry]) -> [usize; 5] {
         }
         name = name.max(shown_name_chars(entry));
         ext = ext.max(extension(&entry.name).len());
-        let size_len = if entry.is_dir() { 5 } else { format_size(entry.size).len() };
+        let size_len = if entry.is_dir() && entry.size == 0 { 5 } else { format_size(entry.size).len() };
         size = size.max(size_len);
         date = date.max(format_mtime(entry.mtime).len());
         attr = attr.max(format_attr(entry.mode).len());
@@ -381,6 +381,11 @@ pub fn fit_columns(wanted: [i32; 5], avail: i32) -> [i32; 5] {
 }
 
 pub fn entry_path(dir: &Path, entry: &Entry) -> std::path::PathBuf {
+    if entry.flags & crate::entry::FEED != 0 {
+        if let Some(raw) = &entry.raw {
+            return std::path::PathBuf::from(&**raw);
+        }
+    }
     if entry.name.as_ref() == ".." {
         dir.parent().unwrap_or(dir).to_path_buf()
     } else if let Some(raw) = &entry.raw {
