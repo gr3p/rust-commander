@@ -25,6 +25,11 @@ pub struct Palette {
     pub row_selected: String,
     pub row_hover: String,
     pub border: String,
+    // The theme's own cursor bar and the text on it. Config overrides win over these.
+    pub cursor: String,
+    pub cursor_text: String,
+    // Text color of files marked with Space or Insert.
+    pub mark: String,
 }
 
 static CURRENT: RwLock<Option<Palette>> = RwLock::new(None);
@@ -102,6 +107,9 @@ fn palette_of(t: &BuiltinTheme) -> Palette {
         row_selected: selection.into(),
         row_hover: selection.into(),
         border: accent.into(),
+        cursor: accent.into(),
+        cursor_text: bright.into(),
+        mark: t.ansi[2].into(),
     }
 }
 
@@ -124,10 +132,15 @@ fn palette_of_colors(c: &Colors) -> Option<Palette> {
     let selection = col(c, "selection")?;
     let muted = col(c, "muted")?;
     let fallback = builtin();
+    let bright = col(c, "bright_foreground").unwrap_or_else(|| foreground.clone());
+    let green = col(c, "green").unwrap_or(fallback.green);
     Some(Palette {
-        bright: col(c, "bright_foreground").unwrap_or_else(|| foreground.clone()),
+        mark: green.clone(),
+        cursor: accent.clone(),
+        cursor_text: bright.clone(),
+        bright,
         red: col(c, "red").unwrap_or(fallback.red),
-        green: col(c, "green").unwrap_or(fallback.green),
+        green,
         blue: col(c, "blue").unwrap_or_else(|| accent.clone()),
         dim: col(c, "dark_foreground").unwrap_or_else(|| muted.clone()),
         light: is_light(c, &background),
@@ -612,12 +625,21 @@ fn selected_rows(p: &Palette) -> String {
 }
 
 // The filled bar belongs to the pane that has focus. The other pane keeps its place without that bar.
-pub fn cursor_bar(fallback: &str, color: &str, alpha: u8, text: &str) -> String {
-    let color = hex_color(color).unwrap_or(fallback);
+// `color` and `text` are the user's overrides; empty means the theme's own. Text only changes on the bar.
+pub fn cursor_bar(p: &Palette, color: &str, alpha: u8, text: &str) -> String {
+    let color = hex_color(color).unwrap_or(&p.cursor);
+    let text = hex_color(text).unwrap_or(&p.cursor_text);
     let opacity = f64::from(alpha.min(100)) / 100.0;
+    let idle = &p.foreground;
     format!(
-        "frame.pane columnview > listview > row:selected,\nframe.pane columnview > listview > row:selected > cell,\nframe.pane gridview > child:selected {{\n  background-color: transparent;\n  background-image: none;\n  color: {text};\n}}\nframe.pane-active columnview > listview > row:selected,\nframe.pane-active columnview > listview > row:selected > cell,\nframe.pane-active gridview > child:selected {{\n  background-color: alpha({color}, {opacity:.2});\n  background-image: none;\n}}\n"
+        "frame.pane columnview > listview > row:selected,\nframe.pane columnview > listview > row:selected > cell,\nframe.pane gridview > child:selected {{\n  background-color: transparent;\n  background-image: none;\n  color: {idle};\n}}\nframe.pane-active columnview > listview > row:selected,\nframe.pane-active columnview > listview > row:selected > cell,\nframe.pane-active gridview > child:selected {{\n  background-color: alpha({color}, {opacity:.2});\n  background-image: none;\n  color: {text};\n}}\n"
     )
+}
+
+// Text of marked files. `color` is the user's override; empty means the theme's own.
+pub fn marked_text(p: &Palette, color: &str) -> String {
+    let color = hex_color(color).unwrap_or(&p.mark);
+    format!(".marked {{\n  color: {color};\n}}\n")
 }
 
 fn solid_lists(fill: &str, selected: &str) -> String {
@@ -674,9 +696,6 @@ window {{
 .pane-blink {{
   border-color: {bright};
   box-shadow: inset 0 0 0 1px {bright};
-}}
-.marked {{
-  color: {green};
 }}
 label.glyph.marked {{
   color: {accent};
@@ -968,7 +987,6 @@ entry:focus-within {{
         muted = p.muted,
         sel = p.selection,
         bright = p.bright,
-        green = p.green,
         border = p.border,
         rsel = p.row_selected,
         rhov = p.row_hover,

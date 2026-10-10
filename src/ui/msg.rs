@@ -93,6 +93,8 @@ pub enum Msg {
     BackgroundColor(String),
     BackgroundAlpha(u8),
     CursorColor(String),
+    CursorTextColor(String),
+    MarkColor(String),
     CursorAlpha(u8),
     CloseSettings,
     ArchiveListed(Result<rust_commander::archive::Listed, String>),

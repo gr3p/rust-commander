@@ -110,6 +110,7 @@ const MEMORY: &[(&str, fn() -> Result<(), String>)] = &[
     ("omarchy_style_changes_rows", omarchy_style_changes_rows),
     ("disk_info_reads_mount_and_space", disk_info_reads_mount_and_space),
     ("list_background_color_and_image", list_background_color_and_image),
+    ("cursor_text_follows_theme_until_overridden", cursor_text_follows_theme_until_overridden),
     ("enter_opens_directory", enter_opens_directory),
     ("up_goes_to_parent", up_goes_to_parent),
     ("refresh_bumps_token", refresh_bumps_token),
@@ -502,6 +503,33 @@ fn disk_info_reads_mount_and_space() -> Result<(), String> {
         return Err("summary".into());
     }
     Ok(())
+}
+
+fn cursor_text_follows_theme_until_overridden() -> Result<(), String> {
+    let palette = theme::builtin();
+    let themed = theme::cursor_bar(&palette, "", 70, "");
+    let (idle, active) = themed.split_once("frame.pane-active").ok_or("no active rule")?;
+    if !active.contains(&format!("color: {};", palette.cursor_text)) || !active.contains(&palette.cursor) {
+        return Err(format!("theme cursor {active}"));
+    }
+    let own = theme::cursor_bar(&palette, "#112233", 70, "#ffffff");
+    let (idle_own, active_own) = own.split_once("frame.pane-active").ok_or("no active rule")?;
+    if !active_own.contains("color: #ffffff;") || !active_own.contains("#112233") {
+        return Err(format!("override {active_own}"));
+    }
+    // The other pane keeps the theme's text, whatever the override is.
+    if idle_own != idle || !idle.contains(&format!("color: {};", palette.foreground)) {
+        return Err(format!("idle pane {idle_own}"));
+    }
+    let bad = theme::cursor_bar(&palette, "", 70, "white");
+    eq(bad.contains("white"), false, "invalid text color ignored")?;
+    let marked = theme::marked_text(&palette, "");
+    let own_mark = theme::marked_text(&palette, "#ff8800");
+    if !marked.contains(&palette.mark) || !own_mark.contains("#ff8800") || own_mark.contains(&palette.mark) {
+        return Err(format!("mark color {marked} {own_mark}"));
+    }
+    let cfg = config::Config { cursor_color: "#112233".into(), ..config::Config::default() };
+    eq(cfg.color_overrides(), vec!["cursor color"], "overrides")
 }
 
 fn list_background_color_and_image() -> Result<(), String> {

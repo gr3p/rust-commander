@@ -18,6 +18,7 @@ use crate::ui::msg::Msg;
 use super::{App, SettingsUi, SIZING, home_dir};
 
 impl App {
+    // The theme palette is the base. Whatever the user set in F12 comes after it and wins.
     pub(in crate::ui::app) fn apply_css(&self, palette: &Palette) {
         let image = self.background_path();
         let style = theme::ShellStyle::load();
@@ -27,7 +28,7 @@ impl App {
         }
         let px = style.font_px;
         let sheet = format!(
-            "window, label, entry, button {{ font-family: monospace, \"JetBrainsMono Nerd Font\", \"JetBrains Mono\", \"Noto Sans CJK SC\"; font-size: {px}px; }}\ntextview, textview text {{ font-family: \"DejaVu Sans Mono\", \"JetBrains Mono\", monospace; font-size: {px}px; }}\n{}{}{}",
+            "window, label, entry, button {{ font-family: monospace, \"JetBrainsMono Nerd Font\", \"JetBrains Mono\", \"Noto Sans CJK SC\"; font-size: {px}px; }}\ntextview, textview text {{ font-family: \"DejaVu Sans Mono\", \"JetBrains Mono\", monospace; font-size: {px}px; }}\n{}{}{}{}",
             theme::stylesheet(palette, &style),
             theme::list_background(
                 palette,
@@ -36,7 +37,8 @@ impl App {
                 self.cfg.background_alpha,
                 self.cfg.background_stretch,
             ),
-            theme::cursor_bar(&palette.accent, &self.cfg.cursor_color, self.cfg.cursor_alpha, &palette.foreground),
+            theme::cursor_bar(palette, &self.cfg.cursor_color, self.cfg.cursor_alpha, &self.cfg.cursor_text_color),
+            theme::marked_text(palette, &self.cfg.mark_color),
         );
         self.shell.css.load_from_data(&sheet);
         let name = theme::active_name(&self.cfg.theme, &config::active_theme_path());
@@ -175,17 +177,14 @@ impl App {
         win.set_transient_for(Some(&self.shell.window));
         win.set_default_width(540);
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        let scroll = gtk::ScrolledWindow::new();
-        scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-        scroll.set_propagate_natural_height(true);
-        scroll.set_max_content_height(640);
+        let look = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let (editor_row, editor, editor_ids, editor_guard) = editor_picker(&self.cfg.editor, tx.clone());
         column.append(&editor_row);
         let active_theme = theme::active_name(&self.cfg.theme, &config::active_theme_path());
         let (theme_row, theme, theme_ids, theme_guard) = theme_picker(&active_theme, tx.clone());
-        column.append(&theme_row);
+        look.append(&theme_row);
+        look.append(&note("The theme is the base look. Colors and style below are your own changes on top of it. They stay when you switch theme."));
         let (icon_row, icon_pack, icon_pack_ids, icon_pack_guard) = icon_picker(&self.cfg.icon_pack, tx.clone());
-        column.append(&icon_row);
         let (columns_row, columns) = settings_row("Auto column size", self.cfg.auto_columns);
         let tx_columns = tx.clone();
         let flash = columns_row.clone();
@@ -262,25 +261,14 @@ impl App {
         column.append(&icons_row);
         column.append(&syntax_row);
         column.append(&flash_row);
-        let palette = theme::load_named(&theme::active_name(&self.cfg.theme, &config::active_theme_path()));
-        let color_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        color_row.add_css_class("settings-row");
-        let color_name = gtk::Label::new(Some("Background color"));
-        color_name.set_xalign(0.0);
-        color_name.set_hexpand(true);
-        let color_btn = gtk::ColorDialogButton::new(Some(gtk::ColorDialog::new()));
-        let color_flash = color_btn.clone();
-        let shown = if self.cfg.background_color.is_empty() { palette.background.as_str() } else { self.cfg.background_color.as_str() };
-        if let Ok(rgba) = gtk::gdk::RGBA::parse(shown) {
-            color_btn.set_rgba(&rgba);
-        }
-        let tx_color = tx.clone();
-        color_btn.connect_rgba_notify(move |btn| {
-            crate::ui::shell::blink_widget(color_flash.upcast_ref());
-            tx_color.emit(Msg::BackgroundColor(hex_rgb(&btn.rgba())));
-        });
-        color_row.append(&color_name);
-        color_row.append(&color_btn);
+        let palette = self.theme_palette();
+        look.append(&section("Colors"));
+        look.append(&note("A color you have not touched follows the theme. Reset puts a color back on the theme."));
+        let overrides = note(&overrides_text(&self.cfg));
+        overrides.add_css_class("settings-on");
+        look.append(&overrides);
+        let (background_row, background_color) =
+            color_picker("Background color", &palette.background, &self.cfg.background_color, Msg::BackgroundColor, tx.clone());
         let image_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         image_row.add_css_class("settings-row");
         let pick = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -331,24 +319,11 @@ impl App {
         strength.connect_value_changed(move |scale| tx_strength.emit(Msg::BackgroundAlpha(scale.value().round() as u8)));
         strength_row.append(&strength_name);
         strength_row.append(&strength);
-        let cursor_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        cursor_row.add_css_class("settings-row");
-        let cursor_name = gtk::Label::new(Some("Cursor color"));
-        cursor_name.set_xalign(0.0);
-        cursor_name.set_hexpand(true);
-        let cursor_btn = gtk::ColorDialogButton::new(Some(gtk::ColorDialog::new()));
-        let cursor_flash = cursor_btn.clone();
-        let cursor_shown = if self.cfg.cursor_color.is_empty() { palette.accent.as_str() } else { self.cfg.cursor_color.as_str() };
-        if let Ok(rgba) = gtk::gdk::RGBA::parse(cursor_shown) {
-            cursor_btn.set_rgba(&rgba);
-        }
-        let tx_cursor = tx.clone();
-        cursor_btn.connect_rgba_notify(move |btn| {
-            crate::ui::shell::blink_widget(cursor_flash.upcast_ref());
-            tx_cursor.emit(Msg::CursorColor(hex_rgb(&btn.rgba())));
-        });
-        cursor_row.append(&cursor_name);
-        cursor_row.append(&cursor_btn);
+        let (cursor_row, cursor_color) =
+            color_picker("Cursor color", &palette.cursor, &self.cfg.cursor_color, Msg::CursorColor, tx.clone());
+        let (mark_row, mark_color) = color_picker("Mark color (Space)", &palette.mark, &self.cfg.mark_color, Msg::MarkColor, tx.clone());
+        let (cursor_text_row, cursor_text_color) =
+            color_picker("Cursor text color", &palette.cursor_text, &self.cfg.cursor_text_color, Msg::CursorTextColor, tx.clone());
         let cursor_alpha_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         cursor_alpha_row.add_css_class("settings-row");
         let cursor_alpha_name = gtk::Label::new(Some("Cursor opacity"));
@@ -363,18 +338,36 @@ impl App {
         cursor_alpha.connect_value_changed(move |scale| tx_cursor_alpha.emit(Msg::CursorAlpha(scale.value().round() as u8)));
         cursor_alpha_row.append(&cursor_alpha_name);
         cursor_alpha_row.append(&cursor_alpha);
-        column.append(&color_row);
-        column.append(&image_row);
-        column.append(&stretch_row);
-        column.append(&strength_row);
-        column.append(&cursor_row);
-        column.append(&cursor_alpha_row);
+        look.append(&background_row);
+        look.append(&cursor_row);
+        look.append(&cursor_text_row);
+        look.append(&mark_row);
+        look.append(&section("Style"));
+        look.append(&icon_row);
+        look.append(&image_row);
+        look.append(&stretch_row);
+        look.append(&strength_row);
+        look.append(&cursor_alpha_row);
         column.append(&tool_row("7-Zip", rust_commander::pack::SEVEN_ZIP_HINT, &self.cfg.seven_zip, "/usr/bin/7z", tx.clone(), true));
         column.append(&tool_row("RAR", rust_commander::pack::RAR_HINT, &self.cfg.rar, "/usr/bin/rar", tx.clone(), false));
         column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         column.append(&commands_row(tx.clone()));
-        scroll.set_child(Some(&column));
-        win.set_child(Some(&scroll));
+        let tabs = gtk::Notebook::new();
+        for (title, page) in [("General", &column), ("Theme and colors", &look)] {
+            let label = gtk::Label::new(Some(title));
+            let flash = label.clone();
+            let click = gtk::GestureClick::new();
+            click.connect_released(move |_, _, _, _| crate::ui::shell::blink_widget(flash.upcast_ref()));
+            label.add_controller(click);
+            tabs.append_page(&scrolled(page), Some(&label));
+        }
+        // A click on the open tab does not switch page, so the label blinks on click as well.
+        tabs.connect_switch_page(|tabs, page, _| {
+            if let Some(tab) = tabs.tab_label(page) {
+                crate::ui::shell::blink_widget(&tab);
+            }
+        });
+        win.set_child(Some(&tabs));
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let keys_win = win.clone();
@@ -403,6 +396,11 @@ impl App {
             icons,
             syntax,
             flash: flash_switch,
+            overrides,
+            background_color,
+            cursor_color,
+            cursor_text_color,
+            mark_color,
             image,
             clear,
             stretch,
@@ -437,7 +435,8 @@ impl App {
     }
 
     // Written next to the config so an external `omarchy/theme-set` and this picker agree on the last choice.
-    pub(in crate::ui::app) fn set_theme(&mut self, name: String) {
+    pub(in crate::ui::app) fn set_theme(&mut self, name: String, sender: &ComponentSender<Self>) {
+        let before = theme::active_name(&self.cfg.theme, &config::active_theme_path());
         if self.cfg.theme != name {
             self.cfg.theme = name.clone();
             let _ = config::save(&self.cfg);
@@ -445,7 +444,53 @@ impl App {
         let _ = std::fs::write(config::active_theme_path(), format!("{name}\n"));
         self.restyle();
         self.paint_theme();
+        self.paint_colors();
         self.note_preview_target();
+        if before != name {
+            self.warn_kept_colors(&name, sender);
+        }
+    }
+
+    // Custom colors are not touched by a theme switch. Say so, and offer to drop them.
+    fn warn_kept_colors(&self, name: &str, sender: &ComponentSender<Self>) {
+        let kept = self.cfg.color_overrides();
+        let Some(parent) = self.settings.as_ref().map(|ui| ui.window.clone()).filter(|_| !kept.is_empty()) else { return };
+        let dialog = gtk::AlertDialog::builder()
+            .modal(true)
+            .message(format!("Theme changed to {}", theme::label(name)))
+            .detail(format!("Your own colors still apply on top of it: {}.", kept.join(", ")))
+            .buttons(["Keep my colors", "Use the theme's colors"])
+            .default_button(0)
+            .cancel_button(0)
+            .build();
+        let tx = sender.input_sender().clone();
+        dialog.choose(Some(&parent), None::<&gtk::gio::Cancellable>, move |choice| {
+            if matches!(choice, Ok(1)) {
+                tx.emit(Msg::BackgroundColor(String::new()));
+                tx.emit(Msg::CursorColor(String::new()));
+                tx.emit(Msg::CursorTextColor(String::new()));
+                tx.emit(Msg::MarkColor(String::new()));
+            }
+        });
+    }
+
+    pub(in crate::ui::app) fn theme_palette(&self) -> Palette {
+        theme::load_named(&theme::active_name(&self.cfg.theme, &config::active_theme_path()))
+    }
+
+    // Shows the override when there is one, else the theme's color, and which colors are overridden.
+    pub(in crate::ui::app) fn paint_colors(&self) {
+        let Some(ui) = &self.settings else { return };
+        let palette = self.theme_palette();
+        for ((button, reset), theme_color, custom) in [
+            (&ui.background_color, &palette.background, &self.cfg.background_color),
+            (&ui.cursor_color, &palette.cursor, &self.cfg.cursor_color),
+            (&ui.cursor_text_color, &palette.cursor_text, &self.cfg.cursor_text_color),
+            (&ui.mark_color, &palette.mark, &self.cfg.mark_color),
+        ] {
+            paint_color(button, reset, theme_color, custom);
+        }
+        ui.overrides.set_text(&overrides_text(&self.cfg));
     }
 
     pub(in crate::ui::app) fn paint_theme(&self) {
@@ -671,21 +716,41 @@ impl App {
     }
 
     pub(in crate::ui::app) fn set_background_color(&mut self, color: String) {
-        if self.cfg.background_color == color {
+        if same_color(&self.cfg.background_color, &self.theme_palette().background, &color) {
             return;
         }
         self.cfg.background_color = color;
-        let _ = config::save(&self.cfg);
-        self.restyle();
+        self.colors_changed();
     }
 
     pub(in crate::ui::app) fn set_cursor_color(&mut self, color: String) {
-        if self.cfg.cursor_color == color {
+        if same_color(&self.cfg.cursor_color, &self.theme_palette().cursor, &color) {
             return;
         }
         self.cfg.cursor_color = color;
+        self.colors_changed();
+    }
+
+    pub(in crate::ui::app) fn set_cursor_text_color(&mut self, color: String) {
+        if same_color(&self.cfg.cursor_text_color, &self.theme_palette().cursor_text, &color) {
+            return;
+        }
+        self.cfg.cursor_text_color = color;
+        self.colors_changed();
+    }
+
+    pub(in crate::ui::app) fn set_mark_color(&mut self, color: String) {
+        if same_color(&self.cfg.mark_color, &self.theme_palette().mark, &color) {
+            return;
+        }
+        self.cfg.mark_color = color;
+        self.colors_changed();
+    }
+
+    fn colors_changed(&self) {
         let _ = config::save(&self.cfg);
         self.restyle();
+        self.paint_colors();
     }
 
     pub(in crate::ui::app) fn set_cursor_alpha(&mut self, alpha: u8) {
@@ -727,6 +792,81 @@ pub(in crate::ui::app) fn hex_rgb(rgba: &gtk::gdk::RGBA) -> String {
         (rgba.green() * 255.0).round() as u8,
         (rgba.blue() * 255.0).round() as u8,
     )
+}
+
+// A pick equal to what the row already shows is the repaint echo, not a new override.
+fn same_color(custom: &str, theme_color: &str, picked: &str) -> bool {
+    picked.eq_ignore_ascii_case(custom) || (custom.is_empty() && picked.eq_ignore_ascii_case(theme_color))
+}
+
+fn overrides_text(cfg: &config::Config) -> String {
+    let own = cfg.color_overrides();
+    if own.is_empty() { "No custom colors. Everything follows the theme.".into() } else { format!("Your own colors on top of the theme: {}.", own.join(", ")) }
+}
+
+fn note(text: &str) -> gtk::Label {
+    let label = gtk::Label::new(Some(text));
+    label.set_wrap(true);
+    label.set_xalign(0.0);
+    label.set_max_width_chars(60);
+    label.set_margin_start(12);
+    label.set_margin_end(12);
+    label.set_margin_top(4);
+    label
+}
+
+fn section(title: &str) -> gtk::Label {
+    let label = gtk::Label::new(Some(title));
+    label.add_css_class("dialog-title");
+    label.set_xalign(0.0);
+    label.set_margin_start(12);
+    label.set_margin_top(16);
+    label
+}
+
+fn scrolled(page: &gtk::Box) -> gtk::ScrolledWindow {
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_propagate_natural_height(true);
+    scroll.set_max_content_height(640);
+    scroll.set_child(Some(page));
+    scroll
+}
+
+// A color row with a Reset that hands the color back to the theme.
+fn color_picker(
+    title: &str,
+    theme_color: &str,
+    custom: &str,
+    msg: fn(String) -> Msg,
+    tx: relm4::Sender<Msg>,
+) -> (gtk::Box, (gtk::ColorDialogButton, gtk::Button)) {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    row.add_css_class("settings-row");
+    let name = gtk::Label::new(Some(title));
+    name.set_xalign(0.0);
+    name.set_hexpand(true);
+    let button = gtk::ColorDialogButton::new(Some(gtk::ColorDialog::new()));
+    let reset = gtk::Button::with_label("Reset");
+    paint_color(&button, &reset, theme_color, custom);
+    let tx_pick = tx.clone();
+    button.connect_rgba_notify(move |btn| {
+        crate::ui::shell::blink_widget(btn.upcast_ref());
+        tx_pick.emit(msg(hex_rgb(&btn.rgba())));
+    });
+    crate::ui::shell::on_click(&reset, move || tx.emit(msg(String::new())));
+    row.append(&name);
+    row.append(&button);
+    row.append(&reset);
+    (row, (button, reset))
+}
+
+fn paint_color(button: &gtk::ColorDialogButton, reset: &gtk::Button, theme_color: &str, custom: &str) {
+    let shown = if custom.is_empty() { theme_color } else { custom };
+    if let Ok(rgba) = gtk::gdk::RGBA::parse(shown) {
+        button.set_rgba(&rgba);
+    }
+    reset.set_sensitive(!custom.is_empty());
 }
 
 pub(in crate::ui::app) fn editor_picker(configured: &str, tx: relm4::Sender<Msg>) -> (gtk::Box, gtk::DropDown, Rc<RefCell<Vec<String>>>, Rc<Cell<bool>>) {
@@ -854,6 +994,10 @@ pub(in crate::ui::app) fn fill_theme(drop: &gtk::DropDown, ids: &Rc<RefCell<Vec<
 
 pub(in crate::ui::app) fn focused_control(win: &gtk::Window) -> bool {
     let Some(mut widget) = relm4::gtk::prelude::GtkWindowExt::focus(win) else { return false };
+    // Focus on the tab strip itself: arrows switch tab. Only checked here, since every control is inside the notebook.
+    if widget.is::<gtk::Notebook>() {
+        return true;
+    }
     loop {
         if widget.downcast_ref::<gtk::Scale>().is_some()
             || widget.downcast_ref::<gtk::ColorDialogButton>().is_some()
@@ -995,9 +1139,6 @@ fn command_button(
 pub(in crate::ui::app) fn tool_row(title: &str, hint: &str, value: &str, placeholder: &str, tx: relm4::Sender<Msg>, seven: bool) -> gtk::Box {
     let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
     column.add_css_class("settings-row");
-    column.set_margin_start(12);
-    column.set_margin_end(12);
-    column.set_margin_top(8);
     let name = gtk::Label::new(Some(title));
     name.set_xalign(0.0);
     let entry = gtk::Entry::new();

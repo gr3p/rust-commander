@@ -64,17 +64,13 @@ Alt+F9 unpacks a zip, rar or tar into the other panel and shows the file list. S
 
 Ctrl+1 to Ctrl+9 selects a drive in the active panel. The number is shown before the icon. Hovering a drive shows its free space. Ctrl+I, or a right click on a drive, opens a disk info window with usage, file system, device, label, UUID, mount options and inodes. F9 opens a shell in the other panel in the active panel's directory. The bottom button reads F9 Shell, and F9 Shell Toggle while that shell is showing. F9 hides it and leaves it running. Ctrl+F9 opens another shell. Each shell is a numbered button to the right of the drives; Alt+1 to Alt+9 switches to it. Ctrl+W in the shell closes that shell and returns to the file list. `exit` does the same. Ctrl+W in the file list still closes a tab. Ctrl+F3 name, Ctrl+F4 extension, Ctrl+F5 time, Ctrl+F6 size. Alt+F1 and Alt+F2 are places. Alt+F3 is the external viewer. Ctrl+Q previews. There, left and right change the image in that folder. Ctrl+T new tab, Ctrl+W close tab, Alt+left and Alt+right are history.
 
-## Tests
-
-`scripts/test-sandbox.sh` builds on the host and runs the acceptance tests in bubblewrap. The writable area is a 256 MiB tmpfs. The real home directory is not mounted. Each file test applies landlock to its fixture before anything is changed.
-
-`scripts/gui-smoke.sh` does the same against the window and binds only the Wayland socket.
-
 ## Not included
 
 Windows builds, network neighborhood, parallel port, USB cable, UAC, Windows context menu, WLX/WCX/WDX/WFX, and IrfanView/XnView. Search looks at file names, not file contents. An archive is unpacked. It is not opened as a folder.
 
 ## Themes
+
+The theme is the base for fonts and colors. Settings (F12) has two tabs: General, and Theme and colors. Under Colors you can override the background color, the cursor color, the cursor text color (the text on the cursor bar only) and the mark color (files marked with Space). Each has a Reset that hands it back to the theme. A theme also brings its own cursor color and cursor text color. Your own colors stay when you switch theme; a dialog says so and lets you drop them.
 
 Settings (F12) has a Theme dropdown. The first entry, `omarchy`, follows the theme Omarchy has applied: it reads `~/.local/state/omarchy/current/theme/colors.toml` (the same names, aliases and light/dark mode as `omarchy-theme-color`) and is the default. Next come the built-in themes, then any theme under `~/.config/omarchy/themes` or `/usr/share/omarchy/themes` (a user theme with the same name wins). Picking one saves it to `config.toml` and to `~/.config/rust-commander/active-theme`. Adding a built-in theme is one entry in `src/theme.rs`.
 

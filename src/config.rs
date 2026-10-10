@@ -61,6 +61,10 @@ pub struct Config {
     pub syntax_highlight: bool,
     #[serde(default)]
     pub cursor_color: String,
+    #[serde(default)]
+    pub cursor_text_color: String,
+    #[serde(default)]
+    pub mark_color: String,
     #[serde(default = "default_cursor_alpha")]
     pub cursor_alpha: u8,
 }
@@ -113,12 +117,28 @@ impl Default for Config {
             flash_feedback: true,
             syntax_highlight: true,
             cursor_color: String::new(),
+            cursor_text_color: String::new(),
+            mark_color: String::new(),
             cursor_alpha: default_cursor_alpha(),
         }
     }
 }
 
 impl Config {
+    // Colors set by the user on top of the theme. An empty value follows the theme.
+    pub fn color_overrides(&self) -> Vec<&'static str> {
+        [
+            ("background color", &self.background_color),
+            ("cursor color", &self.cursor_color),
+            ("cursor text color", &self.cursor_text_color),
+            ("mark color", &self.mark_color),
+        ]
+        .into_iter()
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(name, _)| name)
+        .collect()
+    }
+
     pub fn sort_key(&self) -> SortKey {
         SortKey::from_config(&self.sort)
     }
