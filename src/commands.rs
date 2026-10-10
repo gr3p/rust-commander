@@ -417,7 +417,7 @@ const CATALOG: &[Item] = &[
     Item { act: Act::Up, keys: "BackSpace", label: "Up", group: Group::Navigate },
     Item { act: Act::Back, keys: "Alt+Left", label: "Back", group: Group::Navigate },
     Item { act: Act::Forward, keys: "Alt+Right", label: "Forward", group: Group::Navigate },
-    Item { act: Act::Mirror, keys: "Ctrl+Left/Right", label: "Mirror folder", group: Group::Navigate },
+    Item { act: Act::Mirror, keys: "Ctrl+Left/Right", label: "Open in other panel", group: Group::Navigate },
     Item { act: Act::PlacesLeft, keys: "Alt+F1", label: "Left places", group: Group::Navigate },
     Item { act: Act::PlacesRight, keys: "Alt+F2", label: "Right places", group: Group::Navigate },
     Item { act: Act::Drive, keys: "Ctrl+1…9", label: "Drive", group: Group::Navigate },

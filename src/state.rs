@@ -292,7 +292,13 @@ impl AppState {
 
     pub fn mirror_to_other(&mut self) -> (PaneId, PathBuf, u64) {
         let src = self.active;
-        let path = self.tab(src).path.clone();
+        let current = self.tab(src).path.clone();
+        // The folder under the cursor. A file keeps this panel's own directory.
+        let path = self
+            .cursor_entry(src)
+            .filter(|entry| entry.is_dir())
+            .map(|entry| listing::entry_path(&current, entry))
+            .unwrap_or(current);
         let dest = src.other();
         let token = self.navigate(dest, path.clone(), true);
         (dest, path, token)
@@ -536,6 +542,32 @@ mod tests {
 
     fn dir(name: &str) -> Entry {
         Entry { flags: DIR, ..file(name) }
+    }
+
+    #[test]
+    fn ctrl_arrow_opens_the_folder_under_the_cursor() {
+        let mut state = AppState::new("/left".into(), "/right".into());
+        state.tab_mut(PaneId::Left).entries = vec![Entry::dotdot(), dir("tmp"), file("swap.img")];
+        state.set_cursor(1);
+        let (dest, path, token) = state.mirror_to_other();
+        assert_eq!(dest, PaneId::Right);
+        assert_eq!(path, PathBuf::from("/left/tmp"));
+        assert_eq!(state.tab(PaneId::Left).cursor, 1);
+        assert!(state.tab(PaneId::Left).marked.is_empty());
+        assert!(state.apply_listing(dest, 0, token, vec![Entry::dotdot()]));
+        assert_eq!(state.tab(PaneId::Right).path, PathBuf::from("/left/tmp"));
+
+        state.set_cursor(2);
+        let (_, path, _) = state.mirror_to_other();
+        assert_eq!(path, PathBuf::from("/left"));
+
+        let mut state = AppState::new("/left".into(), "/home".into());
+        state.active = PaneId::Right;
+        state.tab_mut(PaneId::Right).entries = vec![Entry::dotdot(), dir("marcus")];
+        state.set_cursor(1);
+        let (dest, path, _) = state.mirror_to_other();
+        assert_eq!(dest, PaneId::Left);
+        assert_eq!(path, PathBuf::from("/home/marcus"));
     }
 
     #[test]

@@ -1,10 +1,8 @@
-# Rust Commander
-
-<p align="center">
-  <img src="img/rust-commander.png" alt="Rust Commander" width="320">
-</p>
+# <img src="img/rust-commander.png" alt="" height="40" align="middle"> Rust Commander
 
 A dual-pane file manager for Linux, in the tradition of Total Commander on Windows and Midnight Commander in the terminal. It keeps the keyboard-driven F-key workflow and adds a native GTK4 window written in Rust, built-in terminals, image and text viewers, and themes that follow your desktop.
+
+<img src="img/screenshot.png" alt="Rust Commander with two file panels" width="900">
 
 ## Install
 
@@ -29,7 +27,7 @@ For `.7z` and `.rar` archives, also install 7-Zip (`p7zip-full` on Ubuntu, `p7zi
 
 ## What it does
 
-**Two panels, one source.** The panel with focus is the source, the other is the target. F5 copies, F6 moves, F7 makes a folder, F8 sends to the trash and Shift+F8 deletes for good. Each panel has tabs, history, bookmarks, a drive list with free space on hover, and a disk info window with file system, UUID, mount options and inodes. Tab switches panel, Space marks and Insert marks and moves on.
+**Two panels, one source.** The panel with focus is the source, the other is the target. F5 copies, F6 moves, F7 makes a folder, F8 sends to the trash and Shift+F8 deletes for good. Each panel has tabs, history, bookmarks, a drive list with free space on hover, and a disk info window with file system, UUID, mount options and inodes. Tab switches panel, Space marks and Insert marks and moves on. Ctrl+Right from the left panel, or Ctrl+Left from the right, opens the folder under the cursor in the other panel. Marking it first is not required.
 
 **Copy and move.** Copies and moves can wait in a queue and show progress. A copy never leaves a half-written file under the real name: it writes to a temporary file and renames it when complete. Shift+F5 copies under a new name, Shift+F6 renames, Shift+F7 makes a symbolic or hard link, and Ctrl+Delete overwrites a file once before deleting it. Alt+Enter shows properties and permissions, and can calculate the size of a folder.
 

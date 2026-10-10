@@ -796,7 +796,8 @@ impl App {
                     self.touch(id);
                     self.note_preview_target();
                 }
-                Key::Left | Key::KP_Left | Key::Right | Key::KP_Right => self.show_active_on_other(sender),
+                Key::Left | Key::KP_Left if self.state.active == PaneId::Right => self.show_active_on_other(sender),
+                Key::Right | Key::KP_Right if self.state.active == PaneId::Left => self.show_active_on_other(sender),
                 _ => {}
             }
             return;
@@ -2069,6 +2070,8 @@ impl App {
         let (dest, path, token) = self.state.mirror_to_other();
         let tab = self.state.pane(dest).active;
         self.spawn_load(sender, dest, tab, path, token);
+        // The other pane has no accent, so the blink must not require pane-active.
+        shell::blink_frame(&self.shell.panes[dest.index()].frame, dest.index(), false);
     }
 
     fn move_list(&mut self, delta: isize) {
