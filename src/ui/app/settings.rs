@@ -352,19 +352,20 @@ impl App {
         column.append(&tool_row("RAR", rust_commander::pack::RAR_HINT, &self.cfg.rar, "/usr/bin/rar", tx.clone(), false));
         column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         column.append(&commands_row(tx.clone()));
+        let about = about_page();
         let tabs = gtk::Notebook::new();
-        for (title, page) in [("General", &column), ("Theme and colors", &look)] {
+        for (title, page) in [("General", &column), ("Theme and colors", &look), ("About", &about)] {
             let label = gtk::Label::new(Some(title));
             let flash = label.clone();
             let click = gtk::GestureClick::new();
-            click.connect_released(move |_, _, _, _| crate::ui::shell::blink_widget(flash.upcast_ref()));
+            click.connect_released(move |_, _, _, _| crate::ui::shell::blink_tab(flash.upcast_ref()));
             label.add_controller(click);
             tabs.append_page(&scrolled(page), Some(&label));
         }
-        // A click on the open tab does not switch page, so the label blinks on click as well.
+        // A click on the open tab does not switch page, so the tab blinks on click as well.
         tabs.connect_switch_page(|tabs, page, _| {
             if let Some(tab) = tabs.tab_label(page) {
-                crate::ui::shell::blink_widget(&tab);
+                crate::ui::shell::blink_tab(&tab);
             }
         });
         win.set_child(Some(&tabs));
@@ -813,6 +814,38 @@ fn note(text: &str) -> gtk::Label {
     label.set_margin_end(12);
     label.set_margin_top(4);
     label
+}
+
+fn about_page() -> gtk::Box {
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let bytes = gtk::glib::Bytes::from_static(crate::ui::shell::LOGO_PNG);
+    if let Ok(texture) = gtk::gdk::Texture::from_bytes(&bytes) {
+        let logo = gtk::Picture::for_paintable(&texture);
+        logo.set_can_shrink(true);
+        logo.set_content_fit(gtk::ContentFit::Contain);
+        logo.set_halign(gtk::Align::Center);
+        logo.set_height_request(300);
+        logo.set_margin_top(8);
+        page.append(&logo);
+    }
+    let title = gtk::Label::new(Some("Rust Commander"));
+    title.add_css_class("about-title");
+    title.set_halign(gtk::Align::Center);
+    title.set_margin_top(4);
+    page.append(&title);
+    let version = gtk::Label::new(Some(rust_commander::version()));
+    version.add_css_class("about-version");
+    version.set_halign(gtk::Align::Center);
+    version.set_margin_bottom(8);
+    page.append(&version);
+    page.append(&note(
+        "Dual-pane file manager for Linux. The panel with focus is the source. It copies and moves files, views and edits text, shows images, and packs and unpacks archives.",
+    ));
+    page.append(&section("License"));
+    page.append(&note("MIT License. Copyright (c) 2026 Marcus Wallén."));
+    page.append(&note("Free to use, copy, modify and share. The program is provided as is, without warranty."));
+    page.set_margin_bottom(24);
+    page
 }
 
 fn section(title: &str) -> gtk::Label {

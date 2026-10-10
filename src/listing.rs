@@ -146,13 +146,14 @@ pub fn wildcard_match(pattern: &[char], name: &str) -> bool {
     let (mut pattern_pos, mut name_pos) = (0, 0);
     let (mut star, mut retry_pos) = (None, 0);
     while name_pos < name.len() {
-        if pattern_pos < pattern.len() && (pattern[pattern_pos] == '?' || pattern[pattern_pos] == name[name_pos]) {
-            pattern_pos += 1;
-            name_pos += 1;
-        } else if pattern.get(pattern_pos) == Some(&'*') {
+        // `*` is checked first, so a `*` in the name cannot use it up as a literal.
+        if pattern.get(pattern_pos) == Some(&'*') {
             star = Some(pattern_pos);
             pattern_pos += 1;
             retry_pos = name_pos;
+        } else if pattern_pos < pattern.len() && (pattern[pattern_pos] == '?' || pattern[pattern_pos] == name[name_pos]) {
+            pattern_pos += 1;
+            name_pos += 1;
         } else if let Some(star_pos) = star {
             retry_pos += 1;
             name_pos = retry_pos;
@@ -392,5 +393,23 @@ pub fn entry_path(dir: &Path, entry: &Entry) -> std::path::PathBuf {
         dir.join(&**raw)
     } else {
         dir.join(entry.name.as_ref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wildcard_match;
+
+    fn hit(pattern: &str, name: &str) -> bool {
+        wildcard_match(&pattern.chars().collect::<Vec<_>>(), name)
+    }
+
+    #[test]
+    fn star_in_the_name_still_matches_a_star_pattern() {
+        assert!(hit("a*", "a*b"));
+        assert!(hit("*", "*abc"));
+        assert!(hit("*.txt", "*x.txt"));
+        assert!(hit("a?c", "abc"));
+        assert!(!hit("*.txt", "a.rs"));
     }
 }

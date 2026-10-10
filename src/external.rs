@@ -208,6 +208,8 @@ fn in_terminal(cmd: Vec<OsString>, exists: &impl Fn(&str) -> bool) -> Vec<OsStri
     let mut parts = vec![OsString::from(term)];
     match term {
         "gnome-terminal" => parts.push("--".into()),
+        // Its -e takes one string. -x takes the rest of argv.
+        "xfce4-terminal" => parts.push("-x".into()),
         "kitty" | "foot" => {}
         _ => parts.push("-e".into()),
     }

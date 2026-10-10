@@ -51,6 +51,11 @@ impl App {
         let (attr_page, octal, owner, group, uids, gids) = attr_page(&facts);
         notebook.append_page(&scrolled(&attr_page), Some(&gtk::Label::new(Some("Attributes"))));
         notebook.append_page(&scrolled(&details_page(&path, &name, mime.as_str())), Some(&gtk::Label::new(Some("Details"))));
+        notebook.connect_switch_page(|notebook, page, _| {
+            if let Some(tab) = notebook.tab_label(page) {
+                crate::ui::shell::blink_tab(&tab);
+            }
+        });
         let error = gtk::Label::new(None);
         error.set_xalign(0.0);
         error.set_wrap(true);

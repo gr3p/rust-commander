@@ -41,8 +41,7 @@ pub fn run(options: Options, cancelled: impl Fn() -> bool, mut emit: impl FnMut(
     }
     let needle = fold(&options.query, options.case_sensitive);
     let pattern = (needle.contains('*') || needle.contains('?')).then(|| needle.chars().collect::<Vec<_>>());
-    // File bytes are folded per byte, so the needle must be too.
-    let text_needle = if options.case_sensitive { options.text.clone() } else { options.text.to_ascii_lowercase() };
+    let text_needle = if options.case_sensitive { options.text.clone() } else { options.text.to_lowercase() };
     let mut stack = vec![options.root.clone()];
     let mut errors = 0;
     let mut found = 0;
@@ -281,18 +280,30 @@ fn file_contains(path: &Path, needle: &[u8], fold: bool, cancelled: &impl Fn(&At
         }
         // Keep the tail across reads, also when a read is shorter than the needle.
         carry.extend_from_slice(&buf[..n]);
-        let cut = carry.len().saturating_sub(needle.len().saturating_sub(1));
+        let cut = carry.len().saturating_sub(carry_keep(needle, fold));
         carry.drain(..cut);
     }
 }
 
-fn window_has(carry: &[u8], next: &[u8], needle: &[u8], fold: bool) -> bool {
+// Bytes kept from the last read so a match across two reads is still found.
+pub(crate) fn carry_keep(needle: &[u8], fold: bool) -> usize {
+    // A non-ASCII letter can take three times the bytes of its lowercase form (the Kelvin sign is k).
+    if fold && !needle.is_ascii() { needle.len() * 3 } else { needle.len().saturating_sub(1) }
+}
+
+/// `needle` is already lowercased when `fold` is set.
+pub(crate) fn window_has(carry: &[u8], next: &[u8], needle: &[u8], fold: bool) -> bool {
     if needle.is_empty() {
         return true;
     }
     let mut hay = Vec::with_capacity(carry.len() + next.len());
     hay.extend_from_slice(carry);
     hay.extend_from_slice(next);
+    // Å and å differ in more than one byte, so a non-ASCII needle is folded as text.
+    if fold && !needle.is_ascii() {
+        let hay = String::from_utf8_lossy(&hay).to_lowercase();
+        return std::str::from_utf8(needle).is_ok_and(|needle| hay.contains(needle));
+    }
     if hay.len() < needle.len() {
         return false;
     }
@@ -400,6 +411,21 @@ mod tests {
         options.case_sensitive = true;
         options.text = "Blåbär".into();
         assert_eq!(hits(options), vec![dir.join("a.txt")]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn case_blind_text_folds_non_ascii_letters() {
+        let (dir, mut options) = base("fold");
+        fs::write(dir.join("a.txt"), "Hej ÅKE").unwrap();
+        let mut data = vec![b'x'; 64 * 1024 - 2];
+        data.extend_from_slice("BLÅBÄR".as_bytes());
+        fs::write(dir.join("big.txt"), data).unwrap();
+        options.text = "åke".into();
+        assert_eq!(hits(options), vec![dir.join("a.txt")]);
+        let mut options = opts(&dir);
+        options.text = "Blåbär".into();
+        assert_eq!(hits(options), vec![dir.join("big.txt")]);
         let _ = fs::remove_dir_all(&dir);
     }
 

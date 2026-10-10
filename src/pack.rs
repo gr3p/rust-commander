@@ -353,6 +353,10 @@ fn run_tool(
         if bytes.is_empty() || bytes.contains(&b'\n') {
             return Err(Fail::Message(format!("cannot list {}", source.display())));
         }
+        // rar has no switch to read list names literally, so a.txt? would also pack a.txt1.
+        if format == Format::Rar && bytes.iter().any(|b| matches!(b, b'*' | b'?')) {
+            return Err(Fail::Message(format!("RAR cannot pack a name with * or ?: {}", rel.display())));
+        }
         body.extend_from_slice(bytes);
         body.push(b'\n');
     }
@@ -363,7 +367,8 @@ fn run_tool(
         cmd.current_dir(cwd).stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::piped());
         match format {
             Format::SevenZ => {
-                cmd.args(["a", "-y", "-bso0", "-bsp1", "-bse2"]).arg(format!("-mx={level}"));
+                // -spd reads list names literally, so a?b.txt does not also pack axb.txt.
+                cmd.args(["a", "-y", "-spd", "-bso0", "-bsp1", "-bse2"]).arg(format!("-mx={level}"));
                 if password.is_some() {
                     cmd.args(["-p", "-mhe=on"]);
                 }
@@ -701,6 +706,26 @@ mod tests {
         assert!(!locked.status.success());
         let open = Command::new(&bin).args(["l", "-phemligt", secret.to_str().unwrap()]).output().unwrap();
         assert!(String::from_utf8_lossy(&open.stdout).contains("note.txt"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wildcard_characters_in_a_name_pack_only_that_file() {
+        let dir = tmp("wild");
+        for name in ["a?b.txt", "axb.txt", "ayb.txt"] {
+            fs::write(dir.join(name), name).unwrap();
+        }
+        let cancel = AtomicBool::new(false);
+        let opts = Options { volume: None, level: 5, password: None };
+        let rar = pack(Format::Rar, Some(Path::new("/bin/false")), &[dir.join("a?b.txt")], &dir, &dir.join("out.rar"), &opts, &cancel, &mut |_| {});
+        assert!(rar.is_err_and(|err| err.to_string().contains("* or ?")));
+        if let Some(bin) = find_program("", names(Format::SevenZ)) {
+            let dest = dir.join("out.7z");
+            pack(Format::SevenZ, Some(&bin), &[dir.join("a?b.txt")], &dir, &dest, &opts, &cancel, &mut |_| {}).unwrap();
+            let listed = Command::new(&bin).args(["l", dest.to_str().unwrap()]).output().unwrap();
+            let text = String::from_utf8_lossy(&listed.stdout);
+            assert!(text.contains("a?b.txt") && !text.contains("axb.txt"), "{text}");
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 }

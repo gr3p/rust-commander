@@ -1068,6 +1068,7 @@ pub fn test(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(&Progress),
 ) -> Result<Report, Fail> {
+    progress(&Progress { done: 0, total: 0, current: path.to_path_buf(), note: "Testing archive".into() });
     match extension(path) {
         Some("zip") => test_zip(path, password, cancel, progress),
         Some("rar") => test_rar(path, password, cancel, progress),
@@ -1102,7 +1103,14 @@ pub fn archive_hit(
 
 fn test_zip(path: &Path, password: Option<&str>, cancel: &AtomicBool, progress: &mut dyn FnMut(&Progress)) -> Result<Report, Fail> {
     let mut archive = zip::ZipArchive::new(File::open(path)?)?;
-    let total = archive.len() as u64;
+    let mut total = 0u64;
+    for index in 0..archive.len() {
+        let Ok(file) = archive.by_index_raw(index) else { continue };
+        if !file.is_dir() && !file.is_symlink() {
+            total = total.saturating_add(file.size());
+        }
+    }
+    let mut done = 0u64;
     let mut files = 0u64;
     let mut damaged = Vec::new();
     for index in 0..archive.len() {
@@ -1110,17 +1118,27 @@ fn test_zip(path: &Path, password: Option<&str>, cancel: &AtomicBool, progress: 
             return Ok(Report { cancelled: true, files });
         }
         let name = archive.by_index_raw(index).ok().and_then(|file| zip_name(&file)).unwrap_or_else(|| format!("#{index}"));
-        progress(&Progress { done: files, total, current: PathBuf::from(&name), note: String::new() });
         match zip_at(&mut archive, index, password) {
             Ok(mut file) => {
                 if file.is_dir() || file.is_symlink() {
                     continue;
                 }
+                let size = file.size();
+                let base = done;
+                let current = PathBuf::from(&name);
+                let mut sent = done;
+                report_test(done, &mut sent, total, &current, progress, true);
                 let mut buf = vec![0u8; 64 * 1024];
                 loop {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Ok(Report { cancelled: true, files });
+                    }
                     match file.read(&mut buf) {
                         Ok(0) => break,
-                        Ok(_) => {}
+                        Ok(n) => {
+                            done = done.saturating_add(n as u64);
+                            report_test(done, &mut sent, total, &current, progress, false);
+                        }
                         Err(err) => {
                             let fail = Fail::from(err);
                             if matches!(fail, Fail::NeedPassword | Fail::BadPassword) {
@@ -1131,6 +1149,8 @@ fn test_zip(path: &Path, password: Option<&str>, cancel: &AtomicBool, progress: 
                         }
                     }
                 }
+                done = base.saturating_add(size).max(done);
+                report_test(done, &mut sent, total, &current, progress, true);
                 files += 1;
             }
             Err(err @ (Fail::NeedPassword | Fail::BadPassword)) => return Err(err),
@@ -1141,7 +1161,13 @@ fn test_zip(path: &Path, password: Option<&str>, cancel: &AtomicBool, progress: 
 }
 
 fn test_tar(path: &Path, cancel: &AtomicBool, progress: &mut dyn FnMut(&Progress)) -> Result<Report, Fail> {
+    let total = match tar_span(path, None, cancel) {
+        Ok(None) => return Ok(Report { cancelled: true, files: 0 }),
+        Ok(Some((total, _))) => total,
+        Err(_) => 0,
+    };
     let mut archive = open_tar(path)?;
+    let mut done = 0u64;
     let mut files = 0u64;
     let mut damaged = Vec::new();
     for entry in archive.entries()? {
@@ -1155,25 +1181,47 @@ fn test_tar(path: &Path, cancel: &AtomicBool, progress: &mut dyn FnMut(&Progress
                 break;
             }
         };
-        let name = classify(&entry)?.map(|seen| match seen {
-            Seen::File { name, .. } | Seen::Dir { name } | Seen::Skip { name, .. } => name,
-        });
-        let Some(name) = name else { continue };
-        progress(&Progress { done: files, total: 0, current: PathBuf::from(&name), note: String::new() });
+        let seen = classify(&entry)?;
+        let (name, size) = match seen {
+            Some(Seen::File { name, size }) => (name, size),
+            Some(Seen::Dir { name } | Seen::Skip { name, .. }) => (name, 0),
+            None => continue,
+        };
+        let current = PathBuf::from(&name);
+        let base = done;
+        let mut sent = done;
+        report_test(done, &mut sent, total, &current, progress, true);
         let mut buf = vec![0u8; 64 * 1024];
         loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(Report { cancelled: true, files });
+            }
             match entry.read(&mut buf) {
                 Ok(0) => break,
-                Ok(_) => {}
+                Ok(n) => {
+                    done = done.saturating_add(n as u64);
+                    report_test(done, &mut sent, total, &current, progress, false);
+                }
                 Err(err) => {
                     damaged.push(format!("{name} ({err})"));
                     break;
                 }
             }
         }
+        done = base.saturating_add(size).max(done);
+        report_test(done, &mut sent, total, &current, progress, true);
         files += 1;
     }
     finish(files, damaged)
+}
+
+// Byte steps stay large enough that the progress channel does not fill with one message per read.
+fn report_test(done: u64, sent: &mut u64, total: u64, current: &Path, progress: &mut dyn FnMut(&Progress), force: bool) {
+    if !force && done.saturating_sub(*sent) < 256 * 1024 {
+        return;
+    }
+    *sent = done;
+    progress(&Progress { done, total, current: current.to_path_buf(), note: current.display().to_string() });
 }
 
 fn test_rar(path: &Path, password: Option<&str>, cancel: &AtomicBool, progress: &mut dyn FnMut(&Progress)) -> Result<Report, Fail> {
@@ -1182,9 +1230,19 @@ fn test_rar(path: &Path, password: Option<&str>, cancel: &AtomicBool, progress: 
     if listed.needs_password && password.is_none() {
         return Err(Fail::NeedPassword);
     }
+    let total = listed.members.iter().filter(|member| !member.dir).map(|member| member.size).fold(0u64, u64::saturating_add);
+    let job = RarTest {
+        cancel,
+        progress: RefCell::new(progress),
+        total,
+        base: Cell::new(0),
+        seen: Cell::new(0),
+        sent: Cell::new(0),
+        name: RefCell::new(PathBuf::new()),
+    };
+    // Declared after `job` so the archive closes before the callback context goes away.
     let handle = open_rar_extract(&owned, password)?;
-    unsafe { unrar_ng_sys::RARSetCallback(handle.0, Some(on_test_event), cancel as *const AtomicBool as unrar_ng_sys::LPARAM) };
-    let total = listed.members.iter().filter(|member| !member.dir).count() as u64;
+    unsafe { unrar_ng_sys::RARSetCallback(handle.0, Some(on_test_event), &raw const job as unrar_ng_sys::LPARAM) };
     let mut header = Box::new(unrar_ng_sys::HeaderDataEx::default());
     let mut files = 0u64;
     let mut damaged = Vec::new();
@@ -1198,37 +1256,85 @@ fn test_rar(path: &Path, password: Option<&str>, cancel: &AtomicBool, progress: 
             code => return Err(rar_fail(code, unrar_ng::error::When::Read)),
         }
         let dir = header.flags & unrar_ng_sys::RHDF_DIRECTORY != 0;
+        let size = ((header.unp_size_high as u64) << 32) | header.unp_size as u64;
         let name = rar_header_name(&header).unwrap_or_else(|| "?".into());
         let op = if dir || rar_symlink(header.file_attr) { unrar_ng_sys::RAR_SKIP } else { unrar_ng_sys::RAR_TEST };
+        if op == unrar_ng_sys::RAR_TEST {
+            *job.name.borrow_mut() = PathBuf::from(&name);
+            job.seen.set(0);
+            job.sent.set(0);
+            job.report();
+        }
         let code = unsafe { unrar_ng_sys::RARProcessFile(handle.0, op, ptr::null(), ptr::null()) };
         if op == unrar_ng_sys::RAR_SKIP {
             continue;
         }
         if code == unrar_ng_sys::ERAR_SUCCESS {
             files += 1;
+            let end = job.base.get().saturating_add(size).max(job.base.get().saturating_add(job.seen.get()));
+            job.base.set(end);
+            job.seen.set(0);
+            job.report();
         } else if cancel.load(Ordering::Relaxed) {
             return Ok(Report { cancelled: true, files });
         } else if code == unrar_ng_sys::ERAR_BAD_DATA && header.flags & unrar_ng_sys::RHDF_ENCRYPTED != 0 && password.is_some() {
             return Err(Fail::BadPassword);
         } else {
-            damaged.push(name.clone());
+            damaged.push(name);
         }
-        progress(&Progress { done: files, total, current: PathBuf::from(&name), note: String::new() });
     }
     finish(files, damaged)
 }
 
+struct RarTest<'a> {
+    cancel: &'a AtomicBool,
+    progress: RefCell<&'a mut dyn FnMut(&Progress)>,
+    total: u64,
+    base: Cell<u64>,
+    seen: Cell<u64>,
+    sent: Cell<u64>,
+    name: RefCell<PathBuf>,
+}
+
+impl RarTest<'_> {
+    fn report(&self) {
+        let done = self.base.get().saturating_add(self.seen.get());
+        let current = self.name.borrow().clone();
+        let note = current.display().to_string();
+        (self.progress.borrow_mut())(&Progress { done, total: self.total, current, note });
+    }
+
+    fn data(&self, count: u64) -> c_int {
+        if self.cancel.load(Ordering::Relaxed) {
+            return -1;
+        }
+        let seen = self.seen.get().saturating_add(count);
+        self.seen.set(seen);
+        if self.sent.get() == 0 || seen.saturating_sub(self.sent.get()) >= 256 * 1024 {
+            self.sent.set(seen);
+            self.report();
+        }
+        if self.cancel.load(Ordering::Relaxed) { -1 } else { 0 }
+    }
+}
+
 extern "C" fn on_test_event(
-    _msg: unrar_ng_sys::UINT,
+    msg: unrar_ng_sys::UINT,
     user: unrar_ng_sys::LPARAM,
     _p1: unrar_ng_sys::LPARAM,
-    _p2: unrar_ng_sys::LPARAM,
+    p2: unrar_ng_sys::LPARAM,
 ) -> c_int {
     if user == 0 {
         return 0;
     }
-    let cancel = unsafe { &*(user as *const AtomicBool) };
-    if cancel.load(Ordering::Relaxed) { -1 } else { 0 }
+    let job = unsafe { &*(user as *const RarTest) };
+    if job.cancel.load(Ordering::Relaxed) {
+        return -1;
+    }
+    if msg == unrar_ng_sys::UCM_PROCESSDATA {
+        return job.data(p2.max(0) as u64);
+    }
+    0
 }
 
 fn test_7z(
@@ -1238,9 +1344,9 @@ fn test_7z(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(&Progress),
 ) -> Result<Report, Fail> {
-    progress(&Progress { done: 0, total: 0, current: path.to_path_buf(), note: "Testing".into() });
+    let bytes = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
     let mut cmd = Command::new(bin);
-    cmd.arg("t").arg("-y").arg("-bso1").arg("-bsp0");
+    cmd.arg("t").arg("-y").arg("-bso1").arg("-bsp1");
     if password.is_some() {
         cmd.arg("-p");
     }
@@ -1249,16 +1355,31 @@ fn test_7z(
     if let (Some(password), Some(mut input)) = (password, child.stdin.take()) {
         let _ = input.write_all(format!("{password}\n").as_bytes());
     }
-    let (out_tx, out_rx) = mpsc::channel();
-    let (err_tx, err_rx) = mpsc::channel();
-    if let Some(pipe) = child.stdout.take() {
+    let (pct_tx, pct_rx) = mpsc::channel();
+    if let Some(mut pipe) = child.stdout.take() {
         std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let mut pipe = pipe;
-            let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
-            let _ = out_tx.send(buf);
+            let mut buf = [0u8; 256];
+            let mut held = Vec::new();
+            let mut last = None;
+            loop {
+                let n = match pipe.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                held.extend_from_slice(&buf[..n]);
+                if held.len() > 64 {
+                    held.drain(..held.len() - 64);
+                }
+                if let Some(pct) = trailing_percent(&held) {
+                    if last != Some(pct) {
+                        last = Some(pct);
+                        let _ = pct_tx.send(pct);
+                    }
+                }
+            }
         });
     }
+    let (err_tx, err_rx) = mpsc::channel();
     if let Some(pipe) = child.stderr.take() {
         std::thread::spawn(move || {
             let mut buf = Vec::new();
@@ -1273,13 +1394,23 @@ fn test_7z(
             let _ = child.wait();
             return Err(Fail::Cancelled);
         }
+        if bytes > 0 {
+            if let Some(pct) = pct_rx.try_iter().last() {
+                let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                progress(&Progress {
+                    done: bytes.saturating_mul(pct) / 100,
+                    total: bytes,
+                    current: path.to_path_buf(),
+                    note: name,
+                });
+            }
+        }
         if let Some(status) = child.try_wait()? {
             break status;
         }
         std::thread::sleep(Duration::from_millis(40));
     };
     let err = err_rx.recv().unwrap_or_default();
-    let _ = out_rx.recv();
     if status.success() {
         return Ok(Report { cancelled: false, files: 1 });
     }
@@ -1297,6 +1428,26 @@ fn test_7z(
     } else {
         tail
     }))
+}
+
+// 7-Zip redraws one status line, so the newest "45%" sits at the end of the tail.
+fn trailing_percent(buf: &[u8]) -> Option<u64> {
+    let mut end = buf.len();
+    while end > 0 && matches!(buf[end - 1], b' ' | b'\r' | b'\n' | 0x08) {
+        end -= 1;
+    }
+    if end == 0 || buf[end - 1] != b'%' {
+        return None;
+    }
+    let mut start = end - 1;
+    while start > 0 && buf[start - 1].is_ascii_digit() {
+        start -= 1;
+    }
+    if start == end - 1 || end - start > 4 {
+        return None;
+    }
+    let pct = std::str::from_utf8(&buf[start..end - 1]).ok()?.parse().ok()?;
+    (pct <= 100).then_some(pct)
 }
 
 fn hit_zip(path: &Path, name_needle: &str, text_needle: &str, case_sensitive: bool, cancel: &dyn Fn() -> bool) -> Result<bool, Fail> {
@@ -1369,7 +1520,7 @@ fn hit_rar(path: &Path, name_needle: &str, text_needle: &str, case_sensitive: bo
     if text_needle.is_empty() {
         return Ok(listed.members.iter().any(|member| name_hit(&member.name, name_needle, case_sensitive)));
     }
-    let needle = if case_sensitive { text_needle.as_bytes().to_vec() } else { text_needle.to_ascii_lowercase().into_bytes() };
+    let needle = if case_sensitive { text_needle.as_bytes().to_vec() } else { text_needle.to_lowercase().into_bytes() };
     let job = HitScan {
         cancel,
         needle: &needle,
@@ -1451,24 +1602,13 @@ extern "C" fn on_hit_event(
         return 0;
     }
     let mut carry = job.carry.borrow_mut();
-    let mut hay = Vec::with_capacity(carry.len() + bytes.len());
-    hay.extend_from_slice(&carry);
-    hay.extend_from_slice(bytes);
-    let needle = job.needle;
-    let hit = hay.len() >= needle.len() && hay.windows(needle.len()).any(|window| {
-        if job.fold {
-            window.iter().zip(needle).all(|(a, b)| a.to_ascii_lowercase() == *b)
-        } else {
-            window == needle
-        }
-    });
-    if hit {
+    if crate::search::window_has(&carry, bytes, job.needle, job.fold) {
         job.found.set(true);
         return -1;
     }
-    let keep = needle.len().saturating_sub(1).min(hay.len());
-    carry.clear();
-    carry.extend_from_slice(&hay[hay.len() - keep..]);
+    carry.extend_from_slice(bytes);
+    let cut = carry.len().saturating_sub(crate::search::carry_keep(job.needle, job.fold));
+    carry.drain(..cut);
     0
 }
 
@@ -1476,7 +1616,7 @@ fn read_has(read: &mut dyn Read, needle: &str, fold: bool, cancel: &dyn Fn() -> 
     if needle.is_empty() {
         return Ok(false);
     }
-    let needle_bytes = if fold { needle.to_ascii_lowercase().into_bytes() } else { needle.as_bytes().to_vec() };
+    let needle_bytes = if fold { needle.to_lowercase().into_bytes() } else { needle.as_bytes().to_vec() };
     let mut buf = vec![0u8; 64 * 1024];
     let mut carry = Vec::new();
     let mut seen = 0u64;
@@ -1497,22 +1637,12 @@ fn read_has(read: &mut dyn Read, needle: &str, fold: bool, cancel: &dyn Fn() -> 
         if seen > MEMBER_CAP {
             return Ok(false);
         }
-        let mut hay = Vec::with_capacity(carry.len() + n);
-        hay.extend_from_slice(&carry);
-        hay.extend_from_slice(&buf[..n]);
-        let hit = hay.windows(needle_bytes.len()).any(|window| {
-            if fold {
-                window.iter().zip(&needle_bytes).all(|(a, b)| a.to_ascii_lowercase() == *b)
-            } else {
-                window == needle_bytes
-            }
-        });
-        if hit {
+        if crate::search::window_has(&carry, &buf[..n], &needle_bytes, fold) {
             return Ok(true);
         }
-        let keep = needle_bytes.len().saturating_sub(1).min(hay.len());
-        carry.clear();
-        carry.extend_from_slice(&hay[hay.len() - keep..]);
+        carry.extend_from_slice(&buf[..n]);
+        let cut = carry.len().saturating_sub(crate::search::carry_keep(&needle_bytes, fold));
+        carry.drain(..cut);
     }
 }
 
@@ -1925,10 +2055,50 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let report = test(&archive, None, None, &cancel, &mut |_| {}).unwrap();
         assert!(!report.cancelled);
+        assert_eq!(report.files, 1);
         assert!(archive_hit(&archive, "", "secret", false, &|| false).unwrap());
         assert!(!archive_hit(&archive, "", "missing", false, &|| false).unwrap());
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_zip_counts_bytes_while_reading() {
+        let dir = tmp("test-zip-progress");
+        let archive = dir.join("notes.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive).unwrap());
+        zip.start_file("a.txt", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(&vec![b'a'; 300_000]).unwrap();
+        zip.finish().unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut seen = Vec::new();
+        let report = test(&archive, None, None, &cancel, &mut |progress| seen.push((progress.done, progress.total))).unwrap();
+        assert_eq!(report.files, 1);
+        assert!(seen.iter().any(|(done, total)| *total == 300_000 && *done > 0 && *done < *total));
+        assert!(seen.iter().any(|(done, total)| *done == 300_000 && *total == 300_000));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reads_7z_percent_from_the_redrawn_line() {
+        assert_eq!(trailing_percent(b"  45%"), Some(45));
+        assert_eq!(trailing_percent(b"100%\x08\x08"), Some(100));
+        assert_eq!(trailing_percent(b"Everything is Ok\n"), None);
+    }
+
+    #[test]
+    fn tests_rar_fixture() {
+        let archive = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/version.rar");
+        let cancel = AtomicBool::new(false);
+        let mut seen = Vec::new();
+        let report = test(&archive, None, None, &cancel, &mut |progress| {
+            if progress.total > 0 {
+                seen.push((progress.done, progress.total));
+            }
+        })
+        .unwrap();
+        assert_eq!(report.files, 1);
+        assert!(seen.iter().any(|(done, total)| done == total && *total > 0));
     }
 
     #[test]

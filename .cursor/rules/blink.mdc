@@ -1,0 +1,13 @@
+---
+description: Fokusbyte blinkar alltid ramar och knappar
+alwaysApply: true
+---
+
+# Blink
+
+Varje gång användaren landar på något ska det blinka. Det gäller hela programmet, även när målet redan var aktivt.
+
+- Panelbyte blinkar ramens `pane-blink` via `blink_frame`. Första ritningen sätter bara accenten. Blinket kommer vid bytet.
+- Tab mellan fillista och terminal blinkar den ruta man landar i. Terminalens ruta har inte klassen `pane-active`, så blinket får inte kräva den.
+- Knapp, rad och diskrad använder `blink_widget` eller `blink_then` innan handlingen, så blinket syns även om fönstret stängs.
+- Hoppa inte över blinket för att fokus redan stod där, eller för att terminal, quick view eller en dialog är öppen.

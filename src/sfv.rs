@@ -49,6 +49,9 @@ pub fn verify(sfv: &Path, cancel: &AtomicBool, progress: &mut dyn FnMut(&Progres
     let root = sfv.parent().unwrap_or(Path::new("."));
     let text = fs::read_to_string(sfv)?;
     let rows: Vec<_> = text.lines().filter_map(parse_line).collect();
+    if rows.is_empty() {
+        return Err(Fail::Message("Nothing to check".into()));
+    }
     let total = rows.len() as u64;
     let mut ok = 0u64;
     let mut failed = 0u64;
@@ -330,6 +333,16 @@ mod tests {
         })
         .unwrap();
         assert!(report.cancelled);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_without_checksum_lines_is_not_ok() {
+        let dir = tmp("empty");
+        let dest = dir.join("a.sfv");
+        fs::write(&dest, "; only a comment\nnot a checksum line\n").unwrap();
+        let err = verify(&dest, &AtomicBool::new(false), &mut |_| {}).unwrap_err().to_string();
+        assert_eq!(err, "Nothing to check");
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -1,2 +1,14 @@
 /target
 .env
+/debian/target
+/debian/cargo-home
+/debian/.debhelper
+/debian/files
+/debian/*.substvars
+/debian/*.debhelper.log
+/debian/debhelper-build-stamp
+/debian/rust-commander/
+/packaging/arch/src/
+/packaging/arch/pkg/
+/packaging/arch/*.pkg.tar.*
+*.deb

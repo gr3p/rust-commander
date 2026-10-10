@@ -1,0 +1,10 @@
+---
+description: Kommandoraden längst ned visar bara vanliga kommandon
+alwaysApply: true
+---
+
+# Kommandorad
+
+Knapp raden ovanför F-tangenterna är för sådant man gör ofta: kopiera, packa, packa upp, sökväg, egenskaper, filter, sök.
+
+Specialkommandon ligger i F1. Det gäller bland annat säker radering, ny länk, kodning och att skapa en checksumma. Lägg inte dit dem för att de finns.

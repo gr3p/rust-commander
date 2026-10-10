@@ -590,7 +590,8 @@ impl App {
             Msg::UnpackPick(dest, names) => self.on_unpack_pick(dest, names, sender),
             Msg::PackPick(dest, opts) => {
                 self.close_dialog();
-                self.confirm_pack(PathBuf::from(dest), opts, sender);
+                let dest = self.target_dir(&dest);
+                self.confirm_pack(dest, opts, sender);
             }
             Msg::SetSevenZip(path) => self.set_tool(true, path),
             Msg::SetRar(path) => self.set_tool(false, path),
@@ -1082,7 +1083,15 @@ impl App {
 
     // A relative target is taken from the active folder, not from the process working directory.
     fn target_dir(&self, text: &str) -> PathBuf {
-        self.state.tab(self.state.active).path.join(text.trim())
+        let text = text.trim();
+        let typed = if text == "~" {
+            home_dir()
+        } else if let Some(rest) = text.strip_prefix("~/") {
+            home_dir().join(rest)
+        } else {
+            PathBuf::from(text)
+        };
+        self.state.tab(self.state.active).path.join(typed)
     }
 
     fn refresh_active(&mut self, sender: &ComponentSender<Self>) {

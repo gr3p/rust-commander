@@ -663,6 +663,13 @@ fn plain_background(p: &Palette, chosen: Option<&str>, strength: u8, selected: &
 }
 
 pub fn stylesheet(p: &Palette, s: &ShellStyle) -> String {
+    // The accent is the light theme blue. A flash of that reads as a pale wash, so the blink is the same hue, pulled toward black.
+    let flash = mix(&p.accent, "#000000", 0.42);
+    let flash_ink = if rgb(&flash).is_some_and(|(r, g, b)| u32::from(r) + u32::from(g) + u32::from(b) > 382) {
+        &p.background
+    } else {
+        &p.foreground
+    };
     format!(
         r#"
 window,
@@ -834,11 +841,11 @@ button.drive.idle {{
   opacity: 0.6;
 }}
 button.flash {{
-  background: {accent};
-  color: {bg};
+  background: {flash};
+  color: {flash_ink};
 }}
 button.flash label {{
-  color: {bg};
+  color: {flash_ink};
 }}
 button.fkey {{
   background: {sel};
@@ -861,6 +868,16 @@ label.settings-on {{
 label.dialog-title {{
   font-weight: 700;
   color: {accent};
+}}
+label.about-title {{
+  font-family: "Noto Sans", Cantarell, sans-serif;
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+  color: {fg};
+}}
+label.about-version {{
+  color: {muted};
 }}
 label.cmd-key {{
   font-family: "JetBrainsMono Nerd Font", "Noto Sans CJK SC", monospace;
@@ -952,12 +969,15 @@ listview.search-results > row.flash,
 listview.search-results > row.flash:selected,
 box.flash,
 label.flash,
+tab.flash,
+tab.flash:hover,
+.flash,
 colorbutton.flash > button {{
-  background: {accent};
-  color: {bg};
+  background: {flash};
+  color: {flash_ink};
 }}
 .flash label {{
-  color: {bg};
+  color: {flash_ink};
 }}
 @define-color accent_color {accent};
 @define-color accent_bg_color {accent};
@@ -996,5 +1016,7 @@ entry:focus-within {{
         head_pad = format!("{}px {}px", s.space(2), s.space(8)),
         fkey_pad = format!("{}px {}px", s.space(4), s.space(2)),
         row_pad = format!("{}px {}px", s.space(10), s.space(12)),
+        flash = flash,
+        flash_ink = flash_ink,
     )
 }

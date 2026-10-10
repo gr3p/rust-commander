@@ -86,7 +86,7 @@ impl App {
                 } else {
                     Some(progress.done as f64 / progress.total as f64)
                 });
-                if matches!(job.work, Work::Unpack) && progress.total > 0 {
+                if matches!(job.work, Work::Unpack | Work::Test) && progress.total > 0 {
                     amount = Some(format!(
                         "{:.0}%   {} / {}",
                         (progress.done as f64 / progress.total as f64 * 100.0).min(100.0),
@@ -107,6 +107,10 @@ impl App {
                 Err(mpsc::TryRecvError::Disconnected) => Some(Err("stopped".into())),
                 Err(mpsc::TryRecvError::Empty) => None,
             };
+            // A fast test only leaves the result. A longer one keeps this window and fills the bar.
+            if matches!(job.work, Work::Test) {
+                show = done.is_none() && job.started.elapsed() > Duration::from_millis(200);
+            }
             (line, broken, show, fraction, amount, conflict, done)
         };
         let (line, broken, show, fraction, amount, conflict, done) = polled;
@@ -157,14 +161,31 @@ impl App {
     pub(in crate::ui::app) fn finish_job(&mut self, result: Result<Report, String>, sender: &ComponentSender<Self>) {
         let work = self.job.as_ref().map(|job| job.work).unwrap_or(Work::Transfer);
         self.job = None;
+        let retry_password = matches!(&result, Err(err) if err == "Password required" || err == "Wrong password")
+            && self.pending.as_ref().is_some_and(|pending| pending.asked < 2);
+        let cancelled = match &result {
+            Ok(report) => report.cancelled,
+            Err(err) => err.eq_ignore_ascii_case("cancelled"),
+        };
+        let show_test = matches!(work, Work::Test) && !cancelled && !retry_password;
+        let mut test_dialog = false;
         if let Some((win, label, bar, log)) = self.progress.take() {
             if matches!(work, Work::Verify) && win.is_visible() {
                 self.settle_sfv(&win, &label, &bar, log.as_ref(), &result);
                 self.close_dialog();
                 self.dialog = Some(win);
+            } else if show_test && win.is_visible() {
+                self.settle_test(&win, &label, &bar, &result);
+                self.close_dialog();
+                self.dialog = Some(win);
+                test_dialog = true;
             } else {
                 win.close();
             }
+        }
+        if show_test && !test_dialog {
+            self.show_test_result(&result);
+            test_dialog = true;
         }
         if let Err(err) = &result {
             if err.eq_ignore_ascii_case("cancelled") {
@@ -177,7 +198,7 @@ impl App {
                 return;
             }
             self.pending = None;
-            if !matches!(work, Work::Verify | Work::Transfer | Work::Delete) {
+            if !test_dialog && !matches!(work, Work::Verify | Work::Transfer | Work::Delete) {
                 let title = match work {
                     Work::Unpack if err.starts_with("Archive is damaged") => "Damaged archive",
                     Work::Unpack if err.starts_with("Skipped ") => "Unpack",
@@ -605,7 +626,7 @@ impl App {
     pub(in crate::ui::app) fn pack_suggestion(&self, here: bool) -> String {
         let sources = self.state.selected_paths(self.state.active);
         let stem = if sources.len() == 1 {
-            sources[0].file_stem().and_then(|name| name.to_str()).unwrap_or("archive")
+            stem_of(&sources[0]).unwrap_or("archive")
         } else {
             self.state.tab(self.state.active).path.file_name().and_then(|name| name.to_str()).unwrap_or("archive")
         };
@@ -683,7 +704,7 @@ impl App {
 
     pub(in crate::ui::app) fn sfv_dest(&self, sources: &[PathBuf]) -> PathBuf {
         let stem = if sources.len() == 1 {
-            sources[0].file_stem().and_then(|name| name.to_str()).unwrap_or("checksum")
+            stem_of(&sources[0]).unwrap_or("checksum")
         } else {
             self.state.tab(self.state.active).path.file_name().and_then(|name| name.to_str()).unwrap_or("checksum")
         };
@@ -786,7 +807,6 @@ impl App {
             return;
         };
         self.status = "Testing archive".into();
-        self.ensure_progress();
         let _ = sender;
         spawn_worker(move || {
             let result = rust_commander::archive::test(
@@ -895,6 +915,40 @@ impl App {
                 }
             });
         }
+    }
+
+    fn settle_test(&self, win: &gtk::Window, label: &gtk::Label, bar: &gtk::ProgressBar, result: &Result<Report, String>) {
+        win.set_title(Some(test_title(result)));
+        apply_test_label(label, result);
+        if result.is_ok() {
+            bar.set_fraction(1.0);
+            bar.set_show_text(false);
+        }
+        place_ok(win);
+    }
+
+    pub(in crate::ui::app) fn show_test_result(&mut self, result: &Result<Report, String>) {
+        self.close_dialog();
+        let win = gtk::Window::new();
+        win.set_title(Some(test_title(result)));
+        win.set_modal(true);
+        win.set_transient_for(Some(&self.shell.window));
+        win.set_default_width(520);
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        column.set_margin_all(12);
+        let label = gtk::Label::new(None);
+        apply_test_label(&label, result);
+        let ok = gtk::Button::with_label("OK");
+        let win_ok = win.clone();
+        let win_esc = win.clone();
+        crate::ui::shell::on_escape(&win, move || win_esc.close());
+        crate::ui::shell::on_click(&ok, move || win_ok.close());
+        column.append(&label);
+        column.append(&ok);
+        win.set_child(Some(&column));
+        win.present();
+        focus_ok(&win, &ok);
+        self.dialog = Some(win);
     }
 
     pub(in crate::ui::app) fn confirm_overwrite(&mut self, sender: &ComponentSender<Self>) {
@@ -1098,7 +1152,14 @@ impl App {
             return;
         }
         let win = gtk::Window::new();
-        let caption = if self.status.is_empty() { "Working" } else { self.status.as_str() };
+        let testing = matches!(self.job.as_ref().map(|job| job.work), Some(Work::Test));
+        let caption = if testing {
+            "Testing archive"
+        } else if self.status.is_empty() {
+            "Working"
+        } else {
+            self.status.as_str()
+        };
         win.set_title(Some(caption));
         win.set_modal(true);
         win.set_transient_for(Some(&self.shell.window));
@@ -1173,6 +1234,12 @@ pub(in crate::ui::app) fn is_check_file(path: &Path) -> bool {
     rust_commander::sfv::is_sfv(path) || rust_commander::sum::kind_of(path).is_some()
 }
 
+// A folder keeps its whole name: release-1.2 is not cut to release-1.
+pub(in crate::ui::app) fn stem_of(path: &Path) -> Option<&str> {
+    let name = if path.is_dir() { path.file_name() } else { path.file_stem() };
+    name.and_then(|name| name.to_str())
+}
+
 fn split_check(note: &str) -> (String, Option<(u64, String)>) {
     let Some((status, rest)) = note.split_once("\n\n") else {
         return (note.to_string(), None);
@@ -1194,6 +1261,56 @@ fn broken_total(summary: &str) -> u64 {
         }
     }
     count
+}
+
+fn test_title(result: &Result<Report, String>) -> &'static str {
+    if result.is_ok() { "Archive OK" } else { "Test failed" }
+}
+
+fn apply_test_label(label: &gtk::Label, result: &Result<Report, String>) {
+    label.set_wrap(true);
+    label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    label.set_xalign(0.0);
+    label.set_selectable(true);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::None);
+    label.set_lines(-1);
+    match result {
+        Ok(report) => {
+            let word = if report.files == 1 { "file" } else { "files" };
+            label.set_markup(&format!(
+                "<span foreground=\"{}\" size=\"x-large\">✔</span>  Archive OK, {} {word}",
+                rust_commander::theme::current().green,
+                report.files
+            ));
+        }
+        Err(err) => label.set_text(err),
+    }
+}
+
+fn place_ok(win: &gtk::Window) {
+    let Some(cancel) = window_button(win) else { return };
+    let ok = gtk::Button::with_label("OK");
+    if let Some(row) = cancel.parent().and_then(|parent| parent.downcast::<gtk::Box>().ok()) {
+        cancel.set_visible(false);
+        row.append(&ok);
+        let win_ok = win.clone();
+        crate::ui::shell::on_click(&ok, move || win_ok.close());
+        focus_ok(win, &ok);
+        return;
+    }
+    cancel.set_label("OK");
+    let win_ok = win.clone();
+    cancel.connect_clicked(move |_| win_ok.close());
+    focus_ok(win, &cancel);
+}
+
+fn focus_ok(win: &gtk::Window, button: &gtk::Button) {
+    win.set_default_widget(Some(button));
+    button.grab_focus();
+    let button = button.clone();
+    gtk::glib::idle_add_local_once(move || {
+        button.grab_focus();
+    });
 }
 
 fn window_button(win: &gtk::Window) -> Option<gtk::Button> {

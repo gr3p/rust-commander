@@ -172,6 +172,9 @@ fn one(
     if is_dir {
         if kind == Kind::Move && !dest.exists() {
             let n = count_entries(src);
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
+            }
             match fs::rename(src, dest) {
                 Ok(()) => return bump_n(done, total, dest, n.max(1), progress),
                 Err(err) if err.raw_os_error() == Some(libc::EXDEV) => {}
@@ -749,6 +752,21 @@ mod shred_tests {
         std::os::unix::fs::symlink(dir.join("twin.txt"), dir.join("link")).unwrap();
         assert!(shred(&dir.join("link"), &cancel).is_err());
         assert_eq!(fs::read(dir.join("twin.txt")).unwrap(), b"keep");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn folder_moves_into_a_target_that_does_not_exist_yet() {
+        let dir = std::env::temp_dir().join(format!("rc-move-new-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("src/sub")).unwrap();
+        fs::write(dir.join("src/sub/a.txt"), b"a").unwrap();
+        let dest = dir.join("new/deeper/src");
+        let off = AtomicBool::new(false);
+        let report = transfer(&[(dir.join("src"), dest.clone())], Kind::Move, &off, &off, &mut |_| {}, &mut |_, _| Choice::Cancel).unwrap();
+        assert!(!report.cancelled);
+        assert_eq!(fs::read(dest.join("sub/a.txt")).unwrap(), b"a");
+        assert!(!dir.join("src").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 }

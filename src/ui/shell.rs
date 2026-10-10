@@ -609,6 +609,12 @@ pub fn blink_then(widget: &gtk::Widget, action: impl FnOnce() + 'static) {
     gtk::glib::timeout_add_local_once(Duration::from_millis(240), action);
 }
 
+/// A notebook tab is a gizmo around the label. Flashing the label only covers the text.
+pub fn blink_tab(label: &gtk::Widget) {
+    let tab = label.parent().filter(|parent| parent.css_name().as_str() == "tab").unwrap_or_else(|| label.clone());
+    blink_widget(&tab);
+}
+
 pub fn blink_widget(widget: &gtk::Widget) {
     if !FLASH_ENABLED.load(Ordering::Relaxed) {
         return;
@@ -667,7 +673,7 @@ pub fn set_flash_enabled(enabled: bool) {
     FLASH_ENABLED.store(enabled, Ordering::Relaxed);
 }
 
-const LOGO_PNG: &[u8] = include_bytes!("../../img/rust-commander.png");
+pub(crate) const LOGO_PNG: &[u8] = include_bytes!("../../img/rust-commander.png");
 const APP_ID: &str = "se.rustcommander.RustCommander";
 
 fn set_logo(window: &gtk::Window) {

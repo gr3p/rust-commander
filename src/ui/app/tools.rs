@@ -197,7 +197,7 @@ impl App {
 
     pub(in crate::ui::app) fn sum_dest(&self, sources: &[PathBuf], kind: Kind) -> PathBuf {
         let stem = if sources.len() == 1 {
-            sources[0].file_stem().and_then(|name| name.to_str()).unwrap_or("checksum")
+            super::jobs::stem_of(&sources[0]).unwrap_or("checksum")
         } else {
             self.state.tab(self.state.active).path.file_name().and_then(|name| name.to_str()).unwrap_or("checksum")
         };

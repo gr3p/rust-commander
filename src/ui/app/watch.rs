@@ -9,7 +9,9 @@ use rust_commander::state::PaneId;
 
 use super::App;
 use crate::ui::msg::Msg;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const MAX_WAIT: Duration = Duration::from_secs(2);
 
 pub(super) struct DirWatch {
     pub path: PathBuf,
@@ -28,16 +30,23 @@ impl App {
             let monitor = file.monitor_directory(gtk::gio::FileMonitorFlags::NONE, gtk::gio::Cancellable::NONE).ok();
             if let Some(monitor) = &monitor {
                 let generation = Rc::new(Cell::new(0u64));
+                let first = Rc::new(Cell::new(None::<Instant>));
                 let tx = sender.input_sender().clone();
                 let watched = path.clone();
                 monitor.connect_changed(move |_, _, _, _| {
                     let next = generation.get().wrapping_add(1);
                     generation.set(next);
-                    let generation = Rc::clone(&generation);
+                    if first.get().is_none() {
+                        first.set(Some(Instant::now()));
+                    }
+                    let (generation, first) = (Rc::clone(&generation), Rc::clone(&first));
                     let tx = tx.clone();
                     let watched = watched.clone();
                     gtk::glib::timeout_add_local_once(Duration::from_millis(350), move || {
-                        if generation.get() == next {
+                        // A file that keeps changing (a download) would otherwise hold the reload back for good.
+                        let due = generation.get() == next || first.get().is_some_and(|at| at.elapsed() >= MAX_WAIT);
+                        if due {
+                            first.set(None);
                             tx.emit(Msg::DirChanged(pane, watched));
                         }
                     });
