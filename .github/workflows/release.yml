@@ -2,6 +2,7 @@ name: Release
 
 # Every push to master builds a .deb, publishes a GitHub release and updates the apt repo on gh-pages.
 on:
+  workflow_dispatch:
   push:
     branches: [master]
     paths-ignore: ["**.md", ".cursor/**", ".github/**", "LICENSE", "img/screenshot.png", "img/quick-view.png", "img/quick-edit.png", "img/thumbnails.jpg"]
@@ -49,7 +50,7 @@ jobs:
       - name: GitHub release
         run: |
           deb=$(ls ../rust-commander_*_amd64.deb)
-          gh release create "v${{ steps.version.outputs.version }}" "$deb" --target "$GITHUB_SHA" --generate-notes --latest
+          GH_DEBUG=api gh release create "v${{ steps.version.outputs.version }}" "$deb" --target "$GITHUB_SHA" --generate-notes --latest
 
       - uses: actions/checkout@v4
         with:
