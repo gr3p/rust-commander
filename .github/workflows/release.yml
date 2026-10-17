@@ -1,6 +1,7 @@
 name: Release
 
-# Every push to master builds a .deb, publishes a GitHub release and updates the apt repo on gh-pages.
+# Every push to master builds a .deb and a Fedora 44 .rpm, publishes a GitHub release
+# and updates the apt and dnf repos on gh-pages.
 on:
   workflow_dispatch:
   push:
@@ -88,4 +89,86 @@ jobs:
           git config user.email "github-actions@users.noreply.github.com"
           git add -A
           git commit -m "apt: ${{ steps.version.outputs.version }}"
+          git push
+
+  rpm:
+    needs: release
+    runs-on: ubuntu-latest
+    container: fedora:44
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Install build tools
+        run: |
+          dnf install -y git rpm-build rpm-sign createrepo_c cargo rust pkgconf-pkg-config gcc gtk4-devel vte291-gtk4-devel gnupg2 perl
+          # gh is not in the Fedora repos.
+          dnf config-manager addrepo --from-repofile=https://cli.github.com/packages/rpm/gh-cli.repo
+          dnf install -y gh
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Same version as the .deb: major.minor from Cargo.toml, patch is the commit count.
+      - name: Set version
+        id: version
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          base=$(sed -n 's/^version = "\([0-9]*\.[0-9]*\)\..*/\1/p' Cargo.toml | head -n 1)
+          version="$base.$(git rev-list --count HEAD)"
+          sed -i "0,/^version = .*/s//version = \"$version\"/" Cargo.toml
+          perl -0pi -e "s/(name = \"rust-commander\"\nversion = )\"[^\"]*\"/\$1\"$version\"/" Cargo.lock
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build package
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          mkdir -p "$HOME/rpmbuild/SOURCES"
+          tar --exclude .git --exclude target --exclude debian/target --exclude debian/cargo-home \
+            -czf "$HOME/rpmbuild/SOURCES/rust-commander-${version}.tar.gz" \
+            --transform "s,^\./,rust-commander-${version}/," .
+          rpmbuild -bb packaging/fedora/rust-commander.spec --define "ver ${version}"
+
+      - name: GitHub release
+        run: |
+          rpm=$(ls "$HOME/rpmbuild/RPMS/x86_64"/rust-commander-*.rpm)
+          gh release upload "v${{ steps.version.outputs.version }}" "$rpm"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: pages
+
+      - name: Update dnf repository
+        working-directory: pages
+        env:
+          APT_GPG_KEY: ${{ secrets.APT_GPG_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          echo "$APT_GPG_KEY" | gpg --batch --import
+          install -d "$HOME/.gnupg" rpm/fedora/44/x86_64
+          chmod 700 "$HOME/.gnupg"
+          printf 'allow-loopback-pinentry\n' > "$HOME/.gnupg/gpg-agent.conf"
+          printf '%s\n' "$APT_GPG_PASSPHRASE" > "$HOME/.gnupg/pass"
+          chmod 600 "$HOME/.gnupg/pass"
+          gpgconf --kill gpg-agent || true
+          cat > "$HOME/.rpmmacros" <<EOF
+          %_signature gpg
+          %_gpg_name B203CAEB2B841D3A
+          %_gpg_path $HOME/.gnupg
+          %_gpg_sign_cmd_extra_args --batch --yes --pinentry-mode loopback --passphrase-file $HOME/.gnupg/pass
+          EOF
+          rm -f rpm/fedora/44/x86_64/rust-commander-*.rpm
+          cp "$HOME/rpmbuild/RPMS/x86_64"/rust-commander-*.rpm rpm/fedora/44/x86_64/
+          cp "$GITHUB_WORKSPACE/packaging/fedora/rust-commander.repo" rpm/rust-commander.repo
+          # Sign before createrepo, the signature changes the file.
+          rpmsign --addsign rpm/fedora/44/x86_64/rust-commander-*.rpm
+          createrepo_c rpm/fedora/44/x86_64
+          sign() { gpg --batch --yes --pinentry-mode loopback --passphrase "$APT_GPG_PASSPHRASE" --default-key B203CAEB2B841D3A "$@"; }
+          sign --detach-sign --armor -o rpm/fedora/44/x86_64/repodata/repomd.xml.asc rpm/fedora/44/x86_64/repodata/repomd.xml
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          git commit -m "dnf: ${{ steps.version.outputs.version }}"
           git push

@@ -74,7 +74,16 @@ sudo apt install rust-commander
 
 Without the repository, download the `.deb` from the [Releases page](https://github.com/gr3p/rust-commander/releases/latest) and run `sudo apt install ./rust-commander_*_amd64.deb`.
 
-Start it from the application menu, or run `rust-commander`. To remove it: `sudo apt remove rust-commander` or `yay -R rust-commander`.
+**Fedora 44** (x86_64)
+
+Add the repository once. dnf then installs Rust Commander and pulls in GTK4 and VTE.
+
+```bash
+sudo dnf config-manager addrepo --from-repofile=https://gr3p.github.io/rust-commander/rpm/rust-commander.repo
+sudo dnf install rust-commander
+```
+
+Start it from the application menu, or run `rust-commander`. To remove it: `sudo apt remove rust-commander`, `yay -R rust-commander` or `sudo dnf remove rust-commander`.
 
 For `.7z` and `.rar` archives, also install 7-Zip (`p7zip-full` on Ubuntu, `p7zip` on Arch) and RARLAB `rar`. `.zip` works without them.
 
@@ -155,6 +164,9 @@ sudo apt install build-essential pkg-config libgtk-4-dev libvte-2.91-gtk4-dev
 
 # Arch / Omarchy
 sudo pacman -S --needed base-devel pkgconf gtk4 vte4
+
+# Fedora
+sudo dnf install cargo rust pkgconf-pkg-config gcc gtk4-devel vte291-gtk4-devel
 ```
 
 ```bash
