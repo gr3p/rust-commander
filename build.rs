@@ -24,12 +24,7 @@ fn display_version() -> String {
     if count.is_empty() || !count.bytes().all(|b| b.is_ascii_digit()) {
         return base;
     }
-    let dirty = git(&manifest, &["status", "--porcelain"]).is_some_and(|out| !out.trim().is_empty());
-    if dirty {
-        format!("{prefix}.{count}-dirty")
-    } else {
-        format!("{prefix}.{count}")
-    }
+    format!("{prefix}.{count}")
 }
 
 fn watch_git(manifest: &str) {
@@ -42,7 +37,6 @@ fn watch_git(manifest: &str) {
             println!("cargo:rerun-if-changed={}", git.join(path.trim()).display());
         }
     }
-    println!("cargo:rerun-if-changed={}", git.join("index").display());
     println!("cargo:rerun-if-changed={manifest}/src");
     println!("cargo:rerun-if-changed={manifest}/Cargo.toml");
     println!("cargo:rerun-if-changed={manifest}/build.rs");
