@@ -47,8 +47,12 @@ impl App {
         window.set_default_width(800);
         window.set_default_height(600);
         let picture = gtk::Picture::new();
+        let wait = crate::ui::row::dot_spin();
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(&picture));
+        overlay.add_overlay(&wait);
         let scroll = gtk::ScrolledWindow::new();
-        scroll.set_child(Some(&picture));
+        scroll.set_child(Some(&overlay));
         scroll.set_hexpand(true);
         scroll.set_vexpand(true);
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
@@ -79,7 +83,7 @@ impl App {
             gtk::glib::Propagation::Proceed
         });
         window.present();
-        let ui = ImageUi { window, picture, scroll, bar, scale, files, index, generation: 0, token, fit: true };
+        let ui = ImageUi { window, picture, scroll, bar, scale, files, index, generation: 0, token, fit: true, wait };
         apply_image_scale(&ui);
         self.image = Some(ui);
         self.load_image(sender);
@@ -92,6 +96,7 @@ impl App {
         ui.generation = generation;
         let Some(path) = ui.files.get(ui.index).cloned() else { return };
         let fit = ui.fit;
+        crate::ui::row::set_dot_spin(&ui.wait, true);
         ui.window.set_title(Some(&path.display().to_string()));
         let live = Arc::clone(&self.image_live);
         live.store(generation, Ordering::Relaxed);
@@ -116,6 +121,9 @@ impl App {
             .filter(|ui| ui.generation == generation)
             .map(|ui| ui.picture.clone());
         let Some(picture) = picture else { return };
+        if let Some(ui) = self.image.as_ref().filter(|ui| ui.generation == generation) {
+            crate::ui::row::set_dot_spin(&ui.wait, false);
+        }
         let fit = self.image.as_ref().is_some_and(|ui| ui.fit);
         match body {
             PreviewBody::Image { width, height, pixels } => {
@@ -181,6 +189,8 @@ impl App {
         self.lister_gen = self.lister_gen.wrapping_add(1);
         let generation = self.lister_gen;
         let charset = self.charset;
+        self.lister_wait = true;
+        self.paint_wait();
         let tx = sender.input_sender().clone();
         std::thread::spawn(move || {
             let opened = read_lister(&path, charset);
@@ -197,6 +207,8 @@ impl App {
         if generation != self.lister_gen {
             return;
         }
+        self.lister_wait = false;
+        self.paint_wait();
         let (reader, text) = match opened {
             Ok(opened) => opened,
             Err(err) => {
@@ -485,6 +497,10 @@ impl App {
             self.status = "QUICKVIEW: view".into();
             self.note_preview_target();
             self.focus_list();
+        } else {
+            for pane in &self.shell.panes {
+                crate::ui::row::set_dot_spin(&pane.preview_wait, false);
+            }
         }
     }
 
@@ -687,6 +703,10 @@ impl App {
         if !self.state.quick_view || self.preview_sent == self.state.preview_gen {
             return;
         }
+        let preview_pane = self.state.active.other().index();
+        for pane in &self.shell.panes {
+            crate::ui::row::set_dot_spin(&pane.preview_wait, false);
+        }
         let generation = self.state.preview_gen;
         self.preview.generation = generation;
         self.preview_sent = generation;
@@ -721,6 +741,7 @@ impl App {
             let tx = sender.input_sender().clone();
             let live = Arc::clone(&self.preview_live);
             live.store(generation, Ordering::Relaxed);
+            crate::ui::row::set_dot_spin(&self.shell.panes[preview_pane].preview_wait, true);
             let edge = if self.quick_fit { imageview::MAX_EDGE } else { u32::MAX };
             std::thread::spawn(move || {
                 if live.load(Ordering::Relaxed) != generation {
@@ -737,6 +758,7 @@ impl App {
         let tx = sender.input_sender().clone();
         let live = Arc::clone(&self.preview_live);
         live.store(generation, Ordering::Relaxed);
+        crate::ui::row::set_dot_spin(&self.shell.panes[preview_pane].preview_wait, true);
         std::thread::spawn(move || {
             if live.load(Ordering::Relaxed) != generation {
                 return;

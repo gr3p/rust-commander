@@ -36,6 +36,7 @@ pub struct PaneUi {
     pub picture: gtk::Picture,
     pub picture_scroll: gtk::ScrolledWindow,
     pub preview_kind: gtk::Stack,
+    pub preview_wait: gtk::DrawingArea,
     pub terminal_slot: gtk::Box,
 }
 
@@ -44,6 +45,7 @@ pub struct Shell {
     pub panes: [PaneUi; 2],
     pub paned: gtk::Paned,
     pub status: gtk::Label,
+    pub wait: gtk::DrawingArea,
     pub css: gtk::CssProvider,
     pub f_labels: Vec<String>,
     pub mode_bar: gtk::Stack,
@@ -125,10 +127,16 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
 
     let status = gtk::Label::new(Some(""));
     status.set_xalign(0.0);
+    status.set_hexpand(true);
     status.add_css_class("status");
-    status.set_margin_top(4);
-    status.set_margin_start(8);
-    root.append(&status);
+    let wait = row::dot_spin();
+    let status_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    status_row.add_css_class("status");
+    status_row.set_margin_top(4);
+    status_row.set_margin_start(8);
+    status_row.append(&wait);
+    status_row.append(&status);
+    root.append(&status_row);
 
     let fbar = gtk::Box::new(gtk::Orientation::Vertical, 4);
     fbar.add_css_class("fbar");
@@ -273,6 +281,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
         panes: [left, right],
         paned,
         status,
+        wait,
         css,
         f_labels,
         mode_bar,
@@ -1165,6 +1174,11 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     preview_kind.add_named(&preview_scroll, Some("text"));
     preview_kind.add_named(&picture_scroll, Some("image"));
     preview_kind.set_vexpand(true);
+    let preview_wait = row::dot_spin();
+    let preview_overlay = gtk::Overlay::new();
+    preview_overlay.set_child(Some(&preview_kind));
+    preview_overlay.add_overlay(&preview_wait);
+    preview_overlay.set_vexpand(true);
     let menu = image_menu(sender);
     menu.set_parent(&frame);
     let terminal_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -1222,7 +1236,7 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     let stack = gtk::Stack::new();
     stack.add_named(&scroll, Some("list"));
     stack.add_named(&grid_scroll, Some("thumbs"));
-    stack.add_named(&preview_kind, Some("preview"));
+    stack.add_named(&preview_overlay, Some("preview"));
     stack.add_named(&terminal_slot, Some("terminal"));
     stack.set_vexpand(true);
     column.append(&tabs);
@@ -1245,6 +1259,7 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
         picture,
         picture_scroll,
         preview_kind,
+        preview_wait,
         terminal_slot,
     }
 }

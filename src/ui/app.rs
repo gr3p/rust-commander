@@ -135,6 +135,7 @@ struct ListerUi {
 struct ImageUi {
     window: gtk::Window,
     picture: gtk::Picture,
+    wait: gtk::DrawingArea,
     scroll: gtk::ScrolledWindow,
     bar: gtk::Box,
     scale: gtk::Button,
@@ -191,6 +192,8 @@ pub struct App {
     queued: Option<Queued>,
     queue: Option<queue::QueueUi>,
     lister: Option<ListerUi>,
+    lister_wait: bool,
+    archive_wait: bool,
     lister_gen: u64,
     lister_draw: u64,
     image: Option<ImageUi>,
@@ -343,6 +346,8 @@ impl SimpleComponent for App {
             ask: None,
             dialog: None,
             progress: None,
+            lister_wait: false,
+            archive_wait: false,
             meter: None,
             pending: None,
             queued: None,
@@ -497,7 +502,11 @@ impl App {
             Msg::QueueConflict(choice) => self.answer_queue_conflict(choice),
             Msg::QueueClosed => self.close_queue(),
             Msg::Preview { generation, body } => {
-                lister::apply_preview(&mut self.preview, generation, body);
+                if lister::apply_preview(&mut self.preview, generation, body) {
+                    for pane in &self.shell.panes {
+                        row::set_dot_spin(&pane.preview_wait, false);
+                    }
+                }
             }
             Msg::ImageReady { generation, body } => self.show_image(generation, body),
             Msg::ListerOpened { generation, opened } => self.show_lister(generation, opened, sender),
@@ -1043,6 +1052,10 @@ impl App {
                 self.status = err;
             }
         }
+    }
+
+    fn paint_wait(&mut self) {
+        row::set_dot_spin(&self.shell.wait, self.lister_wait || self.archive_wait);
     }
 
     fn spawn_load(&mut self, sender: &ComponentSender<Self>, id: PaneId, tab: usize, path: PathBuf, token: u64) {

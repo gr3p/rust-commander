@@ -282,6 +282,8 @@ impl App {
         let path = pending.archive.clone();
         let password = pending.password.clone();
         self.status = "Reading archive".into();
+        self.archive_wait = true;
+        self.paint_wait();
         let tx = sender.input_sender().clone();
         std::thread::spawn(move || {
             let result = rust_commander::archive::list(&path, password.as_deref()).map_err(|err| err.to_string());
@@ -290,6 +292,8 @@ impl App {
     }
 
     pub(in crate::ui::app) fn on_archive_listed(&mut self, result: Result<rust_commander::archive::Listed, String>, sender: &ComponentSender<Self>) {
+        self.archive_wait = false;
+        self.paint_wait();
         let Some(pending) = &self.pending else { return };
         let pick = pending.pick;
         let password = pending.password.clone();

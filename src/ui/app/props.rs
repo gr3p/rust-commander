@@ -212,8 +212,7 @@ fn folder_size_row(grid: &gtk::Grid, row: &mut i32, path: &std::path::Path) -> A
     name.set_xalign(0.0);
     name.add_css_class("dim-label");
     let button = gtk::Button::with_label("Calculate folder size");
-    let spinner = gtk::Spinner::new();
-    spinner.set_visible(false);
+    let spinner = crate::ui::row::dot_spin();
     let result = gtk::Label::new(None);
     result.set_xalign(0.0);
     result.set_hexpand(true);
@@ -222,8 +221,7 @@ fn folder_size_row(grid: &gtk::Grid, row: &mut i32, path: &std::path::Path) -> A
     crate::ui::shell::on_click(&button, move || {
         button_run.set_sensitive(false);
         result_run.set_text("");
-        spinner_run.set_visible(true);
-        spinner_run.start();
+        crate::ui::row::set_dot_spin(&spinner_run, true);
         cancel_run.store(false, Ordering::Relaxed);
         let (tx, rx) = std::sync::mpsc::channel();
         let (path, cancel) = (path.clone(), Arc::clone(&cancel_run));
@@ -233,8 +231,7 @@ fn folder_size_row(grid: &gtk::Grid, row: &mut i32, path: &std::path::Path) -> A
         let (button_ui, spinner_ui, result_ui, cancel_ui) = (button_run.clone(), spinner_run.clone(), result_run.clone(), Arc::clone(&cancel_run));
         gtk::glib::timeout_add_local(std::time::Duration::from_millis(100), move || match rx.try_recv() {
             Ok(counted) => {
-                spinner_ui.stop();
-                spinner_ui.set_visible(false);
+                crate::ui::row::set_dot_spin(&spinner_ui, false);
                 button_ui.set_sensitive(true);
                 if !cancel_ui.load(Ordering::Relaxed) {
                     match counted {

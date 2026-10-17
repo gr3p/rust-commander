@@ -34,6 +34,7 @@ pub(super) struct SearchUi {
     feed: gtk::Button,
     model: gtk::StringList,
     status: gtk::Label,
+    wait: gtk::DrawingArea,
     start: gtk::Button,
     cancel: gtk::Button,
     go: gtk::Button,
@@ -135,7 +136,12 @@ impl App {
 
         let status = gtk::Label::new(Some("Ready"));
         status.set_xalign(0.0);
-        content.append(&status);
+        status.set_hexpand(true);
+        let wait = crate::ui::row::dot_spin();
+        let status_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        status_row.append(&wait);
+        status_row.append(&status);
+        content.append(&status_row);
         let headings = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         headings.set_margin_all(4);
         let name_heading = gtk::Label::new(Some("Name"));
@@ -254,7 +260,7 @@ impl App {
         self.search = Some(SearchUi {
             window, source: self.state.active, query, root, recursive, hidden, files_only,
             case_sensitive, text, min_size, max_size, min_date, max_date, duplicates, in_archives, feed,
-            model, status, start, cancel, go, results: Vec::new(), stop: None,
+            model, status, wait, start, cancel, go, results: Vec::new(), stop: None,
         });
     }
 
@@ -308,6 +314,7 @@ impl App {
         ui.go.set_sensitive(false);
         ui.feed.set_sensitive(false);
         ui.status.set_text("Searching...");
+        crate::ui::row::set_dot_spin(&ui.wait, true);
         ui.start.set_sensitive(false);
         ui.cancel.set_sensitive(true);
         let options = Options {
@@ -361,6 +368,7 @@ impl App {
             }
             Event::Finished { errors, cancelled } => {
                 ui.stop = None;
+                crate::ui::row::set_dot_spin(&ui.wait, false);
                 ui.start.set_sensitive(true);
                 ui.cancel.set_sensitive(false);
                 let status = if cancelled {

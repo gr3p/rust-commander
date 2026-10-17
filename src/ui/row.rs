@@ -265,16 +265,7 @@ fn cursor_mark() -> relm4::gtk::DrawingArea {
         let h = h as f64;
         let loading = area.ancestor(relm4::gtk::ColumnView::static_type()).is_some_and(|list| list.has_css_class("loading"));
         if loading {
-            // Eight dots on a ring. The bright one walks round, the ones behind it fade out.
-            let head = (relm4::gtk::glib::monotonic_time() / SPIN_STEP_US) as usize % 8;
-            let ring = w.min(h) * 0.5 - 1.3;
-            for i in 0..8 {
-                let angle = i as f64 * std::f64::consts::TAU / 8.0 - std::f64::consts::FRAC_PI_2;
-                let age = (head + 8 - i) % 8;
-                cr.set_source_rgba(r, g, b, a * (1.0 - age as f64 * 0.11));
-                cr.arc(w * 0.5 + ring * angle.cos(), h * 0.5 + ring * angle.sin(), 1.1, 0.0, std::f64::consts::TAU);
-                let _ = cr.fill();
-            }
+            paint_dot_spin(cr, w as f64, h as f64, r, g, b, a);
             return;
         }
         // Chevron like ">", with round ends so it reads as an icon. Drawn in the middle 8 px.
@@ -291,6 +282,62 @@ fn cursor_mark() -> relm4::gtk::DrawingArea {
 }
 
 const SPIN_STEP_US: i64 = 90_000;
+
+// Eight dots on a ring. The bright one walks round, the ones behind it fade out.
+fn paint_dot_spin(cr: &relm4::gtk::cairo::Context, w: f64, h: f64, r: f64, g: f64, b: f64, a: f64) {
+    let head = (relm4::gtk::glib::monotonic_time() / SPIN_STEP_US) as usize % 8;
+    let ring = w.min(h) * 0.5 - 1.3;
+    for i in 0..8 {
+        let angle = i as f64 * std::f64::consts::TAU / 8.0 - std::f64::consts::FRAC_PI_2;
+        let age = (head + 8 - i) % 8;
+        cr.set_source_rgba(r, g, b, a * (1.0 - age as f64 * 0.11));
+        cr.arc(w * 0.5 + ring * angle.cos(), h * 0.5 + ring * angle.sin(), 1.1, 0.0, std::f64::consts::TAU);
+        let _ = cr.fill();
+    }
+}
+
+/// Ring of dots, hidden until `set_dot_spin` turns it on.
+pub fn dot_spin() -> relm4::gtk::DrawingArea {
+    let area = relm4::gtk::DrawingArea::new();
+    area.add_css_class("thumb-spin");
+    area.set_content_width(28);
+    area.set_content_height(28);
+    area.set_halign(relm4::gtk::Align::Center);
+    area.set_valign(relm4::gtk::Align::Center);
+    area.set_can_target(false);
+    area.set_visible(false);
+    area.set_draw_func(|area, cr, w, h| {
+        let color = area.color();
+        let (r, g, b, a) = (color.red() as f64, color.green() as f64, color.blue() as f64, color.alpha() as f64);
+        let side = 28.0_f64.min(w as f64).min(h as f64);
+        cr.save().ok();
+        cr.translate((w as f64 - side) * 0.5, (h as f64 - side) * 0.5);
+        cr.scale(side / 11.0, side / 11.0);
+        paint_dot_spin(cr, 11.0, 11.0, r, g, b, a);
+        cr.restore().ok();
+    });
+    area
+}
+
+pub fn set_dot_spin(area: &relm4::gtk::DrawingArea, on: bool) {
+    if area.has_css_class("spinning") == on {
+        return;
+    }
+    area.set_visible(on);
+    if !on {
+        area.remove_css_class("spinning");
+        return;
+    }
+    area.add_css_class("spinning");
+    let area = area.downgrade();
+    relm4::gtk::glib::timeout_add_local(std::time::Duration::from_micros(SPIN_STEP_US as u64 / 2), move || {
+        let Some(area) = area.upgrade().filter(|area| area.has_css_class("spinning")) else {
+            return relm4::gtk::glib::ControlFlow::Break;
+        };
+        area.queue_draw();
+        relm4::gtk::glib::ControlFlow::Continue
+    });
+}
 
 // The cursor mark turns into a dot spinner while the pane waits for a listing.
 pub fn set_loading(list: &relm4::gtk::ColumnView, on: bool) {
@@ -393,6 +440,7 @@ struct ThumbCell {
     glyph: relm4::gtk::Label,
     icon: relm4::gtk::Image,
     picture: relm4::gtk::Picture,
+    spin: relm4::gtk::DrawingArea,
     label: relm4::gtk::Label,
 }
 
@@ -421,8 +469,12 @@ impl ThumbCell {
         picture.set_can_shrink(true);
         let stack = gtk::Stack::new();
         stack.set_size_request(THUMB, THUMB);
+        let spin = dot_spin();
+        spin.set_hexpand(true);
+        spin.set_vexpand(true);
         stack.add_named(&symbols, Some("icon"));
         stack.add_named(&picture, Some("thumb"));
+        stack.add_named(&spin, Some("spin"));
         let label = gtk::Label::new(None);
         label.set_justify(gtk::Justification::Center);
         label.set_wrap(true);
@@ -434,7 +486,7 @@ impl ThumbCell {
         root.add_css_class("thumb-cell");
         root.append(&stack);
         root.append(&label);
-        Self { root, stack, arrow: arrow.upcast(), folder: folder.upcast(), glyph, icon, picture, label }
+        Self { root, stack, arrow: arrow.upcast(), folder: folder.upcast(), glyph, icon, picture, spin, label }
     }
 
     fn show(&self, texture: &relm4::gtk::gdk::Texture) {
@@ -474,6 +526,9 @@ pub fn thumb_factory() -> relm4::gtk::SignalListItemFactory {
         if let Some(cancel) = unsafe { item.steal_data::<Arc<AtomicBool>>("thumb-cancel") } {
             cancel.store(true, Ordering::Relaxed);
         }
+        if let Some(cell) = unsafe { item.data::<ThumbCell>("thumb-cell") } {
+            set_dot_spin(&unsafe { cell.as_ref() }.spin, false);
+        }
         let Some(watch) = (unsafe { item.steal_data::<MarkWatch>("mark-watch") }) else { return };
         if let Some(obj) = watch.obj.upgrade() {
             obj.disconnect(watch.handler);
@@ -482,11 +537,12 @@ pub fn thumb_factory() -> relm4::gtk::SignalListItemFactory {
     factory
 }
 
-// The icon stays until the image is decoded. A cell that is rebound or scrolled away cancels its decode.
+// A dot spinner shows until the image is decoded. A cell that is rebound or scrolled away cancels its decode.
 fn load_thumb(item: &relm4::gtk::ListItem, cell: &ThumbCell, obj: &EntryObject) {
     use relm4::gtk::{gdk, gio, glib};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    set_dot_spin(&cell.spin, false);
     cell.stack.set_visible_child_name("icon");
     let path = obj.thumb();
     if path.is_empty() {
@@ -499,6 +555,8 @@ fn load_thumb(item: &relm4::gtk::ListItem, cell: &ThumbCell, obj: &EntryObject) 
     }
     let cancel = Arc::new(AtomicBool::new(false));
     unsafe { item.set_data("thumb-cancel", cancel.clone()) };
+    cell.stack.set_visible_child_name("spin");
+    set_dot_spin(&cell.spin, true);
     let cell = cell.clone();
     glib::spawn_future_local(async move {
         // Large photos decode into a lot of memory, so only a few run at once.
@@ -515,7 +573,13 @@ fn load_thumb(item: &relm4::gtk::ListItem, cell: &ThumbCell, obj: &EntryObject) 
         let file = std::path::PathBuf::from(&key.0);
         let decoded = gio::spawn_blocking(move || rust_commander::imageview::decode(&file, THUMB as u32)).await;
         DECODING.set(DECODING.get() - 1);
-        let Ok(Ok(img)) = decoded else { return };
+        let Ok(Ok(img)) = decoded else {
+            if !cancel.load(Ordering::Relaxed) {
+                set_dot_spin(&cell.spin, false);
+                cell.stack.set_visible_child_name("icon");
+            }
+            return;
+        };
         let stride = img.width as usize * 4;
         let texture: gdk::Texture = gdk::MemoryTexture::new(
             img.width as i32,
@@ -533,6 +597,7 @@ fn load_thumb(item: &relm4::gtk::ListItem, cell: &ThumbCell, obj: &EntryObject) 
             cache.insert(key, texture.clone());
         });
         if !cancel.load(Ordering::Relaxed) {
+            set_dot_spin(&cell.spin, false);
             cell.show(&texture);
         }
     });

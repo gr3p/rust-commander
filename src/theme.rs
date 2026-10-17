@@ -714,7 +714,7 @@ label.glyph {{
   margin: 0;
   min-height: 0;
 }}
-.cursor-mark {{
+.cursor-mark, .thumb-spin {{
   color: {bright};
 }}
 .file-icon {{
