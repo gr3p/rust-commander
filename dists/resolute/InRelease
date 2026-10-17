@@ -4,31 +4,31 @@ Hash: SHA512
 Architectures: amd64
 Codename: resolute
 Components: main
-Date: Sat, 17 Oct 2026 17:04:22 +0000
+Date: Sat, 17 Oct 2026 18:13:05 +0000
 Description: Rust Commander
 Label: Rust Commander
 Origin: Rust Commander
 Suite: resolute
 MD5Sum:
- 6b54643393db10fb417c643edd854120             1494 Release
- 18911d740a8082ae6bef2a99519873d8             1018 main/binary-amd64/Packages
- 54514023a144356c466d4d152c2901a9              666 main/binary-amd64/Packages.gz
+ 5cb71883b15c6a914e3f0096bf7c53dc             1494 Release
+ 1cf53ae7db6e52568f183aaa619129b2             1018 main/binary-amd64/Packages
+ d3f759c02178315e17e4f8fee8440211              666 main/binary-amd64/Packages.gz
 SHA1:
- 9eb13f11f5863feb157f6b48344abc71073d9c8b             1494 Release
- c32f50c9390c538229e5cdcb1f55c2c1894f4254             1018 main/binary-amd64/Packages
- 965f627bc73c0cc4b195b2d69be7625b8a1a4fe8              666 main/binary-amd64/Packages.gz
+ f6a9707b09ba2254d5a89fb2e540ffbfd4609c48             1494 Release
+ 00e755b71cec350e0a6ea3216934d3877b14eb39             1018 main/binary-amd64/Packages
+ f4bc16bbb8fc45c09e73da76c1a4994f06daab6a              666 main/binary-amd64/Packages.gz
 SHA256:
- fb2c8d70754d7336c3a96091e0868a0a74943e27dc7752bd6130797da02f1a84             1494 Release
- d35986b9a30f9206da49d63e8a4fc196e85595dac57033a87f8baaf332ddaa6b             1018 main/binary-amd64/Packages
- b30647d019475b86504fb25acef933793d0eead7cbf4596c95d648623fe73129              666 main/binary-amd64/Packages.gz
+ faa2a0bdabbee833260562169a7c5c90d5ee1d1ae35315709bfed2c9bf91a8e4             1494 Release
+ ad912b3432fa52242b2e013cb5e48525cd02a98e50efec3f2855fa7d2ee48f5c             1018 main/binary-amd64/Packages
+ 6569ffe4002440cf645a7fdd50c9a8d2a13aab896d4b98bb52875ecdd368ac6d              666 main/binary-amd64/Packages.gz
 SHA512:
- 9addd72054ac28882d9dbfd884cb66ee5d95b491c749e7151337274300c4ed602b62dc2d710ad17862f2bd6d25a0416e018ffe95e14588ab7fd6338e42af12e0             1494 Release
- bfc73d4427bad01a2f6ec97f61275faea550653c0631de585000ce2e7ab4df88a071066d603304a3aae71270a1207ff3b4bde4cd768c9754831e05bc226d31b7             1018 main/binary-amd64/Packages
- 0130203e3318c0c54f3f8a1f5882f35273f142f0fcc9c5e8d9dd088e70f0ab656f6be52cc8774deb2e91ca61021baf2353664db933e22e3cfcbb1f97018211fb              666 main/binary-amd64/Packages.gz
+ 38930c10e972c18f79b91d3b489cadcdbcdfd8daf48ab23832a83ce407a33a40d4c747649c8601572020783d18a1b45deea7df9d14f3f028ea2d83096c980456             1494 Release
+ 48cc3649e375637802b2cc468feb6b3a6dd17b91bbb33238fc6f3c3e601536dfd2556153de51189215702d66315e9b9edb869b650b2da2cc941d7b822baf53a0             1018 main/binary-amd64/Packages
+ 02e62b5ad9549788cbb87d055222fa559fa1cc75395ee1e46af94bdd11bea9c09dc326d8c7c7777635abcdf66735811eadb764ed5cda401f441230053086d031              666 main/binary-amd64/Packages.gz
 -----BEGIN PGP SIGNATURE-----
 
-iHQEARYKAB0WIQQIA7cT92yM+4y9PJWyA8rrK4QdOgUCatOqlgAKCRCyA8rrK4Qd
-Okl9APj/AiUZDYvf4pP+Pux/PoUDar65xxAyxoKWGNLQPbvQAQCLLIDEtqFQHycj
-golOB0A2Wudcewwg9nhEHLe1+Gl4Dw==
-=GYjt
+iHUEARYKAB0WIQQIA7cT92yM+4y9PJWyA8rrK4QdOgUCatO6sQAKCRCyA8rrK4Qd
+OirQAQD2+rjB7CD4E3x/l0u+QajXehw+XT31ycjhfTS57PTkJwD+JXCkDjLq1N7M
+mASQryLuihXUcCXsQbgtZStoM/uRxws=
+=h4+E
 -----END PGP SIGNATURE-----
