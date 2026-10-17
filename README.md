@@ -14,14 +14,26 @@ A dual-pane file manager for Linux, in the tradition of Total Commander on Windo
 yay -S rust-commander
 ```
 
-**Ubuntu and Debian**
+**Ubuntu 26.04**
 
-1. Download the newest `rust-commander_<version>_amd64.deb` from the [Releases page](https://github.com/gr3p/rust-commander/releases/latest).
-2. Install it from the folder where it was saved. apt pulls in GTK4 and VTE for you.
+Add the repository once. apt then installs Rust Commander and pulls in GTK4 and VTE.
 
 ```bash
-sudo apt install ./rust-commander_*_amd64.deb
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://gr3p.github.io/rust-commander/rust-commander.gpg | sudo tee /etc/apt/keyrings/rust-commander.gpg >/dev/null
+sudo tee /etc/apt/sources.list.d/rust-commander.sources >/dev/null <<'EOF'
+Types: deb
+URIs: https://gr3p.github.io/rust-commander
+Suites: resolute
+Components: main
+Architectures: amd64
+Signed-By: /etc/apt/keyrings/rust-commander.gpg
+EOF
+sudo apt update
+sudo apt install rust-commander
 ```
+
+The package is built for Ubuntu 26.04 on amd64. The same file is on the [Releases page](https://github.com/gr3p/rust-commander/releases/latest) if you want to install it without adding the repository: `sudo apt install ./rust-commander_*_amd64.deb`.
 
 Start it from the application menu, or run `rust-commander`.
 
