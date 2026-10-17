@@ -1,0 +1,34 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Architectures: amd64
+Codename: resolute
+Components: main
+Date: Sat, 17 Oct 2026 14:33:25 +0000
+Description: Rust Commander
+Label: Rust Commander
+Origin: Rust Commander
+Suite: resolute
+MD5Sum:
+ bc9b7dcc134d8353be639249ead4e397              184 Release
+ c14fa58cdbe47762b1a1575c7cb490d9              879 main/binary-amd64/Packages
+ 9d1206793852a2a5f11fb59007944cc0              569 main/binary-amd64/Packages.gz
+SHA1:
+ 095e6c915f6b7e3c2eae589539b73af7036be3a2              184 Release
+ 018223582ef40ce4593dbddb5ec4a38cb2db10e9              879 main/binary-amd64/Packages
+ f9536269bdf92a3e06eaeb2f362eba7f9b324ca5              569 main/binary-amd64/Packages.gz
+SHA256:
+ b655d5c8df4bf548fabb035a4876119de5b4e838609d694c21e47f41e2183b0a              184 Release
+ 01e86a2e70a1091f73bc6cabafc502637cc496b1454457ab29b50cf11ffe3254              879 main/binary-amd64/Packages
+ c28369e7c4c291114353340a3b628b61668423a05759a5dce37dbe72981105cf              569 main/binary-amd64/Packages.gz
+SHA512:
+ d86a2f703e75f0ff6c2bbb2fa34595e6eeb81bd7588326b0689964cdd5000d62b463ce0b7b4ad00816a1ff041ddfa83acdca002dac5b9825f6a6faa66f16330a              184 Release
+ d35c1333a655e0a32243c361684ef6301d41b18c2d28235b011602dbff04f94dd25dbc5d95a5d0da00e7ea2ac2185f14dbf274785c1868364c0c8a31b7e331a0              879 main/binary-amd64/Packages
+ 00c282f39d3e5cc1dbb66b04e1378834d1bd6307f93480e99b1560284cff079d52dc6acc7cb68af25b3a7c80d7142ec54a506deda5d152632e244dd785f2c055              569 main/binary-amd64/Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iHQEARYKAB0WIQQIA7cT92yM+4y9PJWyA8rrK4QdOgUCatOHNQAKCRCyA8rrK4Qd
+Oox1APdx+x0WsrJ1Gk2B6dedbHIZM3jWx2sJnLr4yNNaBjCFAP4xWDAzKyRN22HW
+NFgtWrarrxn+mwdbpcI9Bb4lkrBgDQ==
+=0mOs
+-----END PGP SIGNATURE-----

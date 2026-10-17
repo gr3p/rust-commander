@@ -1,0 +1,19 @@
+Package: rust-commander
+Version: 0.1.0-1
+Architecture: amd64
+Maintainer: Marcus Wallén <sysopt@protonmail.com>
+Installed-Size: 8363
+Depends: libc6 (>= 2.43), libcairo2 (>= 1.2.4), libgcc-s1 (>= 4.2), libglib2.0-0t64 (>= 2.54.0), libgraphene-1.0-0 (>= 1.5.4), libgtk-4-1 (>= 4.9.2), libpango-1.0-0 (>= 1.44.3), libstdc++6 (>= 5.2), libvte-2.91-gtk4-0 (>= 0.47.90), hicolor-icon-theme
+Suggests: p7zip-full
+Filename: pool/main/r/rust-commander/rust-commander_0.1.0-1_amd64.deb
+Size: 3066580
+MD5sum: 336d871ef60409856ed551e66776c567
+SHA1: 23941ccd00dd6fd00521ccc2958e5a6dbbc76f11
+SHA256: f16054bb3fbd31a37dcd0157876d67657dc5177bf3ae4dc29093dc1ab94a3716
+Section: utils
+Priority: optional
+Homepage: https://github.com/gr3p/rust-commander
+Description: dual-pane file manager
+ Rust Commander copies and moves files, views and edits text, shows images,
+ and packs and unpacks archives.
+
