@@ -18,6 +18,7 @@ const HINTS: &[Act] = &[
     Act::CopyDir,
     Act::Filter,
     Act::Search,
+    Act::Thumbs,
     Act::DiskInfo,
 ];
 
@@ -370,6 +371,7 @@ fn score(act: Act, cue: &Cue) -> i32 {
         Act::View if cue.text || cue.image => 40,
         Act::Edit if cue.text => 36,
         Act::Properties if cue.image => 34,
+        Act::Thumbs if cue.image => 28,
         Act::CopyPaths if cue.text => 32,
         Act::CopyPaths if cue.dir => 22,
         Act::CopyDir if cue.dir => 20,
@@ -378,6 +380,7 @@ fn score(act: Act, cue: &Cue) -> i32 {
         Act::DiskInfo if cue.drive => 30,
         Act::Filter => 10,
         Act::Search => 8,
+        Act::Thumbs => 7,
         Act::CopyDir => 6,
         _ => 0,
     }
@@ -521,7 +524,15 @@ mod tests {
             cue.file = true;
         }));
         assert_eq!(ranked[0], Act::Properties);
+        assert!(ranked.contains(&Act::Thumbs));
         assert!(!ranked.contains(&Act::View));
+    }
+
+    #[test]
+    fn browsing_offers_thumbnails() {
+        let ranked = rank(&cue(|cue| cue.file = true));
+        assert!(ranked.contains(&Act::Thumbs));
+        assert!(hint_label(Act::Thumbs, "right").contains("Thumbnails"));
     }
 
     #[test]

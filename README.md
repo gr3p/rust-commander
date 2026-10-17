@@ -4,6 +4,8 @@ A dual-pane file manager for Linux, in the tradition of Total Commander on Windo
 
 <img src="img/screenshot.png" alt="Rust Commander with two file panels" width="900">
 
+<img src="img/quick-view.png" alt="Quick view of an image in the other panel" width="440"> <img src="img/thumbnails.jpg" alt="Thumbnail grid with the About window" width="440">
+
 ## Install
 
 **Arch and Omarchy**
@@ -41,7 +43,7 @@ For `.7z` and `.rar` archives, also install 7-Zip (`p7zip-full` on Ubuntu, `p7zi
 
 **Shell.** F9 opens a real terminal in the other panel, in the active panel's directory, and F9 again hides it without stopping it. Ctrl+F9 opens another one. Each is a numbered button, and Alt+1 to Alt+9 switches between them.
 
-**Command bar.** The button row above the F keys shows the commands you are most likely to want for what is under the cursor, so an archive offers unpack. F1 (All CMD) lists the rest, and F12 holds the settings.
+**Command bar.** The button row above the F keys shows the commands you are most likely to want for what is under the cursor, so an archive offers unpack and a file offers thumbnails. F1 (All CMD) lists the rest, and F12 holds the settings.
 
 **Themes.** Built-in themes are Tokyo Night, Catppuccin Mocha, Gruvbox Dark and Nord. On Omarchy the window follows the active Omarchy theme and restyles by itself when you change it.
 

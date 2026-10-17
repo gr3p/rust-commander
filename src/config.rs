@@ -51,7 +51,7 @@ pub struct Config {
     pub mode_buttons: bool,
     #[serde(default = "default_true")]
     pub command_bar: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub file_icons: bool,
     #[serde(default = "default_icon_pack")]
     pub icon_pack: String,
@@ -112,7 +112,7 @@ impl Default for Config {
             rar: String::new(),
             mode_buttons: true,
             command_bar: true,
-            file_icons: false,
+            file_icons: true,
             icon_pack: default_icon_pack(),
             flash_feedback: true,
             syntax_highlight: true,

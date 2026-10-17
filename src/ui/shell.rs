@@ -186,12 +186,16 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
     let image_scale = hint_button("S Fit", || super::msg::Msg::ToggleImageScale, sender);
     let image_prev = hint_button("Left Previous", || super::msg::Msg::ImageStep(-1), sender);
     let image_next = hint_button("Right Next", || super::msg::Msg::ImageStep(1), sender);
+    let thumbs = rust_commander::commands::caption("Ctrl+Shift+F1", "Thumbnails");
+    let image_thumbs = hint_button(&thumbs, || super::msg::Msg::Run(rust_commander::commands::Act::Thumbs), sender);
     image_scale.set_visible(true);
     image_prev.set_visible(true);
     image_next.set_visible(true);
+    image_thumbs.set_visible(true);
     image_bar.append(&image_scale);
     image_bar.append(&image_prev);
     image_bar.append(&image_next);
+    image_bar.append(&image_thumbs);
     let text_modes = charset_bar(sender);
     let edit_button = bar_button(&rust_commander::commands::caption("Ctrl+E", "Edit"), || super::msg::Msg::ToggleQuickEdit, sender);
     let save_button = bar_button(&rust_commander::commands::caption("Ctrl+S", "Save"), || super::msg::Msg::SaveQuick, sender);

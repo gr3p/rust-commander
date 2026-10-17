@@ -1393,7 +1393,7 @@ fn bookmark_roundtrip_config(dir: &Path) -> Result<(), String> {
     if loaded.cursor_alpha != 70 {
         return Err("cursor alpha default".into());
     }
-    if loaded.file_icons {
+    if !loaded.file_icons {
         return Err("file icons default".into());
     }
     if loaded.icon_pack != theme::OMARCHY {
