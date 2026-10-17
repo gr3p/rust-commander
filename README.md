@@ -1,7 +1,10 @@
-# <img src="img/rust-commander.png" alt="" height="40" align="middle"> Rust Commander
+<p align="center"><img src="img/rust-commander.png" alt="" height="120"></p>
+<h1 align="center">Rust Commander</h1>
 
-[![License: MIT](https://img.shields.io/github/license/gr3p/rust-commander)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/gr3p/rust-commander)](https://github.com/gr3p/rust-commander/releases/latest)
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/gr3p/rust-commander" alt="License: MIT"></a>
+  <a href="https://github.com/gr3p/rust-commander/releases/latest"><img src="https://img.shields.io/github/v/release/gr3p/rust-commander" alt="Release"></a>
+</p>
 
 A dual-pane file manager for Linux, in the tradition of Total Commander on Windows and Midnight Commander in the terminal. It keeps the keyboard-driven F-key workflow and adds a native GTK4 window written in Rust, built-in terminals, image and text viewers, and themes that follow your desktop. On [Omarchy](https://omarchy.org) it restyles itself when you change theme.
 
@@ -22,15 +25,14 @@ Early release (0.1.x): expect rough edges, and please [report them](https://gith
 
 ## Features
 
-- Two panels where the focused one is the source and the other the target, with tabs, history, bookmarks and a drive list
-- Copy and move with a queue and progress. A copy never leaves a half-written file under the real name
-- Filter and search by name, file text, size, date, duplicates and inside archives
-- Text, binary, hex and JSON viewer with in-place editing, image viewer, thumbnail grid and quick view in the other panel
-- Pack to `.zip`, `.7z` and `.rar`, unpack zip, rar and tar, and test archives
-- Checksums (`.sfv`, `.md5`, `.sha1`, `.sha256`) and Base64, UUE and MIME encoding
-- Real terminals in the other panel, as many as you want
-- A command bar that offers the commands that fit what is under the cursor
-- Themes: Tokyo Night, Catppuccin Mocha, Gruvbox Dark, Nord, and Omarchy
+- **Built for the keyboard.** Two panels and the F-key workflow you know from Total Commander, so everyday file work takes a few keystrokes.
+- **Fast and safe file handling.** Copy and move in the background while you keep working.
+- **Find anything.** Search by name or by what is inside your files, and filter the list as you type.
+- **See before you open.** Preview text, images and thumbnails right next to your files, and edit in place.
+- **Archives without the fuss.** Pack and unpack zip, 7z, rar and tar, and verify files with checksums.
+- **A terminal at hand.** Open real shells beside your files and jump between them.
+- **A command bar that adapts.** It offers the commands that fit what is under the cursor.
+- **Looks like your desktop.** Ships with popular themes, and follows Omarchy when you change theme.
 
 ## Install
 
