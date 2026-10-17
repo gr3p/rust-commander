@@ -26,7 +26,8 @@ Early release (0.1.x): expect rough edges, and please [report them](https://gith
 ## Features
 
 - **Built for the keyboard.** Two panels and the F-key workflow you know from Total Commander, so everyday file work takes a few keystrokes.
-- **Fast and safe file handling.** Copy and move in the background while you keep working.
+- **Fast and native.** Written in Rust as a single binary of about 10 MB, with no runtime to start. The first folder is listed in about a tenth of a second, folders load in the background, and copy and move keep running while you work.
+- **Easy on memory with big files.** Files are streamed in 1 MiB chunks and the viewer reads only the part on screen, so a multi-gigabyte file costs no more memory than a small one.
 - **Find anything.** Search by name or by what is inside your files, and filter the list as you type.
 - **See before you open.** Preview text, images and thumbnails right next to your files, and edit in place.
 - **Archives without the fuss.** Pack and unpack zip, 7z, rar and tar, and verify files with checksums.
