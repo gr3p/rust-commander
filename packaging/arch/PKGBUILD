@@ -1,6 +1,5 @@
 # Maintainer: Marcus Wallén <sysopt@protonmail.com>
 # Tag v0.1.0 unpacks as rust-commander-0.1.0.
-# Replace SKIP with `makepkg -g` after that tag is on GitHub, before an AUR upload.
 pkgname=rust-commander
 pkgver=0.1.0
 pkgrel=1
@@ -13,7 +12,7 @@ makedepends=('cargo' 'pkgconf')
 optdepends=('p7zip: 7z archives' 'rar: rar archives')
 options=('!lto')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('6d97ca4a1d92ed12ca082cd7f2d768b6a436db9ef9507b7267604944bc617a96')
 
 prepare() {
 	cd "$pkgname-$pkgver"

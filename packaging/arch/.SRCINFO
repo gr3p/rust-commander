@@ -14,6 +14,6 @@ pkgbase = rust-commander
 	optdepends = rar: rar archives
 	options = !lto
 	source = rust-commander-0.1.0.tar.gz::https://github.com/gr3p/rust-commander/archive/refs/tags/v0.1.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = 6d97ca4a1d92ed12ca082cd7f2d768b6a436db9ef9507b7267604944bc617a96
 
 pkgname = rust-commander
