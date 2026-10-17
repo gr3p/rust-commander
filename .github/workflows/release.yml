@@ -50,7 +50,7 @@ jobs:
       - name: GitHub release
         run: |
           deb=$(ls ../rust-commander_*_amd64.deb)
-          GH_DEBUG=api gh release create "v${{ steps.version.outputs.version }}" "$deb" --target "$GITHUB_SHA" --generate-notes --latest
+          gh release create "v${{ steps.version.outputs.version }}" "$deb" --target "$GITHUB_SHA" --generate-notes --latest
 
       - uses: actions/checkout@v4
         with:
