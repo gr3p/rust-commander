@@ -1,0 +1,91 @@
+name: Release
+
+# Every push to master builds a .deb, publishes a GitHub release and updates the apt repo on gh-pages.
+on:
+  push:
+    branches: [master]
+    paths-ignore: ["**.md", ".cursor/**", "LICENSE"]
+
+concurrency: release
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    container: ubuntu:26.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git gh gnupg apt-utils dpkg-dev debhelper build-essential cargo rustc pkg-config libgtk-4-dev libvte-2.91-gtk4-dev
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-all-tags: true
+          fetch-depth: 0
+
+      # Major.minor comes from Cargo.toml, the patch is the commit count, so every push is a new version.
+      - name: Set version
+        id: version
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          base=$(sed -n 's/^version = "\([0-9]*\.[0-9]*\)\..*/\1/p' Cargo.toml | head -n 1)
+          version="$base.$(git rev-list --count HEAD)"
+          sed -i "0,/^version = .*/s//version = \"$version\"/" Cargo.toml
+          # Cargo.lock must follow, the package build uses --locked.
+          perl -0pi -e "s/(name = \"rust-commander\"\nversion = )\"[^\"]*\"/\$1\"$version\"/" Cargo.lock
+          printf 'rust-commander (%s-1) unstable; urgency=medium\n\n  * Automated release.\n\n -- Rust Commander <sysopt@protonmail.com>  %s\n\n%s\n' \
+            "$version" "$(date -R)" "$(cat debian/changelog)" > debian/changelog
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build package
+        run: dpkg-buildpackage -us -uc -b
+
+      - name: GitHub release
+        run: |
+          deb=$(ls ../rust-commander_*_amd64.deb)
+          gh release create "v${{ steps.version.outputs.version }}" "$deb" --target "$GITHUB_SHA" --generate-notes --latest
+
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: pages
+
+      - name: Update apt repository
+        working-directory: pages
+        env:
+          APT_GPG_KEY: ${{ secrets.APT_GPG_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          echo "$APT_GPG_KEY" | gpg --batch --import
+          # Only the newest package stays, apt never needs the older ones.
+          rm -f rust-commander_*.deb pool/main/r/rust-commander/*.deb
+          cp ../../rust-commander_*_amd64.deb pool/main/r/rust-commander/
+          dir=dists/resolute/main/binary-amd64
+          mkdir -p "$dir"
+          apt-ftparchive packages pool > "$dir/Packages"
+          gzip -9kf "$dir/Packages"
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin="Rust Commander" \
+            -o APT::FTPArchive::Release::Label="Rust Commander" \
+            -o APT::FTPArchive::Release::Suite=resolute \
+            -o APT::FTPArchive::Release::Codename=resolute \
+            -o APT::FTPArchive::Release::Architectures=amd64 \
+            -o APT::FTPArchive::Release::Components=main \
+            -o APT::FTPArchive::Release::Description="Rust Commander" \
+            release dists/resolute > Release.tmp
+          mv Release.tmp dists/resolute/Release
+          sign() { gpg --batch --yes --pinentry-mode loopback --passphrase "$APT_GPG_PASSPHRASE" --default-key B203CAEB2B841D3A "$@"; }
+          sign -abs -o dists/resolute/Release.gpg dists/resolute/Release
+          sign --clearsign -o dists/resolute/InRelease dists/resolute/Release
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          git commit -m "apt: ${{ steps.version.outputs.version }}"
+          git push

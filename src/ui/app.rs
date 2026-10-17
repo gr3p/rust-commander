@@ -996,7 +996,7 @@ impl App {
                     }
                     Err(err) => {
                         rust_commander::log::error(&format!("mkdir {name}: {err}"));
-                        self.status = err.to_string();
+                        self.show_error("New folder", &format!("Could not create {name} in {}: {err}", parent.display()));
                     }
                 }
             }

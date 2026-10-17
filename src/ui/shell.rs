@@ -21,6 +21,9 @@ use super::row::{self, EntryObject};
 
 static FLASH_ENABLED: AtomicBool = AtomicBool::new(true);
 static PANE_BLINK: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+/// One blink is three steps: on, off, on, off.
+const BLINK_STEP: Duration = Duration::from_millis(120);
+pub const BLINK_LEN: Duration = Duration::from_millis(360);
 
 pub struct PaneUi {
     pub frame: gtk::Frame,
@@ -599,7 +602,7 @@ pub fn on_click(button: &gtk::Button, action: impl Fn() + 'static) {
         }
         blink_button(button);
         let (action, pending, button) = (Rc::clone(&action), Rc::clone(&pending), button.downgrade());
-        gtk::glib::timeout_add_local_once(Duration::from_millis(240), move || {
+        gtk::glib::timeout_add_local_once(BLINK_LEN, move || {
             pending.set(false);
             if button.upgrade().is_some_and(|button| button.is_mapped()) {
                 action();
@@ -619,7 +622,7 @@ pub fn blink_then(widget: &gtk::Widget, action: impl FnOnce() + 'static) {
         return;
     }
     blink_widget(widget);
-    gtk::glib::timeout_add_local_once(Duration::from_millis(240), action);
+    gtk::glib::timeout_add_local_once(BLINK_LEN, action);
 }
 
 /// A notebook tab is a gizmo around the label. Flashing the label only covers the text.
@@ -635,7 +638,7 @@ pub fn blink_widget(widget: &gtk::Widget) {
     let widget = widget.clone();
     widget.add_css_class("flash");
     let step = Cell::new(0u8);
-    gtk::glib::timeout_add_local(Duration::from_millis(80), move || {
+    gtk::glib::timeout_add_local(BLINK_STEP, move || {
         let n = step.get() + 1;
         step.set(n);
         if n % 2 == 0 {
@@ -660,7 +663,7 @@ pub fn blink_frame(frame: &gtk::Frame, pane: usize, only_while_active: bool) {
     let frame = frame.clone();
     frame.add_css_class("pane-blink");
     let step = Cell::new(0u8);
-    gtk::glib::timeout_add_local(Duration::from_millis(80), move || {
+    gtk::glib::timeout_add_local(BLINK_STEP, move || {
         if PANE_BLINK[pane].load(Ordering::Relaxed) != token {
             return gtk::glib::ControlFlow::Break;
         }
@@ -891,8 +894,8 @@ pub(crate) fn edit_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> 
     let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
     let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
     // Escape leaves edit. Ctrl+Q leaves quick view once the text is saved.
-    // Ctrl+D discards. Ctrl+S saves. Ctrl+Y toggles syntax. Ctrl+L edits the path. Ctrl+E stays out of the text. F1 opens commands.
-    (!ctrl && !alt && key == Key::F1)
+    // Ctrl+D discards. Ctrl+S saves. Ctrl+Y toggles syntax. Ctrl+L edits the path. Ctrl+E stays out of the text. F1 opens commands. F12 opens settings.
+    (!ctrl && !alt && matches!(key, Key::F1 | Key::F12))
         || key == Key::Escape
         || (ctrl && !alt && matches!(key, Key::s | Key::S | Key::e | Key::E | Key::d | Key::D | Key::q | Key::Q | Key::y | Key::Y | Key::l | Key::L))
 }
