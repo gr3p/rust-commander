@@ -4,7 +4,7 @@ name: Release
 on:
   push:
     branches: [master]
-    paths-ignore: ["**.md", ".cursor/**", "LICENSE"]
+    paths-ignore: ["**.md", ".cursor/**", ".github/**", "LICENSE"]
 
 concurrency: release
 
@@ -27,7 +27,6 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          fetch-all-tags: true
           fetch-depth: 0
 
       # Major.minor comes from Cargo.toml, the patch is the commit count, so every push is a new version.
