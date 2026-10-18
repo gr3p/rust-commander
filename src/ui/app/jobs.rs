@@ -1228,6 +1228,7 @@ impl App {
     }
 
     pub(in crate::ui::app) fn close_dialog(&mut self) {
+        self.mount_ui = None;
         if let Some(win) = self.dialog.take() {
             win.close();
         }

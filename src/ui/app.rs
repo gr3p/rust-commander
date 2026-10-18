@@ -26,6 +26,7 @@ use super::shell::{self, Shell};
 
 mod commands;
 mod disk;
+mod mount;
 mod jobs;
 mod props;
 mod queue;
@@ -160,6 +161,7 @@ struct SettingsUi {
     cursor_color: (gtk::ColorDialogButton, gtk::Button),
     cursor_text_color: (gtk::ColorDialogButton, gtk::Button),
     mark_color: (gtk::ColorDialogButton, gtk::Button),
+    blink_color: (gtk::ColorDialogButton, gtk::Button),
     image: gtk::Label,
     clear: gtk::Button,
     stretch: gtk::Label,
@@ -186,6 +188,8 @@ pub struct App {
     job: Option<Job>,
     ask: Option<Ask>,
     dialog: Option<gtk::Window>,
+    mount_ui: Option<mount::MountUi>,
+    mount_gen: u64,
     progress: Option<(gtk::Window, gtk::Label, gtk::ProgressBar, Option<(gtk::Label, gtk::TextView)>)>,
     meter: Option<f64>,
     pending: Option<PendingUnpack>,
@@ -345,6 +349,8 @@ impl SimpleComponent for App {
             job: None,
             ask: None,
             dialog: None,
+            mount_ui: None,
+            mount_gen: 0,
             progress: None,
             lister_wait: false,
             archive_wait: false,
@@ -594,6 +600,7 @@ impl App {
             Msg::CursorColor(color) => self.set_cursor_color(color),
             Msg::CursorTextColor(color) => self.set_cursor_text_color(color),
             Msg::MarkColor(color) => self.set_mark_color(color),
+            Msg::BlinkColor(color) => self.set_blink_color(color),
             Msg::CursorAlpha(alpha) => self.set_cursor_alpha(alpha),
             Msg::CloseSettings => self.close_settings(),
             Msg::ArchiveListed(result) => self.on_archive_listed(result, sender),
@@ -656,6 +663,12 @@ impl App {
                 let name = path.display().to_string();
                 super::drives::release(&path, eject, move |result| tx.emit(Msg::DriveStatus(released(&name, result))));
             }
+            Msg::MountClosed(generation) => {
+                if self.mount_gen == generation {
+                    self.mount_ui = None;
+                }
+            }
+            Msg::MountFinished { generation, point, open, error } => self.mount_finished(generation, point, open, error, sender),
             Msg::Smoke => self.run_smoke(sender),
             Msg::DirChanged(pane, path) => self.reload_watched(pane, &path, sender),
             Msg::SearchFeed => self.show_search_feed(sender),
@@ -776,6 +789,11 @@ impl App {
                 }
                 Key::h | Key::H => self.toggle_hidden(),
                 Key::i | Key::I => self.show_disk_info(None),
+                Key::m | Key::M if shift => {
+                    let tx = sender.input_sender().clone();
+                    let button = self.shell.mount_button.clone();
+                    shell::blink_then(button.upcast_ref(), move || tx.emit(Msg::Run(rust_commander::commands::Act::Mount)));
+                }
                 Key::l | Key::L => self.focus_path(),
                 Key::y | Key::Y => self.toggle_syntax(),
                 Key::t | Key::T => self.open_new_tab(sender),

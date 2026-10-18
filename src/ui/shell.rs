@@ -59,6 +59,7 @@ pub struct Shell {
     pub active: Rc<Cell<usize>>,
     pub drives: Vec<(PathBuf, gtk::Button)>,
     pub idle_drives: Vec<gtk::Button>,
+    pub mount_button: gtk::Button,
     pub drive_snapshot: DriveSnapshot,
     pub edit_button: gtk::Button,
     pub save_button: gtk::Button,
@@ -98,7 +99,8 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
     }
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let active = Rc::new(Cell::new(0));
-    let (shell_bar, shell_buttons, drives, idle_drives, drive_snapshot) = drive_bar(sender, &active, &iconpack::active(icon_pack));
+    let (shell_bar, shell_buttons, drives, idle_drives, mount_button, drive_snapshot) =
+        drive_bar(sender, &active, &iconpack::active(icon_pack));
     root.append(&shell_bar);
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
     paned.add_css_class("panes");
@@ -295,6 +297,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
         active,
         drives,
         idle_drives,
+        mount_button,
         drive_snapshot,
         edit_button,
         save_button,
@@ -384,7 +387,7 @@ fn drive_bar(
     sender: &relm4::Sender<super::msg::Msg>,
     active: &Rc<Cell<usize>>,
     icon_pack: &str,
-) -> (gtk::Box, gtk::Box, Vec<(PathBuf, gtk::Button)>, Vec<gtk::Button>, DriveSnapshot) {
+) -> (gtk::Box, gtk::Box, Vec<(PathBuf, gtk::Button)>, Vec<gtk::Button>, gtk::Button, DriveSnapshot) {
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
     bar.add_css_class("drives");
     bar.set_margin_top(2);
@@ -393,12 +396,20 @@ fn drive_bar(
     for button in drives.iter().map(|(_, button)| button).chain(idle.iter()) {
         bar.append(button);
     }
+    let mount = gtk::Button::with_label("Mount");
+    mount.add_css_class("drive");
+    mount.set_margin_start(8);
+    mount.set_focus_on_click(false);
+    mount.set_tooltip_text(Some(&rust_commander::commands::caption("Ctrl+Shift+M", "Mount")));
+    let tx = sender.clone();
+    on_click(&mount, move || tx.emit(super::msg::Msg::Run(Act::Mount)));
+    bar.append(&mount);
     let shells = gtk::Box::new(gtk::Orientation::Horizontal, 2);
     shells.set_margin_start(8);
     shells.set_visible(false);
     bar.append(&shells);
-    bar.set_visible(!drives.is_empty() || !idle.is_empty());
-    (bar, shells, drives, idle, snapshot)
+    bar.set_visible(true);
+    (bar, shells, drives, idle, mount, snapshot)
 }
 
 pub type DriveSnapshot = (Vec<rust_commander::places::Mount>, Vec<super::drives::Idle>);
@@ -962,11 +973,13 @@ pub(crate) fn edit_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> 
     use gtk::gdk::Key;
     let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
     let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
+    let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
     // Escape leaves edit. Ctrl+Q leaves quick view once the text is saved.
     // Ctrl+D discards. Ctrl+S saves. Ctrl+Y toggles syntax. Ctrl+L edits the path. Ctrl+E stays out of the text. F1 opens commands. F12 opens settings.
     (!ctrl && !alt && matches!(key, Key::F1 | Key::F12))
         || key == Key::Escape
         || (ctrl && !alt && matches!(key, Key::s | Key::S | Key::e | Key::E | Key::d | Key::D | Key::q | Key::Q | Key::y | Key::Y | Key::l | Key::L))
+        || (ctrl && shift && !alt && matches!(key, Key::m | Key::M))
 }
 
 // Ctrl+C copies, Ctrl+X cuts, Ctrl+V pastes. Shift stays free for copy path.
@@ -984,8 +997,10 @@ fn terminal_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
     let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
     // Escape stays in the shell (vim, fzf). F9 toggles the file list. F1 opens commands.
     // Tab switches to the file pane. Completion inside the shell is given up.
+    let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
     (!ctrl && !alt && matches!(key, Key::F1 | Key::F9 | Key::Tab | Key::ISO_Left_Tab))
         || (ctrl && !alt && matches!(key, Key::q | Key::Q | Key::w | Key::W | Key::F9))
+        || (ctrl && shift && !alt && matches!(key, Key::m | Key::M))
         || (alt && !ctrl && is_digit_key(key))
 }
 

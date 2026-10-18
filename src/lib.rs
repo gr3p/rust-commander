@@ -19,6 +19,7 @@ pub mod icons;
 pub mod imageview;
 pub mod listing;
 pub mod lister;
+pub mod mount;
 pub mod ops;
 pub mod pack;
 pub mod places;

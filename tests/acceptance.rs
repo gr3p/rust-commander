@@ -529,7 +529,19 @@ fn cursor_text_follows_theme_until_overridden() -> Result<(), String> {
         return Err(format!("mark color {marked} {own_mark}"));
     }
     let cfg = config::Config { cursor_color: "#112233".into(), ..config::Config::default() };
-    eq(cfg.color_overrides(), vec!["cursor color"], "overrides")
+    eq(cfg.color_overrides(), vec!["cursor color"], "overrides")?;
+    let themed_blink = theme::blink(&palette, "");
+    let own_blink = theme::blink(&palette, "#ff00aa");
+    if !themed_blink.contains(&theme::blink_color(&palette)) || !themed_blink.contains(".pane-blink") {
+        return Err(format!("theme blink {themed_blink}"));
+    }
+    if !own_blink.contains("#ff00aa") || own_blink.contains(&theme::blink_color(&palette)) {
+        return Err(format!("blink override {own_blink}"));
+    }
+    let bad_blink = theme::blink(&palette, "red");
+    eq(bad_blink.contains("red"), false, "invalid blink color ignored")?;
+    let blink_cfg = config::Config { blink_color: "#ff00aa".into(), ..config::Config::default() };
+    eq(blink_cfg.color_overrides(), vec!["blink color"], "blink override")
 }
 
 fn list_background_color_and_image() -> Result<(), String> {

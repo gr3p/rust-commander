@@ -191,9 +191,9 @@ impl App {
         if self.shell.shell_buttons.is_visible() != buttons {
             self.shell.shell_buttons.set_visible(buttons);
         }
-        let bar = !self.shell.drives.is_empty() || !self.shell.idle_drives.is_empty() || buttons;
-        if self.shell.shell_bar.is_visible() != bar {
-            self.shell.shell_bar.set_visible(bar);
+        // Mount sits on this row even when no disk is mounted.
+        if !self.shell.shell_bar.is_visible() {
+            self.shell.shell_bar.set_visible(true);
         }
         let key = if self.state.panel_terminal { "F9 Shell Toggle" } else { "F9 Shell" };
         if self.shell.shell_key.text().as_str() != key {

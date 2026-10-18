@@ -28,7 +28,7 @@ impl App {
         }
         let px = style.font_px;
         let sheet = format!(
-            "window, label, entry, button {{ font-family: monospace, \"JetBrainsMono Nerd Font\", \"JetBrains Mono\", \"Noto Sans CJK SC\"; font-size: {px}px; }}\ntextview, textview text {{ font-family: \"DejaVu Sans Mono\", \"JetBrains Mono\", monospace; font-size: {px}px; }}\n{}{}{}{}",
+            "window, label, entry, button {{ font-family: monospace, \"JetBrainsMono Nerd Font\", \"JetBrains Mono\", \"Noto Sans CJK SC\"; font-size: {px}px; }}\ntextview, textview text {{ font-family: \"DejaVu Sans Mono\", \"JetBrains Mono\", monospace; font-size: {px}px; }}\n{}{}{}{}{}",
             theme::stylesheet(palette, &style),
             theme::list_background(
                 palette,
@@ -39,6 +39,7 @@ impl App {
             ),
             theme::cursor_bar(palette, &self.cfg.cursor_color, self.cfg.cursor_alpha, &self.cfg.cursor_text_color),
             theme::marked_text(palette, &self.cfg.mark_color),
+            theme::blink(palette, &self.cfg.blink_color),
         );
         self.shell.css.load_from_data(&sheet);
         let name = theme::active_name(&self.cfg.theme, &config::active_theme_path());
@@ -322,6 +323,8 @@ impl App {
         let (cursor_row, cursor_color) =
             color_picker("Cursor color", &palette.cursor, &self.cfg.cursor_color, Msg::CursorColor, tx.clone());
         let (mark_row, mark_color) = color_picker("Mark color (Space)", &palette.mark, &self.cfg.mark_color, Msg::MarkColor, tx.clone());
+        let blink_theme = theme::blink_color(&palette);
+        let (blink_row, blink_color) = color_picker("Blink color", &blink_theme, &self.cfg.blink_color, Msg::BlinkColor, tx.clone());
         let (cursor_text_row, cursor_text_color) =
             color_picker("Cursor text color", &palette.cursor_text, &self.cfg.cursor_text_color, Msg::CursorTextColor, tx.clone());
         let cursor_alpha_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -342,6 +345,7 @@ impl App {
         look.append(&cursor_row);
         look.append(&cursor_text_row);
         look.append(&mark_row);
+        look.append(&blink_row);
         look.append(&section("Style"));
         look.append(&icon_row);
         look.append(&image_row);
@@ -402,6 +406,7 @@ impl App {
             cursor_color,
             cursor_text_color,
             mark_color,
+            blink_color,
             image,
             clear,
             stretch,
@@ -471,6 +476,7 @@ impl App {
                 tx.emit(Msg::CursorColor(String::new()));
                 tx.emit(Msg::CursorTextColor(String::new()));
                 tx.emit(Msg::MarkColor(String::new()));
+                tx.emit(Msg::BlinkColor(String::new()));
             }
         });
     }
@@ -491,6 +497,8 @@ impl App {
         ] {
             paint_color(button, reset, theme_color, custom);
         }
+        let blink_theme = theme::blink_color(&palette);
+        paint_color(&ui.blink_color.0, &ui.blink_color.1, &blink_theme, &self.cfg.blink_color);
         ui.overrides.set_text(&overrides_text(&self.cfg));
     }
 
@@ -745,6 +753,15 @@ impl App {
             return;
         }
         self.cfg.mark_color = color;
+        self.colors_changed();
+    }
+
+    pub(in crate::ui::app) fn set_blink_color(&mut self, color: String) {
+        let theme = theme::blink_color(&self.theme_palette());
+        if same_color(&self.cfg.blink_color, &theme, &color) {
+            return;
+        }
+        self.cfg.blink_color = color;
         self.colors_changed();
     }
 

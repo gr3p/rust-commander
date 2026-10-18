@@ -65,6 +65,8 @@ pub struct Config {
     pub cursor_text_color: String,
     #[serde(default)]
     pub mark_color: String,
+    #[serde(default)]
+    pub blink_color: String,
     #[serde(default = "default_cursor_alpha")]
     pub cursor_alpha: u8,
 }
@@ -119,6 +121,7 @@ impl Default for Config {
             cursor_color: String::new(),
             cursor_text_color: String::new(),
             mark_color: String::new(),
+            blink_color: String::new(),
             cursor_alpha: default_cursor_alpha(),
         }
     }
@@ -132,6 +135,7 @@ impl Config {
             ("cursor color", &self.cursor_color),
             ("cursor text color", &self.cursor_text_color),
             ("mark color", &self.mark_color),
+            ("blink color", &self.blink_color),
         ]
         .into_iter()
         .filter(|(_, value)| !value.is_empty())

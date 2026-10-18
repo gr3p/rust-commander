@@ -221,6 +221,7 @@ impl App {
             Act::CopyImage => self.copy_preview_image(sender),
             Act::Drive => self.status = "Press Ctrl+1 to Ctrl+9".into(),
             Act::DiskInfo => self.show_disk_info(None),
+            Act::Mount => self.open_mount(sender),
             Act::Commands => self.toggle_commands(sender),
         }
     }

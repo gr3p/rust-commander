@@ -62,6 +62,10 @@ fn drive_of(mount: &gio::Mount) -> Option<gio::Drive> {
     mount.drive().or_else(|| mount.volume().and_then(|volume| volume.drive()))
 }
 
+pub fn managed(path: &Path) -> bool {
+    find_mount(path).is_some()
+}
+
 pub fn actions(path: &Path) -> Actions {
     let Some(mount) = find_mount(path) else { return Actions::default() };
     Actions { unmount: mount.can_unmount(), eject: drive_of(&mount).is_some_and(|drive| can_release(&drive)) }

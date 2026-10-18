@@ -124,11 +124,12 @@ pub enum Act {
     CopyImage,
     Drive,
     DiskInfo,
+    Mount,
     Commands,
 }
 
 impl Act {
-    pub const ALL: [Act; 75] = [
+    pub const ALL: [Act; 76] = [
         Act::Refresh,
         Act::View,
         Act::Edit,
@@ -203,6 +204,7 @@ impl Act {
         Act::CopyImage,
         Act::Drive,
         Act::DiskInfo,
+        Act::Mount,
         Act::Commands,
     ];
 }
@@ -425,6 +427,7 @@ const CATALOG: &[Item] = &[
     Item { act: Act::PlacesRight, keys: "Alt+F2", label: "Right places", group: Group::Navigate },
     Item { act: Act::Drive, keys: "Ctrl+1…9", label: "Drive", group: Group::Navigate },
     Item { act: Act::DiskInfo, keys: "Ctrl+I", label: "Disk info", group: Group::Navigate },
+    Item { act: Act::Mount, keys: "Ctrl+Shift+M", label: "Mount", group: Group::Navigate },
     Item { act: Act::Hotlist, keys: "Ctrl+D", label: "Hotlist", group: Group::Navigate },
     Item { act: Act::Path, keys: "Ctrl+L", label: "Path", group: Group::Navigate },
     Item { act: Act::Open, keys: "Enter", label: "Open", group: Group::Navigate },

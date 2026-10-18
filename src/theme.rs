@@ -642,6 +642,61 @@ pub fn marked_text(p: &Palette, color: &str) -> String {
     format!(".marked {{\n  color: {color};\n}}\n")
 }
 
+// Accent pulled toward black. A raw accent flash reads as a pale wash.
+pub fn blink_color(p: &Palette) -> String {
+    mix(&p.accent, "#000000", 0.42)
+}
+
+fn blink_ink<'a>(fill: &str, p: &'a Palette) -> &'a str {
+    if rgb(fill).is_some_and(|(r, g, b)| u32::from(r) + u32::from(g) + u32::from(b) > 382) { &p.background } else { &p.foreground }
+}
+
+// Fill of every blink. `color` is the user's override; empty means the theme's own.
+pub fn blink(p: &Palette, color: &str) -> String {
+    let owned = hex_color(color).map(str::to_string).unwrap_or_else(|| blink_color(p));
+    let ink = blink_ink(&owned, p);
+    format!(
+        r#"
+.pane-blink {{
+  border-color: {fill};
+  box-shadow: inset 0 0 0 1px {fill};
+}}
+button.flash {{
+  background: {fill};
+  color: {ink};
+}}
+button.flash label {{
+  color: {ink};
+}}
+button.flash:hover,
+button.flash:focus,
+button.flash:focus-visible,
+button.flash:active,
+button.fkey.flash,
+button.menu-row.flash,
+button.hot.flash,
+.settings-row.flash,
+listview.search-results > row.flash,
+listview.search-results > row.flash:selected,
+box.flash,
+label.flash,
+tab.flash,
+tab.flash:hover,
+.flash,
+colorbutton.flash > button {{
+  background: {fill};
+  color: {ink};
+}}
+.flash label,
+button.menu-row.flash label {{
+  color: {ink};
+}}
+"#,
+        fill = owned,
+        ink = ink,
+    )
+}
+
 fn solid_lists(fill: &str, selected: &str) -> String {
     format!(
         "columnview,\ncolumnview > listview,\ncolumnview > listview > row,\ncolumnview > listview > row > cell,\ngridview,\ngridview > child {{\n  background: {fill};\n}}\n{selected}"
@@ -663,13 +718,6 @@ fn plain_background(p: &Palette, chosen: Option<&str>, strength: u8, selected: &
 }
 
 pub fn stylesheet(p: &Palette, s: &ShellStyle) -> String {
-    // The accent is the light theme blue. A flash of that reads as a pale wash, so the blink is the same hue, pulled toward black.
-    let flash = mix(&p.accent, "#000000", 0.42);
-    let flash_ink = if rgb(&flash).is_some_and(|(r, g, b)| u32::from(r) + u32::from(g) + u32::from(b) > 382) {
-        &p.background
-    } else {
-        &p.foreground
-    };
     format!(
         r#"
 window,
@@ -699,10 +747,6 @@ window {{
 }}
 .pane-active {{
   border: 1px solid {border};
-}}
-.pane-blink {{
-  border-color: {bright};
-  box-shadow: inset 0 0 0 1px {bright};
 }}
 label.glyph.marked {{
   color: {accent};
@@ -839,13 +883,6 @@ button.drive.current {{
 }}
 button.drive.idle {{
   opacity: 0.6;
-}}
-button.flash {{
-  background: {flash};
-  color: {flash_ink};
-}}
-button.flash label {{
-  color: {flash_ink};
 }}
 button.fkey {{
   background: {sel};
@@ -998,29 +1035,6 @@ button.menu-row label.menu-key {{
   color: {dim};
   margin-left: 24px;
 }}
-button.flash:hover,
-button.flash:focus,
-button.flash:focus-visible,
-button.flash:active,
-button.fkey.flash,
-button.menu-row.flash,
-button.hot.flash,
-.settings-row.flash,
-listview.search-results > row.flash,
-listview.search-results > row.flash:selected,
-box.flash,
-label.flash,
-tab.flash,
-tab.flash:hover,
-.flash,
-colorbutton.flash > button {{
-  background: {flash};
-  color: {flash_ink};
-}}
-.flash label,
-button.menu-row.flash label {{
-  color: {flash_ink};
-}}
 @define-color accent_color {accent};
 @define-color accent_bg_color {accent};
 @define-color accent_fg_color {bg};
@@ -1059,7 +1073,5 @@ entry:focus-within {{
         head_pad = format!("{}px {}px", s.space(2), s.space(8)),
         fkey_pad = format!("{}px {}px", s.space(4), s.space(2)),
         row_pad = format!("{}px {}px", s.space(10), s.space(12)),
-        flash = flash,
-        flash_ink = flash_ink,
     )
 }
