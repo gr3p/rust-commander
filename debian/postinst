@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+configure)
+	# Same id as the packaged desktop file. The copy in the home directory wins,
+	# and a dev build writes Exec as its own path, so the dock stays on the old binary.
+	id=se.rustcommander.RustCommander.desktop
+	getent passwd | while IFS=: read -r _ _ uid _ _ home _; do
+		[ "$uid" -ge 1000 ] 2>/dev/null || continue
+		[ -n "$home" ] && [ -d "$home" ] || continue
+		rm -f "$home/.local/share/applications/$id"
+	done
+	;;
+esac
+
+#DEBHELPER#
+exit 0

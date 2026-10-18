@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -789,6 +789,13 @@ fn set_logo(window: &gtk::Window) {
 // makes a new logo a new path, which the shell's texture cache has never seen.
 fn publish_logo() {
     let Some(data) = data_home() else { return };
+    let desktop = data.join("applications").join(format!("{APP_ID}.desktop"));
+    // Same id under XDG_DATA_HOME hides the package. A cargo build pins Exec to
+    // itself, so the dock keeps launching that binary after apt upgrade.
+    if packaged_desktop() {
+        let _ = std::fs::remove_file(&desktop);
+        return;
+    }
     let dir = data.join("rust-commander");
     let name = format!("{APP_ID}-{:016x}.png", fnv1a(LOGO_PNG));
     let icon = dir.join(&name);
@@ -807,7 +814,6 @@ fn publish_logo() {
         let _ = std::fs::remove_file(data.join("icons/hicolor/512x512/apps").join(stale));
     }
     let Some(exe) = std::env::current_exe().ok().filter(|path| path.is_file()) else { return };
-    let desktop = data.join("applications").join(format!("{APP_ID}.desktop"));
     let entry = format!(
         "[Desktop Entry]\nType=Application\nName=Rust Commander\nComment=Dual-pane file manager\nExec={}\nIcon={}\nTerminal=false\nCategories=System;FileManager;\nStartupWMClass={APP_ID}\n",
         desktop_exec(&exe),
@@ -820,6 +826,13 @@ fn publish_logo() {
 
 fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &b| (hash ^ b as u64).wrapping_mul(0x0100_0000_01b3))
+}
+
+fn packaged_desktop() -> bool {
+    let name = format!("applications/{APP_ID}.desktop");
+    let dirs = std::env::var("XDG_DATA_DIRS").ok().filter(|dirs| !dirs.is_empty());
+    let dirs = dirs.as_deref().unwrap_or("/usr/local/share:/usr/share");
+    dirs.split(':').filter(|dir| !dir.is_empty()).any(|dir| Path::new(dir).join(&name).is_file())
 }
 
 fn data_home() -> Option<PathBuf> {
