@@ -120,12 +120,6 @@ fn watch_menu(item: &relm4::gtk::ListItem, pane: usize, sender: &relm4::Sender<c
             return;
         }
         let Some(obj) = row.item().and_then(|obj| obj.downcast::<EntryObject>().ok()) else { return };
-        if let Some(frame) = widget
-            .ancestor(gtk::Frame::static_type())
-            .and_then(|frame| frame.downcast::<gtk::Frame>().ok())
-        {
-            crate::ui::shell::blink_frame(&frame, pane, false);
-        }
         tx.emit(crate::ui::msg::Msg::Cursor(pane, pos));
         tx.emit(crate::ui::msg::Msg::FocusPane(pane));
         let name = obj.name();
