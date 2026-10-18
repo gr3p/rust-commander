@@ -2,7 +2,7 @@ use relm4::gtk;
 use relm4::gtk::prelude::*;
 use relm4::prelude::*;
 
-use rust_commander::commands::{self, Act, Cue};
+use rust_commander::commands::{self, Act, Cue, RowAct};
 use rust_commander::lister::{Charset, ViewMode};
 use rust_commander::listing::SortKey;
 use rust_commander::state::PaneId;
@@ -223,5 +223,86 @@ impl App {
             Act::DiskInfo => self.show_disk_info(None),
             Act::Commands => self.toggle_commands(sender),
         }
+    }
+
+    pub(in crate::ui::app) fn row_act(&mut self, pane: usize, pos: u32, act: RowAct, sender: &ComponentSender<Self>) {
+        if self.hot.is_some() && PaneId::from_index(pane) != self.hot_pane {
+            return;
+        }
+        self.shell.active.set(pane);
+        self.state.active = PaneId::from_index(pane);
+        let editing = self.shell.editing.get();
+        self.state.set_cursor(pos as usize);
+        // A cursor move reloads quick view. Leave an open edit alone until it is closed.
+        if editing {
+            self.preview_sent = self.state.preview_gen;
+        }
+        match act {
+            RowAct::Open => self.activate_cursor(sender),
+            RowAct::QuickView => self.show_quick_view(sender),
+            RowAct::QuickEdit => self.edit_quick_file(sender),
+            RowAct::Copy => self.copy_one(sender),
+            RowAct::Move => self.move_one(sender),
+            RowAct::Rename => self.on_fkey(6, true, sender),
+            RowAct::Pack => self.pack_one(sender),
+            RowAct::Unpack => self.begin_unpack(true, sender),
+            RowAct::Trash => self.trash_one(sender),
+            RowAct::CopyPath => self.copy_cursor_path(),
+            RowAct::Properties => self.show_properties(sender),
+        }
+    }
+
+    fn copy_one(&mut self, sender: &ComponentSender<Self>) {
+        let Some(src) = self.cursor_path() else {
+            self.status = "Nothing selected".into();
+            return;
+        };
+        let title = format!("Copy {} to", super::describe(std::slice::from_ref(&src)));
+        let dest = self.state.tab(self.state.active.other()).path.display().to_string();
+        self.ask = Some(Ask::Copy(vec![src]));
+        self.ask_text(&title, &dest, sender.input_sender().clone());
+    }
+
+    fn move_one(&mut self, sender: &ComponentSender<Self>) {
+        let Some(src) = self.cursor_path() else {
+            self.status = "Nothing selected".into();
+            return;
+        };
+        let title = format!("Move {} to", super::describe(std::slice::from_ref(&src)));
+        let dest = self.state.tab(self.state.active.other()).path.display().to_string();
+        self.ask = Some(Ask::Move(vec![src]));
+        self.ask_text(&title, &dest, sender.input_sender().clone());
+    }
+
+    fn pack_one(&mut self, sender: &ComponentSender<Self>) {
+        let Some(path) = self.cursor_path() else {
+            self.status = "Nothing selected".into();
+            return;
+        };
+        if self.job.is_some() {
+            self.status = "Busy".into();
+            return;
+        }
+        let stem = super::jobs::stem_of(&path).unwrap_or("archive");
+        let dest = self.state.tab(self.state.active.other()).path.join(format!("{stem}.zip"));
+        self.ask_pack(std::slice::from_ref(&path), &dest.display().to_string(), sender.input_sender().clone());
+    }
+
+    fn trash_one(&mut self, sender: &ComponentSender<Self>) {
+        let Some(src) = self.cursor_path() else {
+            self.status = "Nothing selected".into();
+            return;
+        };
+        let name = src.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        self.ask = Some(Ask::Trash(vec![src]));
+        self.ask_confirm(&format!("Move {name} to trash?"), sender.input_sender().clone());
+    }
+
+    fn copy_cursor_path(&mut self) {
+        let Some(path) = self.cursor_path() else {
+            self.status = "Nothing selected".into();
+            return;
+        };
+        self.write_clipboard(&path.display().to_string(), "Path copied");
     }
 }

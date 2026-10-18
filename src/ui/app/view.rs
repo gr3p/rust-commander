@@ -487,6 +487,34 @@ impl App {
         self.status = "QUICKVIEW: edit".into();
     }
 
+    pub(in crate::ui::app) fn show_quick_view(&mut self, sender: &ComponentSender<Self>) {
+        if self.shell.editing.get() && !self.leave_quick_edit(sender) {
+            return;
+        }
+        self.state.panel_terminal = false;
+        self.state.quick_view = true;
+        self.status = "QUICKVIEW: view".into();
+        self.note_preview_target();
+        self.focus_list();
+    }
+
+    pub(in crate::ui::app) fn edit_quick_file(&mut self, sender: &ComponentSender<Self>) {
+        if self.cursor_is_image() || self.file_under_cursor().is_none() {
+            self.note_quick("Edit is for text");
+            return;
+        }
+        if self.shell.editing.get() && !self.leave_quick_edit(sender) {
+            return;
+        }
+        self.state.panel_terminal = false;
+        self.state.quick_view = true;
+        self.toggle_quick_edit(sender);
+        // The cursor bump starts a preview load. The editor already holds the text.
+        if self.shell.editing.get() {
+            self.preview_sent = self.state.preview_gen;
+        }
+    }
+
     pub(in crate::ui::app) fn toggle_quick_view(&mut self, sender: &ComponentSender<Self>) {
         if self.shell.editing.get() && !self.leave_quick_edit(sender) {
             return;

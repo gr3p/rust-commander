@@ -80,6 +80,7 @@ pub enum Msg {
     CopyPreviewPath,
     CopyPreviewImage,
     Run(rust_commander::commands::Act),
+    RowAct(usize, u32, rust_commander::commands::RowAct),
     ShowCommands,
     CommandsClosed,
     PropsSaved,

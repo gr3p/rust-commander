@@ -566,6 +566,7 @@ impl App {
             Msg::CopyPreviewPath => self.copy_preview_path(),
             Msg::CopyPreviewImage => self.copy_preview_image(sender),
             Msg::Run(act) => self.run_act(act, sender),
+            Msg::RowAct(pane, pos, act) => self.row_act(pane, pos, act, sender),
             Msg::ShowCommands => self.toggle_commands(sender),
             Msg::CommandsClosed => self.command_list = None,
             Msg::PropsSaved => {

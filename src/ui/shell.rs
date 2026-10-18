@@ -21,9 +21,10 @@ use super::row::{self, EntryObject};
 
 static FLASH_ENABLED: AtomicBool = AtomicBool::new(true);
 static PANE_BLINK: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
-/// One blink is three steps: on, off, on, off.
-const BLINK_STEP: Duration = Duration::from_millis(120);
-pub const BLINK_LEN: Duration = Duration::from_millis(360);
+/// Classic Mac menu flash: invert every 3 ticks (80 ms), three times.
+const BLINK_STEP: Duration = Duration::from_millis(80);
+const BLINK_PHASES: u8 = 6;
+pub const BLINK_LEN: Duration = Duration::from_millis(300);
 
 pub struct PaneUi {
     pub frame: gtk::Frame,
@@ -568,6 +569,76 @@ fn popup_menu(anchor: &gtk::Widget, items: Vec<(&str, Box<dyn Fn()>)>) {
     menu.popup();
 }
 
+pub fn popup_rows(
+    anchor: &gtk::Widget,
+    items: &[rust_commander::commands::RowItem],
+    on_pick: impl Fn(rust_commander::commands::RowAct) + 'static,
+) {
+    use std::cell::RefCell;
+    thread_local! {
+        static OPEN: RefCell<Option<gtk::Popover>> = const { RefCell::new(None) };
+    }
+    let on_pick = Rc::new(on_pick);
+    let menu = gtk::Popover::new();
+    menu.add_css_class("file-menu");
+    menu.set_has_arrow(false);
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let mut seen = None;
+    for item in items {
+        if seen.is_some_and(|group| group != item.group) {
+            column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        }
+        seen = Some(item.group);
+        let button = gtk::Button::new();
+        button.add_css_class("menu-row");
+        button.set_has_frame(false);
+        button.set_focus_on_click(false);
+        button.set_hexpand(true);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+        let name = gtk::Label::new(Some(item.label));
+        name.set_halign(gtk::Align::Start);
+        name.set_hexpand(true);
+        let keys = gtk::Label::new(Some(&rust_commander::commands::format_keys(item.keys)));
+        keys.add_css_class("menu-key");
+        row.append(&name);
+        row.append(&keys);
+        button.set_child(Some(&row));
+        let menu = menu.clone();
+        let act = item.act;
+        let on_pick = Rc::clone(&on_pick);
+        button.connect_clicked(move |button| {
+            let menu = menu.clone();
+            let on_pick = Rc::clone(&on_pick);
+            let weak = button.downgrade();
+            blink_then(button.upcast_ref(), move || {
+                if weak.upgrade().is_none_or(|button| !button.is_mapped()) {
+                    return;
+                }
+                menu.popdown();
+                on_pick(act);
+            });
+        });
+        column.append(&button);
+    }
+    menu.set_child(Some(&column));
+    menu.set_parent(anchor);
+    let tracked = menu.clone();
+    menu.connect_closed(move |menu| {
+        let same = OPEN.with(|open| open.borrow().as_ref().is_some_and(|current| current == menu));
+        if same {
+            OPEN.with(|open| drop(open.borrow_mut().take()));
+        }
+        let menu = menu.clone();
+        gtk::glib::idle_add_local_once(move || menu.unparent());
+    });
+    let old = OPEN.with(|open| open.borrow_mut().take());
+    if let Some(old) = old {
+        old.popdown();
+    }
+    OPEN.with(|open| *open.borrow_mut() = Some(tracked));
+    menu.popup();
+}
+
 pub fn blink_drive(button: &gtk::Button) {
     blink_button(button);
 }
@@ -641,17 +712,16 @@ pub fn blink_widget(widget: &gtk::Widget) {
     gtk::glib::timeout_add_local(BLINK_STEP, move || {
         let n = step.get() + 1;
         step.set(n);
+        if n >= BLINK_PHASES {
+            widget.remove_css_class("flash");
+            return gtk::glib::ControlFlow::Break;
+        }
         if n % 2 == 0 {
             widget.add_css_class("flash");
         } else {
             widget.remove_css_class("flash");
         }
-        if n >= 3 {
-            widget.remove_css_class("flash");
-            gtk::glib::ControlFlow::Break
-        } else {
-            gtk::glib::ControlFlow::Continue
-        }
+        gtk::glib::ControlFlow::Continue
     });
 }
 
@@ -669,6 +739,10 @@ pub fn blink_frame(frame: &gtk::Frame, pane: usize, only_while_active: bool) {
         }
         let n = step.get() + 1;
         step.set(n);
+        if n >= BLINK_PHASES {
+            frame.remove_css_class("pane-blink");
+            return gtk::glib::ControlFlow::Break;
+        }
         // A pane that lost the accent must not flash again. The shell pane never has it.
         let show = n % 2 == 0 && (!only_while_active || frame.has_css_class("pane-active"));
         if show {
@@ -676,12 +750,7 @@ pub fn blink_frame(frame: &gtk::Frame, pane: usize, only_while_active: bool) {
         } else {
             frame.remove_css_class("pane-blink");
         }
-        if n >= 3 {
-            frame.remove_css_class("pane-blink");
-            gtk::glib::ControlFlow::Break
-        } else {
-            gtk::glib::ControlFlow::Continue
-        }
+        gtk::glib::ControlFlow::Continue
     });
 }
 
@@ -1127,7 +1196,7 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     list.set_hexpand(true);
     list.set_vexpand(true);
     list.set_show_column_separators(true);
-    for col in row::file_columns() {
+    for col in row::file_columns(index, sender) {
         list.append_column(&col);
     }
     bind_header_clicks(&list, index, sender, active_pane);
@@ -1139,7 +1208,7 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     scroll.set_vexpand(true);
     // Scrollbars get their own space instead of covering the rows.
     scroll.set_overlay_scrolling(false);
-    let grid = gtk::GridView::new(Some(selection.clone()), Some(row::thumb_factory()));
+    let grid = gtk::GridView::new(Some(selection.clone()), Some(row::thumb_factory(index, sender)));
     grid.set_hexpand(true);
     grid.set_vexpand(true);
     // The default stops at 7 columns, however wide the pane is.

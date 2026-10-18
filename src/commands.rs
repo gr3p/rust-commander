@@ -464,6 +464,59 @@ const CATALOG: &[Item] = &[
     Item { act: Act::ListerJson, keys: "Shift+J", label: "JSON", group: Group::View },
 ];
 
+/// What a right-click on one row can do. Marks are left alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowAct {
+    Open,
+    QuickView,
+    QuickEdit,
+    Copy,
+    Move,
+    Rename,
+    Pack,
+    Unpack,
+    Trash,
+    CopyPath,
+    Properties,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowItem {
+    pub act: RowAct,
+    pub keys: &'static str,
+    pub label: &'static str,
+    pub group: u8,
+}
+
+fn row_item(act: RowAct, keys: &'static str, label: &'static str, group: u8) -> RowItem {
+    RowItem { act, keys, label, group }
+}
+
+/// `parent` is the `..` row. A directory is not an archive and not an image.
+pub fn row_menu(parent: bool, dir: bool, archive: bool, image: bool) -> Vec<RowItem> {
+    if parent {
+        return vec![row_item(RowAct::Open, "Enter", "Open", 0)];
+    }
+    let mut rows = vec![row_item(RowAct::Open, "Enter", "Open", 0)];
+    if !dir {
+        rows.push(row_item(RowAct::QuickView, "Ctrl+Q", "Quick view", 0));
+        if !image {
+            rows.push(row_item(RowAct::QuickEdit, "Ctrl+E", "Quick edit", 0));
+        }
+    }
+    rows.push(row_item(RowAct::Copy, "F5", "Copy", 1));
+    rows.push(row_item(RowAct::Move, "F6", "Move", 1));
+    rows.push(row_item(RowAct::Rename, "Shift+F6", "Rename", 2));
+    rows.push(row_item(RowAct::Pack, "Alt+F5", "Pack", 2));
+    if archive && !dir {
+        rows.push(row_item(RowAct::Unpack, "Alt+F9", "Unpack", 2));
+    }
+    rows.push(row_item(RowAct::Trash, "Delete", "Delete", 3));
+    rows.push(row_item(RowAct::CopyPath, "Ctrl+Shift+C", "Copy path", 4));
+    rows.push(row_item(RowAct::Properties, "Alt+Enter", "Properties", 4));
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,5 +671,59 @@ mod tests {
         } else {
             assert!(shown.contains("Ctl"));
         }
+    }
+
+    fn acts(rows: &[RowItem]) -> Vec<RowAct> {
+        rows.iter().map(|row| row.act).collect()
+    }
+
+    #[test]
+    fn parent_row_only_opens() {
+        assert_eq!(acts(&row_menu(true, true, false, false)), vec![RowAct::Open]);
+    }
+
+    #[test]
+    fn directory_row_skips_view_and_unpack() {
+        let rows = row_menu(false, true, false, false);
+        assert_eq!(
+            acts(&rows),
+            vec![
+                RowAct::Open,
+                RowAct::Copy,
+                RowAct::Move,
+                RowAct::Rename,
+                RowAct::Pack,
+                RowAct::Trash,
+                RowAct::CopyPath,
+                RowAct::Properties,
+            ]
+        );
+        assert_eq!(rows[0].group, 0);
+        assert_eq!(rows[1].group, 1);
+        assert_eq!(rows[3].group, 2);
+        assert_eq!(rows[5].group, 3);
+        assert_eq!(rows[6].group, 4);
+    }
+
+    #[test]
+    fn file_row_offers_quick_view_and_edit() {
+        let rows = row_menu(false, false, false, false);
+        assert!(acts(&rows).contains(&RowAct::QuickView));
+        assert!(acts(&rows).contains(&RowAct::QuickEdit));
+        assert!(!acts(&rows).contains(&RowAct::Unpack));
+    }
+
+    #[test]
+    fn image_row_skips_quick_edit() {
+        let rows = row_menu(false, false, false, true);
+        assert!(acts(&rows).contains(&RowAct::QuickView));
+        assert!(!acts(&rows).contains(&RowAct::QuickEdit));
+    }
+
+    #[test]
+    fn archive_row_offers_unpack() {
+        let rows = row_menu(false, false, true, false);
+        assert!(acts(&rows).contains(&RowAct::Unpack));
+        assert_eq!(rows.iter().find(|row| row.act == RowAct::Unpack).unwrap().keys, "Alt+F9");
     }
 }

@@ -106,14 +106,51 @@ fn size_text(entry: &Entry, skip: bool) -> String {
     }
 }
 
-pub fn file_columns() -> [relm4::gtk::ColumnViewColumn; 6] {
+fn watch_menu(item: &relm4::gtk::ListItem, pane: usize, sender: &relm4::Sender<crate::ui::msg::Msg>) {
+    use relm4::gtk;
+    let Some(child) = item.child() else { return };
+    let click = gtk::GestureClick::new();
+    click.set_button(gtk::gdk::BUTTON_SECONDARY);
+    let row = item.clone();
+    let tx = sender.clone();
+    click.connect_pressed(move |gesture, _, _, _| {
+        let Some(widget) = gesture.widget() else { return };
+        let pos = row.position();
+        if pos == gtk::INVALID_LIST_POSITION {
+            return;
+        }
+        let Some(obj) = row.item().and_then(|obj| obj.downcast::<EntryObject>().ok()) else { return };
+        if let Some(frame) = widget
+            .ancestor(gtk::Frame::static_type())
+            .and_then(|frame| frame.downcast::<gtk::Frame>().ok())
+        {
+            crate::ui::shell::blink_frame(&frame, pane, false);
+        }
+        tx.emit(crate::ui::msg::Msg::Cursor(pane, pos));
+        tx.emit(crate::ui::msg::Msg::FocusPane(pane));
+        let name = obj.name();
+        let parent = name == "↑ [..]";
+        let dir = obj.is_dir() && !parent;
+        let file = !parent && !obj.is_dir();
+        let archive = file && rust_commander::archive::is_archive(Path::new(&name));
+        let image = file && rust_commander::imageview::is_image(&name);
+        let items = rust_commander::commands::row_menu(parent, dir, archive, image);
+        let tx = tx.clone();
+        crate::ui::shell::popup_rows(&widget, &items, move |act| {
+            tx.emit(crate::ui::msg::Msg::RowAct(pane, pos, act));
+        });
+    });
+    child.add_controller(click);
+}
+
+pub fn file_columns(pane: usize, sender: &relm4::Sender<crate::ui::msg::Msg>) -> [relm4::gtk::ColumnViewColumn; 6] {
     [
-        glyph_column(),
-        column("name", "Name", false, -1, 0.0, 0, 8, true, true),
-        column("ext", "Ext", false, 80, 0.0, 0, 8, false, false),
-        column("size", "Size", false, 96, 0.0, 0, 8, false, false),
-        column("time", "Date", false, 188, 0.0, 0, 16, false, false),
-        column("attr", "Attr", false, 120, 0.0, 0, 8, false, false),
+        glyph_column(pane, sender),
+        column("name", "Name", false, -1, 0.0, 0, 8, true, true, pane, sender),
+        column("ext", "Ext", false, 80, 0.0, 0, 8, false, false, pane, sender),
+        column("size", "Size", false, 96, 0.0, 0, 8, false, false, pane, sender),
+        column("time", "Date", false, 188, 0.0, 0, 16, false, false, pane, sender),
+        column("attr", "Attr", false, 120, 0.0, 0, 8, false, false, pane, sender),
     ]
 }
 
@@ -127,9 +164,12 @@ fn column(
     margin_end: i32,
     ellipsize: bool,
     marked: bool,
+    pane: usize,
+    sender: &relm4::Sender<crate::ui::msg::Msg>,
 ) -> relm4::gtk::ColumnViewColumn {
     use relm4::gtk;
     let factory = gtk::SignalListItemFactory::new();
+    let tx = sender.clone();
     factory.connect_setup(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().unwrap();
         let label = gtk::Label::new(None);
@@ -161,6 +201,7 @@ fn column(
         } else {
             item.set_child(Some(&label));
         }
+        watch_menu(item, pane, &tx);
     });
     factory.connect_bind(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().unwrap();
@@ -210,9 +251,10 @@ fn column(
     col
 }
 
-fn glyph_column() -> relm4::gtk::ColumnViewColumn {
+fn glyph_column(pane: usize, sender: &relm4::Sender<crate::ui::msg::Msg>) -> relm4::gtk::ColumnViewColumn {
     use relm4::gtk;
     let factory = gtk::SignalListItemFactory::new();
+    let tx = sender.clone();
     factory.connect_setup(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().unwrap();
         let row = gtk::CenterBox::new();
@@ -225,6 +267,7 @@ fn glyph_column() -> relm4::gtk::ColumnViewColumn {
         row.set_end_widget(Some(&kind));
         item.set_child(Some(&row));
         item.connect_selected_notify(set_cursor_glyph);
+        watch_menu(item, pane, &tx);
     });
     factory.connect_bind(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().unwrap();
@@ -495,16 +538,18 @@ impl ThumbCell {
     }
 }
 
-pub fn thumb_factory() -> relm4::gtk::SignalListItemFactory {
+pub fn thumb_factory(pane: usize, sender: &relm4::Sender<crate::ui::msg::Msg>) -> relm4::gtk::SignalListItemFactory {
     use relm4::gtk;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, item| {
+    let tx = sender.clone();
+    factory.connect_setup(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().unwrap();
         let cell = ThumbCell::new();
         item.set_child(Some(&cell.root));
         unsafe { item.set_data("thumb-cell", cell) };
+        watch_menu(item, pane, &tx);
     });
     factory.connect_bind(|_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().unwrap();

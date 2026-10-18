@@ -958,11 +958,52 @@ window.hotlist {{
 button.hot-on {{
   background: {rsel};
 }}
+popover.file-menu {{
+  background: transparent;
+  padding: 0;
+}}
+popover.file-menu contents {{
+  background: {bg};
+  color: {fg};
+  border: 1px solid {muted};
+  border-radius: {radius}px;
+  padding: 6px;
+  min-width: 240px;
+}}
+popover.file-menu separator {{
+  background: {muted};
+  min-height: 1px;
+  margin: 4px 8px;
+}}
+button.menu-row {{
+  background: transparent;
+  color: {fg};
+  border: none;
+  box-shadow: none;
+  border-radius: 6px;
+  padding: 5px 10px;
+  min-height: 0;
+  min-width: 0;
+}}
+button.menu-row:hover,
+button.menu-row:focus,
+button.menu-row:focus-visible {{
+  background: {rhov};
+  outline: none;
+}}
+button.menu-row label {{
+  padding: 0;
+}}
+button.menu-row label.menu-key {{
+  color: {dim};
+  margin-left: 24px;
+}}
 button.flash:hover,
 button.flash:focus,
 button.flash:focus-visible,
 button.flash:active,
 button.fkey.flash,
+button.menu-row.flash,
 button.hot.flash,
 .settings-row.flash,
 listview.search-results > row.flash,
@@ -976,7 +1017,8 @@ colorbutton.flash > button {{
   background: {flash};
   color: {flash_ink};
 }}
-.flash label {{
+.flash label,
+button.menu-row.flash label {{
   color: {flash_ink};
 }}
 @define-color accent_color {accent};
@@ -1010,6 +1052,7 @@ entry:focus-within {{
         border = p.border,
         rsel = p.row_selected,
         rhov = p.row_hover,
+        dim = p.dim,
         radius = s.radius,
         icon_gap = s.space(6),
         cell_pad = format!("0 {}px", s.space(6)),
