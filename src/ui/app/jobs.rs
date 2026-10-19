@@ -43,7 +43,8 @@ impl App {
                     return;
                 }
                 let _ = progress_tx.send(ops::Progress { done: done as u64, total, current: path.clone(), note: String::new() });
-                let result = ops::delete_paths(std::slice::from_ref(path), permanent, &mut |path| gio_trash(path));
+                let wipe = permanent || !ops::on_home_disk(path);
+                let result = ops::delete_paths(std::slice::from_ref(path), wipe, &mut |path| gio_trash(path));
                 if let Err(err) = result {
                     let _ = done_tx.send(Err(format!("{}: {err}", path.display())));
                     return;
@@ -1479,25 +1480,8 @@ pub(in crate::ui::app) fn gio_trash(path: &Path) -> std::io::Result<()> {
         };
         let moved = (|| {
             write!(note, "[Trash Info]\nPath={}\nDeletionDate={when}\n", uri.trim_start_matches("file://"))?;
-            match std::fs::rename(path, &dest) {
-                Err(err) if err.raw_os_error() == Some(libc::EXDEV) => {
-                    let meta = std::fs::symlink_metadata(path)?;
-                    if meta.file_type().is_symlink() {
-                        std::os::unix::fs::symlink(std::fs::read_link(path)?, &dest)?;
-                    } else if meta.is_file() {
-                        // On disk before the original goes, so a crash cannot lose both.
-                        let copied = std::fs::copy(path, &dest).and_then(|_| std::fs::File::open(&dest)?.sync_all());
-                        if let Err(err) = copied {
-                            let _ = std::fs::remove_file(&dest);
-                            return Err(err);
-                        }
-                    } else {
-                        return Err(err);
-                    }
-                    std::fs::remove_file(path)
-                }
-                other => other,
-            }
+            // Another disk stays where it is. Copying it home would fill this computer.
+            std::fs::rename(path, &dest)
         })();
         if moved.is_err() {
             let _ = std::fs::remove_file(&info_path);

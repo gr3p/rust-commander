@@ -70,7 +70,7 @@ pub fn transfer(
                 "target is inside the source",
             ));
         }
-        match one(src, dest, kind, &mut policy, cancel, pause, &mut done, total, progress, conflict) {
+        match one(src, dest, kind, &mut policy, cancel, pause, &mut done, total, progress, conflict, true) {
             Ok(Stop::Continue) => {}
             Ok(Stop::Cancel) => {
                 return Ok(Report {
@@ -109,6 +109,7 @@ fn one(
     total: u64,
     progress: &mut dyn FnMut(&Progress),
     conflict: &mut dyn FnMut(&Path, &Path) -> Choice,
+    make_parent: bool,
 ) -> io::Result<Stop> {
     hold(pause, cancel)?;
     if cancel.load(Ordering::Relaxed) {
@@ -158,9 +159,7 @@ fn one(
     }
 
     if is_link {
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-        }
+        ready_parent(dest, make_parent)?;
         let target = fs::read_link(src)?;
         std::os::unix::fs::symlink(&target, dest)?;
         if kind == Kind::Move {
@@ -172,9 +171,7 @@ fn one(
     if is_dir {
         if kind == Kind::Move && !dest.exists() {
             let n = count_entries(src);
-            if let Some(parent) = dest.parent() {
-                fs::create_dir_all(parent)?;
-            }
+            ready_parent(dest, make_parent)?;
             match fs::rename(src, dest) {
                 Ok(()) => return bump_n(done, total, dest, n.max(1), progress),
                 Err(err) if err.raw_os_error() == Some(libc::EXDEV) => {}
@@ -183,9 +180,7 @@ fn one(
         }
         if !merge {
             use std::os::unix::fs::DirBuilderExt;
-            if let Some(parent) = dest.parent() {
-                fs::create_dir_all(parent)?;
-            }
+            ready_parent(dest, make_parent)?;
             // Private until it gets the source mode, so a copy that stops halfway never exposes it.
             fs::DirBuilder::new().mode(0o700).create(dest)?;
         }
@@ -207,6 +202,7 @@ fn one(
                     total,
                     progress,
                     conflict,
+                    false,
                 )? {
                     return Ok(Stop::Cancel);
                 }
@@ -230,9 +226,7 @@ fn one(
     }
 
     if kind == Kind::Move {
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-        }
+        ready_parent(dest, make_parent)?;
         match fs::rename(src, dest) {
             Ok(()) => return bump(done, total, src, progress),
             Err(err) if err.raw_os_error() == Some(libc::EXDEV) => {}
@@ -243,6 +237,7 @@ fn one(
     if !meta.is_file() {
         return bump(done, total, src, progress);
     }
+    ready_parent(dest, make_parent)?;
     copy_file(src, dest, cancel, pause, |n| {
         progress(&Progress {
             done: *done,
@@ -284,6 +279,20 @@ fn bump_n(
     Ok(Stop::Continue)
 }
 
+// A nested file must not create its parent. That brings back a folder deleted while the copy runs.
+fn ready_parent(dest: &Path, make: bool) -> io::Result<()> {
+    let Some(parent) = dest.parent().filter(|parent| !parent.as_os_str().is_empty()) else {
+        return Ok(());
+    };
+    if make {
+        return fs::create_dir_all(parent);
+    }
+    if fs::symlink_metadata(parent).is_ok() {
+        return Ok(());
+    }
+    Err(io::Error::new(io::ErrorKind::NotFound, format!("{} disappeared", parent.display())))
+}
+
 fn copy_file(
     src: &Path,
     dest: &Path,
@@ -292,9 +301,6 @@ fn copy_file(
     mut on_chunk: impl FnMut(u64),
 ) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let _claim = claim(dest)?;
     let partial = partial_path(dest);
     let mut mine = None;
@@ -660,6 +666,20 @@ pub fn delete_paths(
     Ok(())
 }
 
+/// The trash is the home disk. A file anywhere else is deleted where it stands.
+pub fn on_home_disk(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from).filter(|dir| dir.exists()) else {
+        return false;
+    };
+    let Ok(home_meta) = fs::metadata(home) else { return false };
+    let probe = match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_dir() => path,
+        _ => path.parent().unwrap_or(path),
+    };
+    fs::metadata(probe).is_ok_and(|meta| meta.dev() == home_meta.dev())
+}
+
 /// One random pass, then the file is removed. A symlink is refused so the target stays.
 pub fn shred(path: &Path, cancel: &AtomicBool) -> io::Result<()> {
     if cancel.load(Ordering::Relaxed) {
@@ -768,5 +788,45 @@ mod shred_tests {
         assert_eq!(fs::read(dest.join("sub/a.txt")).unwrap(), b"a");
         assert!(!dir.join("src").exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_deleted_folder_is_not_created_again() {
+        let dir = std::env::temp_dir().join(format!("rc-gone-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("src/a.txt"), b"a").unwrap();
+        let off = AtomicBool::new(false);
+        let mut done = 0u64;
+        let mut policy = Policy::Overwrite;
+        let err = one(
+            &dir.join("src/a.txt"),
+            &dir.join("gone/a.txt"),
+            Kind::Copy,
+            &mut policy,
+            &off,
+            &off,
+            &mut done,
+            1,
+            &mut |_| {},
+            &mut |_, _| Choice::Overwrite,
+            false,
+        );
+        assert!(err.is_err());
+        assert!(!dir.join("gone").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn home_disk_is_the_trash_disk() {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap();
+        assert!(on_home_disk(&home));
+        let foreign = PathBuf::from("/proc/self");
+        if fs::metadata(&foreign).ok().map(|m| {
+            use std::os::unix::fs::MetadataExt;
+            m.dev() != fs::metadata(&home).unwrap().dev()
+        }) == Some(true) {
+            assert!(!on_home_disk(&foreign));
+        }
     }
 }

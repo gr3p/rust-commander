@@ -974,8 +974,9 @@ impl App {
                     [one] => one.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
                     many => format!("{} items", many.len()),
                 };
-                let title = if shift { format!("Delete {what} permanently?") } else { format!("Move {what} to trash?") };
-                self.ask = Some(if shift { Ask::Permanent(paths) } else { Ask::Trash(paths) });
+                let trash = !shift && paths.iter().all(|path| ops::on_home_disk(path));
+                let title = if trash { format!("Move {what} to trash?") } else { format!("Delete {what} permanently?") };
+                self.ask = Some(if trash { Ask::Trash(paths) } else { Ask::Permanent(paths) });
                 self.ask_confirm(&title, tx);
             }
             _ => {}

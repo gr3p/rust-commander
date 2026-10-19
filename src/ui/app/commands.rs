@@ -295,8 +295,10 @@ impl App {
             return;
         };
         let name = src.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-        self.ask = Some(Ask::Trash(vec![src]));
-        self.ask_confirm(&format!("Move {name} to trash?"), sender.input_sender().clone());
+        let trash = rust_commander::ops::on_home_disk(&src);
+        self.ask = Some(if trash { Ask::Trash(vec![src]) } else { Ask::Permanent(vec![src]) });
+        let title = if trash { format!("Move {name} to trash?") } else { format!("Delete {name} permanently?") };
+        self.ask_confirm(&title, sender.input_sender().clone());
     }
 
     fn copy_cursor_path(&mut self) {
