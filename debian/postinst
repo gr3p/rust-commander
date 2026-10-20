@@ -6,10 +6,11 @@ configure)
 	# Same id as the packaged desktop file. The copy in the home directory wins,
 	# and a dev build writes Exec as its own path, so the dock stays on the old binary.
 	id=se.rustcommander.RustCommander.desktop
-	getent passwd | while IFS=: read -r _ _ uid _ _ home _; do
+	# Removed as the user, so a symlinked folder or a root-squashed home cannot hit root's files or fail the install.
+	getent passwd | while IFS=: read -r user _ uid _ _ home _; do
 		[ "$uid" -ge 1000 ] 2>/dev/null || continue
-		[ -n "$home" ] && [ -d "$home" ] || continue
-		rm -f "$home/.local/share/applications/$id"
+		[ -n "$home" ] && [ -e "$home/.local/share/applications/$id" ] || continue
+		runuser -u "$user" -- rm -f "$home/.local/share/applications/$id" || true
 	done
 	;;
 esac

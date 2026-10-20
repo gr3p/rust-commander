@@ -361,6 +361,8 @@ pub fn umount_job(point: &str) -> Result<Job, String> {
 
 pub fn pkexec(job: &Job) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|err| err.to_string())?;
+    // After a package upgrade the running binary reads as "<path> (deleted)"; the new one sits at <path>.
+    let exe = exe.to_str().and_then(|text| text.strip_suffix(" (deleted)")).map_or(exe.clone(), PathBuf::from);
     let mut cmd = Command::new("pkexec");
     cmd.arg(exe);
     cmd.arg("--mount-helper");
@@ -505,9 +507,9 @@ fn mount_luks_at(device: &str, point: &str, uid: u32, gid: u32, pass: &Path) -> 
         )?;
         true
     };
-    let fstype = detect_type(&mapper)?;
-    let mapper_path = path_str(&mapper)?;
     let mounted = (|| {
+        let fstype = detect_type(&mapper)?;
+        let mapper_path = path_str(&mapper)?;
         ensure_free(&mapper_path, &point)?;
         mount_at(
             &mapper_path,

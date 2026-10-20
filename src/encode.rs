@@ -89,7 +89,7 @@ pub fn decode(
 ) -> Result<(Report, PathBuf), Fail> {
     let codec = codec_of(source).ok_or_else(|| Fail::Message("Not a Base64, UUE or MIME file".into()))?;
     let total = fs::metadata(source)?.len();
-    let mut lines = BufReader::new(File::open(source)?).lines();
+    let mut lines = Lines(BufReader::new(File::open(source)?));
     // The header comes first, so the name is known before the target is created.
     let name = match codec {
         Codec::Base64 => source.file_stem().map(|name| name.to_string_lossy().into_owned()),
@@ -284,7 +284,29 @@ fn uu_encode(data: &[u8]) -> String {
     out
 }
 
-type Lines = std::io::Lines<BufReader<File>>;
+// Like `BufRead::lines`, but a long line comes in pieces, so `base64 -w0` output never sits whole in memory.
+struct Lines(BufReader<File>);
+
+impl Iterator for Lines {
+    type Item = io::Result<String>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut buf = Vec::new();
+        match (&mut self.0).take(64 * 1024).read_until(b'\n', &mut buf) {
+            Ok(0) => None,
+            Ok(_) => {
+                if buf.last() == Some(&b'\n') {
+                    buf.pop();
+                }
+                if buf.last() == Some(&b'\r') {
+                    buf.pop();
+                }
+                Some(String::from_utf8(buf).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err)))
+            }
+            Err(err) => Some(Err(err)),
+        }
+    }
+}
 
 fn uue_name(lines: &mut Lines) -> Result<String, Fail> {
     for line in lines {

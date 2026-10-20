@@ -347,7 +347,7 @@ pub fn applies(act: Act, cue: &Cue) -> bool {
         Act::Queue => false,
         Act::Filter | Act::Hotlist => !cue.editing,
         Act::Save | Act::Discard | Act::LeaveEdit => cue.editing,
-        Act::QuickEdit => cue.quick_view && cue.file && !cue.image && !cue.editing,
+        Act::QuickEdit => cue.quick_view && cue.file && !cue.image && !cue.archive && !cue.editing,
         Act::ImageFit | Act::ImageStep => cue.image_view,
         Act::CopyImage => cue.image_view,
         Act::ListerText | Act::ListerBinary | Act::ListerHex => cue.lister,
@@ -503,7 +503,7 @@ pub fn row_menu(parent: bool, dir: bool, archive: bool, image: bool) -> Vec<RowI
     let mut rows = vec![row_item(RowAct::Open, "Enter", "Open", 0)];
     if !dir {
         rows.push(row_item(RowAct::QuickView, "Ctrl+Q", "Quick view", 0));
-        if !image {
+        if !image && !archive {
             rows.push(row_item(RowAct::QuickEdit, "Ctrl+E", "Quick edit", 0));
         }
     }

@@ -82,7 +82,9 @@ pub enum Msg {
     CopyPreviewPath,
     CopyPreviewImage,
     Run(rust_commander::commands::Act),
-    RowAct(usize, u32, rust_commander::commands::RowAct),
+    // The row menu opened on the cursor row. Its action finds that file again by path.
+    RowMenu(usize),
+    RowAct(usize, rust_commander::commands::RowAct),
     ShowCommands,
     CommandsClosed,
     PropsSaved,

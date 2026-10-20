@@ -113,6 +113,31 @@ pub fn list(path: &Path, password: Option<&str>) -> Result<Listed, Fail> {
     }
 }
 
+/// Read-only member table for quick view, in the style of `unzip -l`.
+pub fn contents(path: &Path) -> String {
+    let listed = match list(path, None) {
+        Ok(listed) => listed,
+        Err(err) => return format!("{}\n\n{err}\n", volume_label(path)),
+    };
+    let mut out = format!("{}\n\n{:>14}  Name\n{:->14}  ----\n", volume_label(path), "Size", "");
+    let (mut files, mut dirs, mut total) = (0u64, 0u64, 0u64);
+    for member in &listed.members {
+        if member.dir {
+            dirs += 1;
+            out.push_str(&format!("{:>14}  {}\n", "<DIR>", member.name));
+        } else {
+            files += 1;
+            total += member.size;
+            out.push_str(&format!("{:>14}  {}\n", member.size, member.name));
+        }
+    }
+    out.push_str(&format!("{:->14}  ----\n{total:>14}  {files} files, {dirs} folders\n", ""));
+    if listed.needs_password {
+        out.push_str("\nEncrypted members are hidden (password required)\n");
+    }
+    out
+}
+
 pub fn extract(
     path: &Path,
     dest: &Path,
@@ -1347,8 +1372,10 @@ fn test_7z(
     let bytes = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
     let mut cmd = Command::new(bin);
     cmd.arg("t").arg("-y").arg("-bso1").arg("-bsp1");
-    if password.is_some() {
-        cmd.arg("-p");
+    // An empty -p means an empty password when testing. Without a tty 7z asks on stdin instead.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| if libc::setsid() < 0 { Err(io::Error::last_os_error()) } else { Ok(()) });
     }
     cmd.arg(path).stdin(if password.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|err| Fail::Message(err.to_string()))?;
@@ -2117,5 +2144,17 @@ mod tests {
         assert!(archive_hit(&archive, "version", "unrar-0.4", false, &|| false).unwrap());
         assert!(!archive_hit(&archive, "nothing", "unrar-0.4", false, &|| false).unwrap());
         assert!(!archive_hit(&archive, "version", "absent", false, &|| false).unwrap());
+    }
+
+    #[test]
+    fn contents_lists_members_read_only() {
+        let dir = tmp("contents");
+        let archive = zip_with(&dir, &[("a.txt", "alpha"), ("sub/b.txt", "be")], None);
+        let text = contents(&archive);
+        assert!(text.starts_with("sample.zip\n"));
+        assert!(text.contains("             5  a.txt\n") && text.contains("sub/b.txt"));
+        assert!(text.contains("             7  2 files, 0 folders"));
+        assert!(contents(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/version.rar")).contains("version"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

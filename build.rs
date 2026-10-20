@@ -17,6 +17,11 @@ fn display_version() -> String {
     }
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
     watch_git(&manifest);
+    // A tarball unpacked inside another repo (an AUR clone, a dotfiles home) must not count that repo.
+    let top = git(&manifest, &["rev-parse", "--show-toplevel"]);
+    if top.and_then(|top| std::fs::canonicalize(top.trim()).ok()) != std::fs::canonicalize(&manifest).ok() {
+        return base;
+    }
     let Some(count) = git(&manifest, &["rev-list", "--count", "HEAD"]) else {
         return base;
     };

@@ -43,8 +43,7 @@ impl App {
                     return;
                 }
                 let _ = progress_tx.send(ops::Progress { done: done as u64, total, current: path.clone(), note: String::new() });
-                let wipe = permanent || !ops::on_home_disk(path);
-                let result = ops::delete_paths(std::slice::from_ref(path), wipe, &mut |path| gio_trash(path));
+                let result = ops::delete_paths(std::slice::from_ref(path), permanent, &mut |path| gio_trash(path));
                 if let Err(err) = result {
                     let _ = done_tx.send(Err(format!("{}: {err}", path.display())));
                     return;
@@ -231,6 +230,11 @@ impl App {
 
     pub(in crate::ui::app) fn refresh_both(&mut self, sender: &ComponentSender<Self>) {
         for id in [PaneId::Left, PaneId::Right] {
+            if self.state.tab(id).feed {
+                self.state.refresh_hits(id);
+                self.touch(id);
+                continue;
+            }
             let (path, token) = self.state.refresh(id);
             let tab = self.state.pane(id).active;
             self.spawn_load(sender, id, tab, path, token);
@@ -795,9 +799,16 @@ impl App {
                     current: path.clone(),
                     note: String::new(),
                 });
-                if let Err(err) = rust_commander::ops::shred(path, &pipes.cancel) {
-                    let _ = pipes.done_tx.send(Err(format!("{}: {err}", path.display())));
-                    return;
+                match rust_commander::ops::shred(path, &pipes.cancel) {
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
+                        let _ = pipes.done_tx.send(Ok(rust_commander::ops::Report { cancelled: true, files: done as u64 }));
+                        return;
+                    }
+                    Err(err) => {
+                        let _ = pipes.done_tx.send(Err(format!("{}: {err}", path.display())));
+                        return;
+                    }
+                    Ok(()) => {}
                 }
             }
             let _ = pipes.done_tx.send(Ok(rust_commander::ops::Report { cancelled: false, files: total }));

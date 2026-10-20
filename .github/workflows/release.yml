@@ -15,6 +15,8 @@ permissions:
 
 jobs:
   release:
+    # A manual run from another branch must not publish.
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     container: ubuntu:26.04
     env:

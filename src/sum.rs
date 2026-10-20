@@ -81,13 +81,20 @@ pub fn verify(path: &Path, cancel: &AtomicBool, progress: &mut dyn FnMut(&Progre
     let kind = kind_of(path).ok_or_else(|| Fail::Message("Not a checksum file".into()))?;
     let root = path.parent().unwrap_or(Path::new("."));
     let text = fs::read_to_string(path)?;
-    let rows: Vec<_> = text.lines().filter_map(|line| parse_line(kind, line)).collect();
-    if rows.is_empty() {
+    // A line that cannot be read is a failure, so a file never passes unchecked.
+    let mut rows = Vec::new();
+    let mut issues = Vec::new();
+    for row in text.lines().filter_map(|line| parse_line(kind, line)) {
+        match row {
+            Ok(row) => rows.push(row),
+            Err(line) => issues.push(format!("bad line  {line}")),
+        }
+    }
+    if rows.is_empty() && issues.is_empty() {
         return Err(Fail::Message("Nothing to check".into()));
     }
     let total = rows.len() as u64;
-    let (mut ok, mut failed, mut missing) = (0u64, 0u64, 0u64);
-    let mut issues = Vec::new();
+    let (mut ok, mut failed, mut missing) = (0u64, issues.len() as u64, 0u64);
     for (index, (name, expect)) in rows.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             return Ok(Report { cancelled: true, files: ok });
@@ -181,17 +188,18 @@ fn hash_read<D: Digest>(file: &mut File, cancel: &AtomicBool) -> Result<String, 
 }
 
 // GNU coreutils: hex, two spaces, name. A space and a star mark binary mode.
-fn parse_line(kind: Kind, line: &str) -> Option<(String, String)> {
-    let line = line.trim();
-    if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+fn parse_line(kind: Kind, line: &str) -> Option<Result<(String, String), String>> {
+    let line = line.trim_start().trim_end_matches('\r');
+    if line.trim().is_empty() || line.starts_with('#') || line.starts_with(';') {
         return None;
     }
-    let (hash, name) = line.split_once("  ").or_else(|| line.split_once(" *"))?;
-    let (hash, name) = (hash.trim(), name.trim());
-    if name.is_empty() || hash.len() != kind.width() || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    Some((name.to_string(), hash.to_ascii_lowercase()))
+    let row = (|| {
+        let hash = line.get(..kind.width())?;
+        let rest = &line[kind.width()..];
+        let name = rest.strip_prefix("  ").or_else(|| rest.strip_prefix(" *"))?;
+        (!name.is_empty() && hash.chars().all(|c| c.is_ascii_hexdigit())).then(|| (name.to_string(), hash.to_ascii_lowercase()))
+    })();
+    Some(row.ok_or_else(|| line.to_string()))
 }
 
 #[cfg(test)]
@@ -243,6 +251,17 @@ mod tests {
         let err = verify(&list, &AtomicBool::new(false), &mut |_| {}).unwrap_err().to_string();
         assert!(err.starts_with("OK 0, failed 2, missing 1\n"), "{err}");
         assert!(err.contains("mismatch  a.txt") && err.contains("missing  gone.txt") && err.contains("bad path  ../escape"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_fails_on_a_line_it_cannot_read() {
+        let dir = dir("unread");
+        fs::write(dir.join("a  b.txt"), b"a").unwrap();
+        let list = dir.join("a.md5");
+        fs::write(&list, "0cc175b9c0f1b6a831c399e269772661 *a  b.txt\n\\0cc175b9c0f1b6a831c399e269772661  a\\nb\n").unwrap();
+        let err = verify(&list, &AtomicBool::new(false), &mut |_| {}).unwrap_err().to_string();
+        assert!(err.starts_with("OK 1, failed 1, missing 0\n") && err.contains("bad line"), "{err}");
         let _ = fs::remove_dir_all(&dir);
     }
 }

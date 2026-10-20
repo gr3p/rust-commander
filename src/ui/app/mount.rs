@@ -226,11 +226,15 @@ fn wire_disk(
     let actions = actions.to_vec();
     let disk = button.clone();
     point.connect_activate(move |_| {
-        disk.emit_clicked();
+        if disk.is_sensitive() {
+            disk.emit_clicked();
+        }
     });
     let disk = button.clone();
     pass.connect_activate(move |_| {
-        disk.emit_clicked();
+        if disk.is_sensitive() {
+            disk.emit_clicked();
+        }
     });
     shell::on_click(button, move || {
         let Some(cand) = cands.get(choice.selected() as usize) else {
@@ -297,7 +301,9 @@ fn wire_net(
     for entry in [&server, &share, &user, &secret, &point] {
         let button = button.clone();
         entry.connect_activate(move |_| {
-            button.emit_clicked();
+            if button.is_sensitive() {
+                button.emit_clicked();
+            }
         });
     }
     shell::on_click(button, move || {

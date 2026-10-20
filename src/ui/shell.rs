@@ -564,9 +564,12 @@ fn popup_menu(anchor: &gtk::Widget, items: Vec<(&str, Box<dyn Fn()>)>) {
         let button = gtk::Button::with_label(label);
         button.add_css_class("fkey");
         button.set_focus_on_click(false);
-        let menu = menu.clone();
+        // Weak: the popover owns the button, so a strong ref would keep both alive after close.
+        let menu = menu.downgrade();
         button.connect_clicked(move |_| {
-            menu.popdown();
+            if let Some(menu) = menu.upgrade() {
+                menu.popdown();
+            }
             action();
         });
         column.append(&button);
@@ -614,7 +617,7 @@ pub fn popup_rows(
         row.append(&name);
         row.append(&keys);
         button.set_child(Some(&row));
-        let menu = menu.clone();
+        let menu = menu.downgrade();
         let act = item.act;
         let on_pick = Rc::clone(&on_pick);
         button.connect_clicked(move |button| {
@@ -625,7 +628,9 @@ pub fn popup_rows(
                 if weak.upgrade().is_none_or(|button| !button.is_mapped()) {
                     return;
                 }
-                menu.popdown();
+                if let Some(menu) = menu.upgrade() {
+                    menu.popdown();
+                }
                 on_pick(act);
             });
         });

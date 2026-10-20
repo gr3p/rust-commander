@@ -111,16 +111,19 @@ fn watch_menu(item: &relm4::gtk::ListItem, pane: usize, sender: &relm4::Sender<c
     let Some(child) = item.child() else { return };
     let click = gtk::GestureClick::new();
     click.set_button(gtk::gdk::BUTTON_SECONDARY);
-    let row = item.clone();
+    // Weak: the item owns the child that owns this gesture.
+    let row = item.downgrade();
     let tx = sender.clone();
     click.connect_pressed(move |gesture, _, _, _| {
         let Some(widget) = gesture.widget() else { return };
+        let Some(row) = row.upgrade() else { return };
         let pos = row.position();
         if pos == gtk::INVALID_LIST_POSITION {
             return;
         }
         let Some(obj) = row.item().and_then(|obj| obj.downcast::<EntryObject>().ok()) else { return };
         tx.emit(crate::ui::msg::Msg::Cursor(pane, pos));
+        tx.emit(crate::ui::msg::Msg::RowMenu(pane));
         tx.emit(crate::ui::msg::Msg::FocusPane(pane));
         let name = obj.name();
         let parent = name == "↑ [..]";
@@ -131,7 +134,7 @@ fn watch_menu(item: &relm4::gtk::ListItem, pane: usize, sender: &relm4::Sender<c
         let items = rust_commander::commands::row_menu(parent, dir, archive, image);
         let tx = tx.clone();
         crate::ui::shell::popup_rows(&widget, &items, move |act| {
-            tx.emit(crate::ui::msg::Msg::RowAct(pane, pos, act));
+            tx.emit(crate::ui::msg::Msg::RowAct(pane, act));
         });
     });
     child.add_controller(click);
@@ -366,11 +369,20 @@ pub fn set_dot_spin(area: &relm4::gtk::DrawingArea, on: bool) {
         return;
     }
     area.add_css_class("spinning");
+    // Off and on again within one tick keeps the running timer instead of adding a second one.
+    if area.has_css_class("spin-timer") {
+        return;
+    }
+    area.add_css_class("spin-timer");
     let area = area.downgrade();
     relm4::gtk::glib::timeout_add_local(std::time::Duration::from_micros(SPIN_STEP_US as u64 / 2), move || {
-        let Some(area) = area.upgrade().filter(|area| area.has_css_class("spinning")) else {
+        let Some(area) = area.upgrade() else {
             return relm4::gtk::glib::ControlFlow::Break;
         };
+        if !area.has_css_class("spinning") {
+            area.remove_css_class("spin-timer");
+            return relm4::gtk::glib::ControlFlow::Break;
+        }
         area.queue_draw();
         relm4::gtk::glib::ControlFlow::Continue
     });
@@ -594,8 +606,8 @@ fn load_thumb(item: &relm4::gtk::ListItem, cell: &ThumbCell, obj: &EntryObject) 
     }
     let cancel = Arc::new(AtomicBool::new(false));
     unsafe { item.set_data("thumb-cancel", cancel.clone()) };
-    cell.stack.set_visible_child_name("spin");
     set_dot_spin(&cell.spin, true);
+    cell.stack.set_visible_child_name("spin");
     let cell = cell.clone();
     glib::spawn_future_local(async move {
         // Large photos decode into a lot of memory, so only a few run at once.

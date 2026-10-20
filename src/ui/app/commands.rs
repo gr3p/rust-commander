@@ -226,14 +226,35 @@ impl App {
         }
     }
 
-    pub(in crate::ui::app) fn row_act(&mut self, pane: usize, pos: u32, act: RowAct, sender: &ComponentSender<Self>) {
+    pub(in crate::ui::app) fn note_row_target(&mut self, pane: usize) {
+        let id = PaneId::from_index(pane);
+        self.row_target = (self.state.active == id)
+            .then(|| self.state.cursor_entry(id).map(|entry| rust_commander::listing::entry_path(&self.state.tab(id).path, entry)))
+            .flatten();
+    }
+
+    pub(in crate::ui::app) fn row_act(&mut self, pane: usize, act: RowAct, sender: &ComponentSender<Self>) {
         if self.hot.is_some() && PaneId::from_index(pane) != self.hot_pane {
             return;
         }
         self.shell.active.set(pane);
         self.state.active = PaneId::from_index(pane);
         let editing = self.shell.editing.get();
-        self.state.set_cursor(pos as usize);
+        // A reload while the menu was open may have moved the row. Act on the file that was clicked, or not at all.
+        let id = self.state.active;
+        let target = self.row_target.take();
+        let pos = target.and_then(|target| {
+            let tab = self.state.tab(id);
+            self.state
+                .visible(id)
+                .iter()
+                .position(|&i| rust_commander::listing::entry_path(&tab.path, &tab.entries[i]) == target)
+        });
+        let Some(pos) = pos else {
+            self.status = "The file is no longer in the list".into();
+            return;
+        };
+        self.state.set_cursor(pos);
         // A cursor move reloads quick view. Leave an open edit alone until it is closed.
         if editing {
             self.preview_sent = self.state.preview_gen;

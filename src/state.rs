@@ -194,10 +194,24 @@ impl AppState {
     pub fn show_hits(&mut self, id: PaneId, paths: &[PathBuf]) {
         let entries = paths.iter().filter_map(|path| hit_entry(path)).collect();
         let tab = self.tab_mut(id);
+        // A folder load still on its way must not replace the hits.
+        tab.token = fresh_token();
+        tab.pending = None;
         tab.feed = true;
         tab.entries = entries;
         tab.cursor = 0;
         tab.marked.clear();
+    }
+
+    /// After a job the hits are looked up again. Gone ones drop out and the list stays a search result.
+    pub fn refresh_hits(&mut self, id: PaneId) {
+        let dir = self.tab(id).path.clone();
+        let tab = self.tab_mut(id);
+        tab.entries = tab.entries.iter().filter_map(|entry| hit_entry(&listing::entry_path(&dir, entry))).collect();
+        tab.marked.retain(|path| fs::symlink_metadata(path).is_ok());
+        let len = self.visible(id).len();
+        let tab = self.tab_mut(id);
+        tab.cursor = tab.cursor.min(len.saturating_sub(1));
     }
 
     pub fn selected_paths(&self, id: PaneId) -> Vec<PathBuf> {

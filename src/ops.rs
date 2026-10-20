@@ -54,6 +54,11 @@ pub fn transfer(
     progress: &mut dyn FnMut(&Progress),
     conflict: &mut dyn FnMut(&Path, &Path) -> Choice,
 ) -> io::Result<Report> {
+    // Search hits can share a name. Two sources on one target would overwrite the first after it moved.
+    let mut targets = BTreeSet::new();
+    if let Some((_, dest)) = items.iter().find(|(_, dest)| !targets.insert(dest)) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("two items would both become {}", dest.display())));
+    }
     let total: u64 = items.iter().map(|(src, _)| count_entries(src)).sum();
     let mut done = 0u64;
     let mut policy = Policy::Ask;
@@ -653,9 +658,14 @@ pub fn delete_paths(
 ) -> io::Result<()> {
     for path in paths {
         if permanent {
+            use std::os::unix::fs::MetadataExt;
             let meta = fs::symlink_metadata(path)?;
             if meta.is_dir() && !meta.file_type().is_symlink() {
-                fs::remove_dir_all(path)?;
+                let dev = match path.parent() {
+                    Some(parent) if !parent.as_os_str().is_empty() => fs::metadata(parent)?.dev(),
+                    _ => meta.dev(),
+                };
+                remove_tree(path, dev)?;
             } else {
                 fs::remove_file(path)?;
             }
@@ -664,6 +674,23 @@ pub fn delete_paths(
         }
     }
     Ok(())
+}
+
+// Like `rm -r --one-file-system`: a disk mounted inside the tree is refused, never emptied.
+fn remove_tree(path: &Path, dev: u64) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    if fs::symlink_metadata(path)?.dev() != dev {
+        return Err(io::Error::other(format!("{} is another disk", path.display())));
+    }
+    for entry in fs::read_dir(path)? {
+        let child = entry?.path();
+        if fs::symlink_metadata(&child)?.is_dir() {
+            remove_tree(&child, dev)?;
+        } else {
+            fs::remove_file(&child)?;
+        }
+    }
+    fs::remove_dir(path)
 }
 
 /// The trash is the home disk. A file anywhere else is deleted where it stands.
@@ -690,6 +717,9 @@ pub fn shred(path: &Path, cancel: &AtomicBool) -> io::Result<()> {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("refusing symlink {}", path.display())));
     }
     if meta.is_dir() {
+        use std::os::unix::fs::MetadataExt;
+        // Everything is checked before the first overwrite, so a refusal never leaves a half-destroyed tree.
+        let dev = meta.dev();
         let mut files = Vec::new();
         let mut dirs = vec![path.to_path_buf()];
         let mut stack = vec![path.to_path_buf()];
@@ -700,6 +730,20 @@ pub fn shred(path: &Path, cancel: &AtomicBool) -> io::Result<()> {
                 let meta = fs::symlink_metadata(&child)?;
                 if meta.file_type().is_symlink() {
                     return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("refusing symlink {}", child.display())));
+                }
+                let refuse = if meta.dev() != dev {
+                    Some("is another disk")
+                } else if !meta.is_dir() && !meta.is_file() {
+                    Some("is not a regular file")
+                } else if !meta.is_dir() && meta.nlink() > 1 {
+                    Some("has other hard links")
+                } else if !writable(&child) {
+                    Some("is not writable")
+                } else {
+                    None
+                };
+                if let Some(why) = refuse {
+                    return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{} {why}", child.display())));
                 }
                 if meta.is_dir() {
                     stack.push(child.clone());
@@ -719,6 +763,11 @@ pub fn shred(path: &Path, cancel: &AtomicBool) -> io::Result<()> {
         return Ok(());
     }
     shred_file(path, cancel)
+}
+
+fn writable(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(path.as_os_str().as_bytes()).is_ok_and(|c| unsafe { libc::access(c.as_ptr(), libc::W_OK) } == 0)
 }
 
 fn shred_file(path: &Path, cancel: &AtomicBool) -> io::Result<()> {
@@ -769,6 +818,12 @@ mod shred_tests {
         assert!(shred(&dir.join("keep.txt"), &cancel).is_err());
         assert_eq!(fs::read(dir.join("twin.txt")).unwrap(), b"keep");
 
+        fs::create_dir_all(dir.join("mixed")).unwrap();
+        fs::write(dir.join("mixed/a.txt"), b"a").unwrap();
+        fs::hard_link(dir.join("keep.txt"), dir.join("mixed/b.txt")).unwrap();
+        assert!(shred(&dir.join("mixed"), &cancel).is_err());
+        assert_eq!(fs::read(dir.join("mixed/a.txt")).unwrap(), b"a");
+
         std::os::unix::fs::symlink(dir.join("twin.txt"), dir.join("link")).unwrap();
         assert!(shred(&dir.join("link"), &cancel).is_err());
         assert_eq!(fs::read(dir.join("twin.txt")).unwrap(), b"keep");
@@ -787,6 +842,21 @@ mod shred_tests {
         assert!(!report.cancelled);
         assert_eq!(fs::read(dest.join("sub/a.txt")).unwrap(), b"a");
         assert!(!dir.join("src").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_sources_on_one_target_are_refused() {
+        let dir = std::env::temp_dir().join(format!("rc-twin-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("a")).unwrap();
+        fs::create_dir_all(dir.join("b")).unwrap();
+        fs::write(dir.join("a/x.txt"), b"a").unwrap();
+        fs::write(dir.join("b/x.txt"), b"b").unwrap();
+        let items = [(dir.join("a/x.txt"), dir.join("x.txt")), (dir.join("b/x.txt"), dir.join("x.txt"))];
+        let off = AtomicBool::new(false);
+        assert!(transfer(&items, Kind::Move, &off, &off, &mut |_| {}, &mut |_, _| Choice::Overwrite).is_err());
+        assert!(dir.join("a/x.txt").exists() && dir.join("b/x.txt").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 

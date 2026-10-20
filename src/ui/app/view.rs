@@ -445,11 +445,16 @@ impl App {
             self.toggle_lister_edit(sender);
             return;
         }
+        self.toggle_pane_edit(sender);
+    }
+
+    // The quick view pane only. An open F3 window is a different file.
+    fn toggle_pane_edit(&mut self, sender: &ComponentSender<Self>) {
         if self.shell.editing.get() {
             self.leave_quick_edit(sender);
             return;
         }
-        if !self.state.quick_view || self.cursor_is_image() {
+        if !self.state.quick_view || self.cursor_is_image() || self.file_under_cursor().is_some_and(|path| rust_commander::archive::is_archive(&path)) {
             self.note_quick("Edit is for text");
             return;
         }
@@ -480,6 +485,8 @@ impl App {
         preview.set_vexpand(true);
         preview.set_editable(true);
         preview.set_cursor_visible(true);
+        // The pane may still show an image from the last quick view.
+        self.shell.panes[pane].preview_kind.set_visible_child_name("text");
         preview.grab_focus();
         // set_text leaves the cursor at the end. Editing starts on the first line.
         place_at_start(preview);
@@ -508,7 +515,7 @@ impl App {
         }
         self.state.panel_terminal = false;
         self.state.quick_view = true;
-        self.toggle_quick_edit(sender);
+        self.toggle_pane_edit(sender);
         // The cursor bump starts a preview load. The editor already holds the text.
         if self.shell.editing.get() {
             self.preview_sent = self.state.preview_gen;
@@ -791,9 +798,13 @@ impl App {
             if live.load(Ordering::Relaxed) != generation {
                 return;
             }
-            let text = match lister::Reader::open(&path) {
-                Ok(mut reader) => lister::render_reader(&mut reader, ViewMode::Text, charset).unwrap_or_else(|err| err.to_string()),
-                Err(err) => err.to_string(),
+            let text = if rust_commander::archive::is_archive(&path) {
+                rust_commander::archive::contents(&path)
+            } else {
+                match lister::Reader::open(&path) {
+                    Ok(mut reader) => lister::render_reader(&mut reader, ViewMode::Text, charset).unwrap_or_else(|err| err.to_string()),
+                    Err(err) => err.to_string(),
+                }
             };
             if live.load(Ordering::Relaxed) == generation {
                 tx.emit(Msg::Preview { generation, body: PreviewBody::Text(text) });

@@ -100,7 +100,7 @@ pub fn run(options: Options, cancelled: impl Fn() -> bool, mut emit: impl FnMut(
             // Opening a FIFO or device would block.
             let content_ok = options.text.is_empty() || kind.is_file() && file_contains(&path, text_needle.as_bytes(), !options.case_sensitive, &cancelled, &stop);
             let mut hit = name_ok && content_ok;
-            if !hit && options.in_archives && crate::archive::is_archive(&path) && seen_archives.insert(path.clone()) {
+            if !hit && options.in_archives && kind.is_file() && crate::archive::is_archive(&path) && seen_archives.insert(path.clone()) {
                 match crate::archive::archive_hit(&path, &options.query, &options.text, options.case_sensitive, &|| cancelled(&stop)) {
                     Ok(true) => hit = true,
                     Ok(false) => {}
