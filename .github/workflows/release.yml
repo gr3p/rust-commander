@@ -29,7 +29,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates git gh gnupg apt-utils dpkg-dev debhelper build-essential cargo rustc pkg-config libgtk-4-dev libvte-2.91-gtk4-dev
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -47,6 +47,10 @@ jobs:
             "$version" "$(date -R)" "$(cat debian/changelog)" > debian/changelog
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      # A failing test stops the release before anything is published.
+      - name: Test
+        run: cargo test --locked --lib
+
       - name: Build package
         run: dpkg-buildpackage -us -uc -b
 
@@ -55,7 +59,7 @@ jobs:
           deb=$(ls ../rust-commander_*_amd64.deb)
           gh release create "v${{ steps.version.outputs.version }}" "$deb" --target "$GITHUB_SHA" --generate-notes --latest
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: gh-pages
           path: pages
@@ -108,7 +112,7 @@ jobs:
           dnf config-manager addrepo --from-repofile=https://cli.github.com/packages/rpm/gh-cli.repo
           dnf install -y gh
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -137,7 +141,7 @@ jobs:
           rpm=$(ls "$HOME/rpmbuild/RPMS/x86_64"/rust-commander-*.rpm)
           gh release upload "v${{ steps.version.outputs.version }}" "$rpm"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: gh-pages
           path: pages
