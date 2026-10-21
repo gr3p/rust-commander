@@ -33,6 +33,17 @@ install -Dm644 data/rust-commander.desktop \
 install -Dm644 img/rust-commander.png \
 	%{buildroot}%{_datadir}/icons/hicolor/512x512/apps/%{name}.png
 
+%post
+# A desktop file in the home directory has the same id and hides the packaged one,
+# so the dock keeps launching an old dev build. Removed as the user, never as root.
+getent passwd | while IFS=: read -r user _ uid _ _ home _; do
+	[ "$uid" -ge 1000 ] 2>/dev/null || continue
+	f="$home/.local/share/applications/se.rustcommander.RustCommander.desktop"
+	[ -n "$home" ] && [ -e "$f" ] || continue
+	runuser -u "$user" -- rm -f "$f" || :
+done
+exit 0
+
 %files
 %license LICENSE
 %{_bindir}/%{name}
