@@ -37,7 +37,7 @@ impl App {
                 self.cfg.background_alpha,
                 self.cfg.background_stretch,
             ),
-            theme::cursor_bar(palette, &self.cfg.cursor_color, self.cfg.cursor_alpha, &self.cfg.cursor_text_color),
+            theme::cursor_bar(palette, &self.cfg.cursor_color, self.cfg.cursor_alpha, &self.cfg.cursor_text_color, self.cfg.cursor_frame),
             theme::marked_text(palette, &self.cfg.mark_color),
             theme::blink(palette, &self.cfg.blink_color),
         );
@@ -322,6 +322,15 @@ impl App {
         strength_row.append(&strength);
         let (cursor_row, cursor_color) =
             color_picker("Cursor color", &palette.cursor, &self.cfg.cursor_color, Msg::CursorColor, tx.clone());
+        let (cursor_frame_row, cursor_frame) = settings_row("Frame cursor", self.cfg.cursor_frame);
+        let tx_cursor_frame = tx.clone();
+        let flash = cursor_frame_row.clone();
+        let click = gtk::GestureClick::new();
+        click.connect_released(move |_, _, _, _| {
+            crate::ui::shell::blink_widget(flash.upcast_ref());
+            tx_cursor_frame.emit(Msg::ToggleCursorFrame);
+        });
+        cursor_frame_row.add_controller(click);
         let (mark_row, mark_color) = color_picker("Mark color (Space)", &palette.mark, &self.cfg.mark_color, Msg::MarkColor, tx.clone());
         let blink_theme = theme::blink_color(&palette);
         let (blink_row, blink_color) = color_picker("Blink color", &blink_theme, &self.cfg.blink_color, Msg::BlinkColor, tx.clone());
@@ -343,6 +352,7 @@ impl App {
         cursor_alpha_row.append(&cursor_alpha);
         look.append(&background_row);
         look.append(&cursor_row);
+        look.append(&cursor_frame_row);
         look.append(&cursor_text_row);
         look.append(&mark_row);
         look.append(&blink_row);
@@ -405,6 +415,7 @@ impl App {
             background_color,
             cursor_color,
             cursor_text_color,
+            cursor_frame,
             mark_color,
             blink_color,
             image,
@@ -648,6 +659,7 @@ impl App {
         paint_switch(&ui.syntax, self.cfg.syntax_highlight);
         paint_switch(&ui.flash, self.cfg.flash_feedback);
         paint_switch(&ui.stretch, self.cfg.background_stretch);
+        paint_switch(&ui.cursor_frame, self.cfg.cursor_frame);
         ui.image.set_text(&image_caption(&self.cfg.background));
         ui.clear.set_sensitive(!self.cfg.background.trim().is_empty());
         let label = if self.background_path().is_empty() { "Opacity" } else { "Image strength" };
@@ -769,6 +781,13 @@ impl App {
         let _ = config::save(&self.cfg);
         self.restyle();
         self.paint_colors();
+    }
+
+    pub(in crate::ui::app) fn toggle_cursor_frame(&mut self) {
+        self.cfg.cursor_frame = !self.cfg.cursor_frame;
+        let _ = config::save(&self.cfg);
+        self.restyle();
+        self.paint_settings_switch();
     }
 
     pub(in crate::ui::app) fn set_cursor_alpha(&mut self, alpha: u8) {

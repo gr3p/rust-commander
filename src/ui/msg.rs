@@ -102,6 +102,7 @@ pub enum Msg {
     MarkColor(String),
     BlinkColor(String),
     CursorAlpha(u8),
+    ToggleCursorFrame,
     CloseSettings,
     ArchiveListed(Result<rust_commander::archive::Listed, String>),
     UnpackPick(String, Vec<String>),

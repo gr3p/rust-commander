@@ -69,6 +69,8 @@ pub struct Config {
     pub blink_color: String,
     #[serde(default = "default_cursor_alpha")]
     pub cursor_alpha: u8,
+    #[serde(default)]
+    pub cursor_frame: bool,
 }
 
 fn default_theme() -> String {
@@ -123,6 +125,7 @@ impl Default for Config {
             mark_color: String::new(),
             blink_color: String::new(),
             cursor_alpha: default_cursor_alpha(),
+            cursor_frame: false,
         }
     }
 }
@@ -257,6 +260,15 @@ mod tests {
         assert!(old_config.flash_feedback);
         let disabled: Config = toml::from_str("flash_feedback = false").unwrap();
         assert!(!disabled.flash_feedback);
+    }
+
+    #[test]
+    fn cursor_frame_defaults_off() {
+        assert!(!Config::default().cursor_frame);
+        let old_config: Config = toml::from_str("").unwrap();
+        assert!(!old_config.cursor_frame);
+        let on: Config = toml::from_str("cursor_frame = true").unwrap();
+        assert!(on.cursor_frame);
     }
 
     #[test]

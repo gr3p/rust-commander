@@ -502,12 +502,12 @@ fn disk_info_reads_mount_and_space() -> Result<(), String> {
 
 fn cursor_text_follows_theme_until_overridden() -> Result<(), String> {
     let palette = theme::builtin();
-    let themed = theme::cursor_bar(&palette, "", 70, "");
+    let themed = theme::cursor_bar(&palette, "", 70, "", false);
     let (idle, active) = themed.split_once("frame.pane-active").ok_or("no active rule")?;
     if !active.contains(&format!("color: {};", palette.cursor_text)) || !active.contains(&palette.cursor) {
         return Err(format!("theme cursor {active}"));
     }
-    let own = theme::cursor_bar(&palette, "#112233", 70, "#ffffff");
+    let own = theme::cursor_bar(&palette, "#112233", 70, "#ffffff", false);
     let (idle_own, active_own) = own.split_once("frame.pane-active").ok_or("no active rule")?;
     if !active_own.contains("color: #ffffff;") || !active_own.contains("#112233") {
         return Err(format!("override {active_own}"));
@@ -516,7 +516,7 @@ fn cursor_text_follows_theme_until_overridden() -> Result<(), String> {
     if idle_own != idle || !idle.contains(&format!("color: {};", palette.foreground)) {
         return Err(format!("idle pane {idle_own}"));
     }
-    let bad = theme::cursor_bar(&palette, "", 70, "white");
+    let bad = theme::cursor_bar(&palette, "", 70, "white", false);
     eq(bad.contains("white"), false, "invalid text color ignored")?;
     let marked = theme::marked_text(&palette, "");
     let own_mark = theme::marked_text(&palette, "#ff8800");
@@ -525,6 +525,14 @@ fn cursor_text_follows_theme_until_overridden() -> Result<(), String> {
     }
     let cfg = config::Config { cursor_color: "#112233".into(), ..config::Config::default() };
     eq(cfg.color_overrides(), vec!["cursor color"], "overrides")?;
+    let framed = theme::cursor_bar(&palette, "#112233", 70, "#ffffff", true);
+    let active_frame = framed.split_once("frame.pane-active").ok_or("no frame rule")?.1;
+    if !active_frame.contains("alpha(#112233, 0.70)") || !active_frame.contains("background-position: top, bottom") {
+        return Err(format!("frame cursor {active_frame}"));
+    }
+    if !active_frame.contains("color: #ffffff;") {
+        return Err(format!("frame text {active_frame}"));
+    }
     let themed_blink = theme::blink(&palette, "");
     let own_blink = theme::blink(&palette, "#ff00aa");
     if !themed_blink.contains(&theme::blink_color(&palette)) || !themed_blink.contains(".pane-blink") {
@@ -1399,6 +1407,9 @@ fn bookmark_roundtrip_config(dir: &Path) -> Result<(), String> {
     }
     if loaded.cursor_alpha != 70 {
         return Err("cursor alpha default".into());
+    }
+    if loaded.cursor_frame {
+        return Err("cursor frame default".into());
     }
     if !loaded.file_icons {
         return Err("file icons default".into());

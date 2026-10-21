@@ -624,15 +624,26 @@ fn selected_rows(p: &Palette) -> String {
     )
 }
 
-// The filled bar belongs to the pane that has focus. The other pane keeps its place without that bar.
-// `color` and `text` are the user's overrides; empty means the theme's own. Text only changes on the bar.
-pub fn cursor_bar(p: &Palette, color: &str, alpha: u8, text: &str) -> String {
+// The cursor belongs to the pane that has focus. The other pane keeps its place without it.
+// `color` and `text` are the user's overrides; empty means the theme's own.
+// `frame` keeps that color as a line along the top and bottom edge. Text color applies either way.
+pub fn cursor_bar(p: &Palette, color: &str, alpha: u8, text: &str, frame: bool) -> String {
     let color = hex_color(color).unwrap_or(&p.cursor);
     let text = hex_color(text).unwrap_or(&p.cursor_text);
     let opacity = f64::from(alpha.min(100)) / 100.0;
     let idle = &p.foreground;
+    let active = if frame {
+        let line = format!("alpha({color}, {opacity:.2})");
+        format!(
+            "frame.pane-active columnview > listview > row:selected,\nframe.pane-active gridview > child:selected {{\n  background-color: transparent;\n  background-image: linear-gradient({line}, {line}), linear-gradient({line}, {line});\n  background-size: 100% 1px, 100% 1px;\n  background-position: top, bottom;\n  background-repeat: no-repeat, no-repeat;\n  color: {text};\n}}\nframe.pane-active columnview > listview > row:selected > cell {{\n  background-color: transparent;\n  background-image: none;\n  color: {text};\n}}\n"
+        )
+    } else {
+        format!(
+            "frame.pane-active columnview > listview > row:selected,\nframe.pane-active columnview > listview > row:selected > cell,\nframe.pane-active gridview > child:selected {{\n  background-color: alpha({color}, {opacity:.2});\n  background-image: none;\n  color: {text};\n}}\n"
+        )
+    };
     format!(
-        "frame.pane columnview > listview > row:selected,\nframe.pane columnview > listview > row:selected > cell,\nframe.pane gridview > child:selected {{\n  background-color: transparent;\n  background-image: none;\n  color: {idle};\n}}\nframe.pane-active columnview > listview > row:selected,\nframe.pane-active columnview > listview > row:selected > cell,\nframe.pane-active gridview > child:selected {{\n  background-color: alpha({color}, {opacity:.2});\n  background-image: none;\n  color: {text};\n}}\n"
+        "frame.pane columnview > listview > row:selected,\nframe.pane columnview > listview > row:selected > cell,\nframe.pane gridview > child:selected {{\n  background-color: transparent;\n  background-image: none;\n  color: {idle};\n}}\n{active}"
     )
 }
 
