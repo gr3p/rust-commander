@@ -821,6 +821,7 @@ impl App {
                     self.toggle_quick_edit(sender);
                 }
                 Key::q | Key::Q => self.toggle_quick_view(sender),
+                Key::Tab | Key::ISO_Left_Tab if self.shell_has_focus() => self.focus_across_shell(),
                 Key::Tab | Key::ISO_Left_Tab => {
                     let id = self.state.active;
                     self.state.next_tab(id, shift);

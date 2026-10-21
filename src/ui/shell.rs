@@ -1014,10 +1014,10 @@ fn terminal_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
     let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
     let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
     // Escape stays in the shell (vim, fzf). F9 toggles the file list. F1 opens commands.
-    // Tab switches to the file pane. Completion inside the shell is given up.
+    // Tab stays in the shell for completion. Ctrl+Tab leaves it for the file pane.
     let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
-    (!ctrl && !alt && matches!(key, Key::F1 | Key::F9 | Key::Tab | Key::ISO_Left_Tab))
-        || (ctrl && !alt && matches!(key, Key::q | Key::Q | Key::w | Key::W | Key::F9))
+    (!ctrl && !alt && matches!(key, Key::F1 | Key::F9))
+        || (ctrl && !alt && matches!(key, Key::q | Key::Q | Key::w | Key::W | Key::F9 | Key::Tab | Key::ISO_Left_Tab))
         || (ctrl && shift && !alt && matches!(key, Key::m | Key::M))
         || (alt && !ctrl && is_digit_key(key))
 }

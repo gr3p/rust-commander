@@ -49,6 +49,17 @@ impl App {
         term.set_hexpand(true);
         term.set_vexpand(true);
         term.set_margin_start(8);
+        // Right click pastes, as in PuTTY. Capture phase, or VTE claims the click first.
+        let paste = gtk::GestureClick::new();
+        paste.set_button(gtk::gdk::BUTTON_SECONDARY);
+        paste.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let target = term.clone();
+        paste.connect_pressed(move |gesture, _, _, _| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            target.grab_focus();
+            target.paste_clipboard();
+        });
+        term.add_controller(paste);
         let name = theme::active_name(&self.cfg.theme, &rust_commander::config::active_theme_path());
         super::shell::paint_terminal(&term, &theme::load_terminal(&name, &self.cfg.background_color));
         let button = gtk::Button::new();
@@ -91,7 +102,7 @@ impl App {
         gtk::prelude::GtkWindowExt::focus(&self.shell.window).is_some_and(|widget| widget.has_css_class("panel-shell"))
     }
 
-    // Tab toggles the file list and the shell. The shell stays on the pane where it was opened.
+    // Tab enters the shell from the file list, Ctrl+Tab leaves it. The shell stays on the pane where it was opened.
     pub(in crate::ui::app) fn focus_across_shell(&mut self) {
         let pane = if self.shell_has_focus() {
             self.focus_list();
