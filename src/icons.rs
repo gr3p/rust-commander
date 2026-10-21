@@ -151,7 +151,6 @@ pub enum Art {
     Audio,
     Video,
     Pdf,
-    Archive,
 }
 
 pub fn art_for(name: &str) -> Option<Art> {
@@ -161,8 +160,6 @@ pub fn art_for(name: &str) -> Option<Art> {
         Some(Art::Video)
     } else if listing::is_pdf(name) {
         Some(Art::Pdf)
-    } else if listing::is_archive(name) {
-        Some(Art::Archive)
     } else {
         None
     }
@@ -181,10 +178,6 @@ pub fn art_svg(art: Art, palette: &crate::theme::Palette) -> String {
         // No text feature in resvg: page with fold and an accent seal.
         Art::Pdf => format!(
             r#"<path d="M18 6h20l12 12v40H18z" fill="none" stroke="{fg}" stroke-width="3" stroke-linejoin="round"/><path d="M38 6v12h12" fill="none" stroke="{fg}" stroke-width="3" stroke-linejoin="round"/><path d="M26 28h16M26 35h16M26 42h10" stroke="{fg}" stroke-width="2" stroke-linecap="round"/><rect x="22" y="48" width="20" height="8" rx="2" fill="{accent}"/>"#
-        ),
-        // Closed box with an accent zipper. No text: resvg has no text feature.
-        Art::Archive => format!(
-            r#"<path d="M10 24h44v28H10z" fill="none" stroke="{fg}" stroke-width="3" stroke-linejoin="round"/><path d="M10 24l6-12h32l6 12" fill="none" stroke="{fg}" stroke-width="3" stroke-linejoin="round"/><path d="M32 12v40" stroke="{accent}" stroke-width="3"/><rect x="26" y="32" width="12" height="8" rx="1.5" fill="{accent}"/>"#
         ),
     };
     format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">{body}</svg>"#)

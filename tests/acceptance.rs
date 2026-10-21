@@ -284,12 +284,7 @@ fn icon_packs_cover_roles() -> Result<(), String> {
         return Err("pdf svg render".into());
     }
     eq(icons::art_for("a.pdf"), Some(icons::Art::Pdf), "pdf art")?;
-    eq(icons::art_for("a.zip"), Some(icons::Art::Archive), "zip art")?;
-    eq(icons::art_for("a.RAR"), Some(icons::Art::Archive), "rar art")?;
-    let archive = imageview::render_svg(&icons::art_svg(icons::Art::Archive, &palette), 128)?;
-    if archive.pixels.len() != 128 * 128 * 4 || !archive.pixels.chunks(4).any(|px| px[3] > 0) {
-        return Err("archive svg render".into());
-    }
+    eq(icons::art_for("a.zip"), None, "archives list their contents instead")?;
     eq(icons::file_token(AWESOME, "a.rs", false, false), "\u{f1c9}".into(), "aw code")?;
     eq(icons::file_token(AWESOME, "a.pdf", false, false), "\u{f1c1}".into(), "aw pdf")?;
     eq(icons::file_token(AWESOME, "..", true, false), String::new(), "up")?;
