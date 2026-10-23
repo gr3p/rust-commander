@@ -258,14 +258,15 @@ impl App {
         let quiet_changed = Rc::clone(&quiet);
         let changes_changed = Rc::clone(&changes);
         let editing_changed = Rc::clone(&editing);
-        let window_changed = window.clone();
-        let view_changed = view.clone();
+        let window_changed = window.downgrade();
+        let view_changed = view.downgrade();
         let name_changed = name.clone();
         let syntax = self.cfg.syntax_highlight;
         view.buffer().connect_changed(move |_| {
             if quiet_changed.get() || !editing_changed.get() {
                 return;
             }
+            let (Some(window_changed), Some(view_changed)) = (window_changed.upgrade(), view_changed.upgrade()) else { return };
             changes_changed.set(changes_changed.get() + 1);
             window_changed.set_title(Some(&format!("{name_changed}*")));
             paint_syntax(&view_changed, &name_changed, syntax);

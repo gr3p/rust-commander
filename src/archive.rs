@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::ffi::CString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::raw::c_int;
 use std::os::unix::ffi::OsStrExt;
@@ -246,6 +246,7 @@ fn extract_zip(
             ensure_dir(&target)?;
             continue;
         }
+        let output = crate::ops::Target::new(&target)?;
         match keep(&target, &rel, &mut policy, conflict)? {
             Keep::Skip => continue,
             Keep::Cancel => return Ok(Report { cancelled: true, files }),
@@ -263,7 +264,7 @@ fn extract_zip(
             update.note = note.clone();
             progress(&update);
         };
-        match write_reader(&mut file, &target, mode, time, size, &mut written, total, &rel, cancel, &mut step) {
+        match write_reader(&mut file, &target, &output, mode, time, size, &mut written, total, &rel, cancel, &mut step) {
             Ok(()) => files += 1,
             Err(Fail::Cancelled) => return Ok(Report { cancelled: true, files }),
             Err(Fail::Damaged(why)) => {
@@ -460,6 +461,7 @@ fn extract_tar(
             ensure_dir(&target)?;
             continue;
         }
+        let output = crate::ops::Target::new(&target)?;
         match keep(&target, &rel, &mut policy, conflict)? {
             Keep::Skip => continue,
             Keep::Cancel => return Ok(Report { cancelled: true, files }),
@@ -474,7 +476,7 @@ fn extract_tar(
             update.note = note.clone();
             progress(&update);
         };
-        match write_reader(&mut entry, &target, mode, time, size, &mut written, total, &rel, cancel, &mut step) {
+        match write_reader(&mut entry, &target, &output, mode, time, size, &mut written, total, &rel, cancel, &mut step) {
             Ok(()) => files += 1,
             Err(Fail::Cancelled) => return Ok(Report { cancelled: true, files }),
             Err(err) => return Err(err),
@@ -785,6 +787,7 @@ fn extract_rar(
             skip(&handle)?;
             continue;
         }
+        let output = crate::ops::Target::new(&target)?;
         match keep(&target, &rel, &mut policy, conflict)? {
             Keep::Skip => {
                 skip(&handle)?;
@@ -800,8 +803,8 @@ fn extract_rar(
         job.start(written, size, file_line(file_index, file_total, &name));
         job.report(written, rel.clone());
         // As in write_reader: the old file stays until the new one is complete.
-        let part = crate::ops::partial_path(&target);
-        let _ = fs::remove_file(&part);
+        let part = crate::ops::temporary_file(&target, 0o600)?.into_temp_path();
+        fs::remove_file(&part)?;
         let dest_name = c_path(&part)?;
         let code = unsafe { unrar_ng_sys::RARProcessFile(handle.0, unrar_ng_sys::RAR_EXTRACT, ptr::null(), dest_name.as_ptr()) };
         if code != unrar_ng_sys::ERAR_SUCCESS {
@@ -833,7 +836,8 @@ fn extract_rar(
             // unrar restores the archived mode. Keep only its exec bits, as for zip.
             let mode = if meta.permissions().mode() & 0o111 != 0 { 0o755 } else { 0o644 };
             fs::set_permissions(&part, fs::Permissions::from_mode(mode))?;
-            fs::rename(&part, &target)?;
+            File::open(&part)?.sync_all()?;
+            output.commit(&part)?;
             Ok(meta.len())
         })();
         let len = match placed {
@@ -1022,6 +1026,7 @@ fn ensure_room(dest: &Path, need: u64) -> Result<(), Fail> {
 fn write_reader(
     input: &mut impl Read,
     dest: &Path,
+    target: &crate::ops::Target,
     mode: u32,
     time: Option<std::time::SystemTime>,
     declared: u64,
@@ -1031,16 +1036,9 @@ fn write_reader(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(&Progress),
 ) -> Result<(), Fail> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let part = crate::ops::partial_path(dest);
-    let _ = fs::remove_file(&part);
+    let mut temp = crate::ops::temporary_file(dest, mode)?;
     let result = (|| {
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&part)?;
+        let output = temp.as_file_mut();
         // Sized to the member so small files don't each zero a 1 MiB buffer.
         let mut buf = vec![0u8; declared.saturating_add(1).min(1024 * 1024) as usize];
         let mut got = 0u64;
@@ -1074,13 +1072,10 @@ fn write_reader(
         if let Some(time) = time {
             let _ = output.set_modified(time);
         }
-        drop(output);
-        fs::rename(&part, dest)?;
+        output.sync_all()?;
+        target.commit(temp.path())?;
         Ok(())
     })();
-    if result.is_err() {
-        let _ = fs::remove_file(&part);
-    }
     result
 }
 
@@ -2064,7 +2059,8 @@ mod tests {
         let target = dir.join("out.bin");
         let cancel = AtomicBool::new(false);
         let mut written = 0;
-        let err = write_reader(&mut &b"too long"[..], &target, 0o644, None, 3, &mut written, 3, Path::new("out.bin"), &cancel, &mut |_| {});
+        let output = crate::ops::Target::new(&target).unwrap();
+        let err = write_reader(&mut &b"too long"[..], &target, &output, 0o644, None, 3, &mut written, 3, Path::new("out.bin"), &cancel, &mut |_| {});
         assert!(matches!(err, Err(Fail::Message(msg)) if msg.contains("larger than the archive declares")));
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
         let _ = fs::remove_dir_all(&dir);

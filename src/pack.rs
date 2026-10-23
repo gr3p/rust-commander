@@ -103,6 +103,7 @@ pub fn pack(
     if sources.is_empty() {
         return Err(Fail::Message("Nothing selected".into()));
     }
+    let target = crate::ops::Target::new(dest)?;
     let password = opts.password.as_deref().filter(|text| !text.is_empty());
     if password.is_some_and(|text| text.contains(['\n', '\r', '\0'])) {
         return Err(Fail::Message("Password cannot contain line breaks".into()));
@@ -123,21 +124,20 @@ pub fn pack(
     if !parent.is_dir() {
         return Err(Fail::Message(format!("folder does not exist: {}", parent.display())));
     }
-    let part = crate::ops::partial_path(dest);
-    // Only we use this name, so a leftover from a crash can go; 7z and rar would add to it.
-    let _ = fs::remove_file(&part);
+    let part = crate::ops::temporary_file(dest, 0o666)?.into_temp_path();
     let packed = match format {
         Format::Zip => create_zip(sources, cwd, &part, level, password, cancel, progress),
         Format::SevenZ | Format::Rar => {
             let Some(bin) = bin else {
                 return Err(Fail::Message(hint(format).into()));
             };
+            fs::remove_file(&part)?;
             run_tool(format, bin, sources, cwd, &part, level, password, None, cancel, progress)
         }
     };
     match packed {
         Ok(files) => {
-            if let Err(err) = fs::rename(&part, dest) {
+            if let Err(err) = File::open(&part).and_then(|file| file.sync_all()).and_then(|()| target.commit(&part)) {
                 let _ = fs::remove_file(&part);
                 return Err(err.into());
             }
@@ -165,7 +165,7 @@ fn create_zip(
 ) -> Result<u64, Fail> {
     let mut entries = Vec::new();
     for source in sources {
-        walk(source, cwd, &mut entries)?;
+        walk(source, cwd, dest, &mut entries)?;
     }
     let total: u64 = entries.iter().filter_map(|(_, _, len)| *len).fold(0, u64::saturating_add);
     let mut file = File::create(dest)?;
@@ -241,7 +241,10 @@ fn dos_time(secs: i64) -> Option<zip::DateTime> {
     .ok()
 }
 
-fn walk(path: &Path, cwd: &Path, out: &mut Vec<(PathBuf, PathBuf, Option<u64>)>) -> Result<(), Fail> {
+fn walk(path: &Path, cwd: &Path, skip: &Path, out: &mut Vec<(PathBuf, PathBuf, Option<u64>)>) -> Result<(), Fail> {
+    if path == skip {
+        return Ok(());
+    }
     let rel = path.strip_prefix(cwd).map_err(|_| Fail::Message("file is outside the folder".into()))?.to_path_buf();
     if rel.as_os_str().is_empty() {
         return Err(Fail::Message("cannot pack the folder into itself".into()));
@@ -255,7 +258,7 @@ fn walk(path: &Path, cwd: &Path, out: &mut Vec<(PathBuf, PathBuf, Option<u64>)>)
         let mut children: Vec<_> = fs::read_dir(path)?.map(|entry| entry.map(|entry| entry.path())).collect::<io::Result<_>>()?;
         children.sort();
         for child in children {
-            walk(&child, cwd, out)?;
+            walk(&child, cwd, skip, out)?;
         }
         Ok(())
     } else {
@@ -298,25 +301,24 @@ fn pack_volumes(
     let Some(parent) = dest.parent() else {
         return Err(Fail::Message("missing destination folder".into()));
     };
-    let staging = crate::ops::partial_path(dest).with_extension("d");
-    let _ = fs::remove_dir_all(&staging);
-    fs::create_dir(&staging)?;
-    let staged = staging.join(dest.file_name().unwrap_or(std::ffi::OsStr::new("archive")));
+    let staging = tempfile::Builder::new().prefix(".rust-commander-partial-").tempdir_in(parent)?;
+    let staged = staging.path().join(dest.file_name().unwrap_or(std::ffi::OsStr::new("archive")));
     let packed = run_tool(format, bin, sources, cwd, &staged, level, password, Some(bytes), cancel, progress);
     let moved = packed.and_then(|files| {
         let mut parts = Vec::new();
-        for entry in fs::read_dir(&staging)? {
+        for entry in fs::read_dir(staging.path())? {
             let entry = entry?;
             let target = parent.join(entry.file_name());
             // A half-moved set would be worse than none, so check every name first.
+            let output = crate::ops::Target::new(&target)?;
             if fs::symlink_metadata(&target).is_ok() {
                 return Err(Fail::Message(format!("{} already exists", target.display())));
             }
-            parts.push((entry.path(), target));
+            parts.push((entry.path(), target, output));
         }
-        for (done, (from, to)) in parts.iter().enumerate() {
-            if let Err(err) = fs::rename(from, to) {
-                for (_, moved) in &parts[..done] {
+        for (done, (from, _, target)) in parts.iter().enumerate() {
+            if let Err(err) = target.commit(from) {
+                for (_, moved, _) in &parts[..done] {
                     let _ = fs::remove_file(moved);
                 }
                 return Err(err.into());
@@ -324,7 +326,6 @@ fn pack_volumes(
         }
         Ok(files)
     });
-    let _ = fs::remove_dir_all(&staging);
     match moved {
         Ok(files) => Ok(Report { cancelled: false, files }),
         Err(Fail::Cancelled) => Ok(Report { cancelled: true, files: 0 }),
@@ -613,7 +614,7 @@ mod tests {
         let report = pack(Format::Zip, None, &[dir.join("a.txt")], &dir, &dir.join("out.zip"), &opts, &AtomicBool::new(true), &mut |_| {}).unwrap();
         assert!(report.cancelled);
         assert_eq!(fs::read(dir.join("out.zip.part")).unwrap(), b"download");
-        assert!(fs::symlink_metadata(crate::ops::partial_path(&dir.join("out.zip"))).is_err());
+        assert!(!fs::read_dir(&dir).unwrap().any(|entry| entry.unwrap().file_name().to_string_lossy().starts_with(".rust-commander-partial-")));
         if let Some(bin) = find_program("", names(Format::SevenZ)) {
             let cancel = AtomicBool::new(false);
             fs::write(dir.join("stale.txt"), b"old").unwrap();
@@ -621,12 +622,14 @@ mod tests {
             pack(Format::SevenZ, Some(&bin), &[dir.join("stale.txt")], &dir, &old, &opts, &cancel, &mut |_| {}).unwrap();
             let dest = dir.join("out.7z");
             fs::copy(&old, dir.join("out.7z.part")).unwrap();
-            fs::copy(&old, crate::ops::partial_path(&dest)).unwrap();
+            let legacy = dir.join(".rust-commander-partial-out.7z");
+            fs::copy(&old, &legacy).unwrap();
             pack(Format::SevenZ, Some(&bin), &[dir.join("a.txt")], &dir, &dest, &opts, &cancel, &mut |_| {}).unwrap();
             let listed = Command::new(&bin).args(["l", dest.to_str().unwrap()]).output().unwrap();
             let text = String::from_utf8_lossy(&listed.stdout);
             assert!(text.contains("a.txt") && !text.contains("stale.txt"), "{text}");
             assert_eq!(fs::read(dir.join("out.7z.part")).unwrap(), fs::read(&old).unwrap());
+            assert_eq!(fs::read(&legacy).unwrap(), fs::read(&old).unwrap());
         }
         let _ = fs::remove_dir_all(&dir);
     }

@@ -1774,7 +1774,11 @@ impl App {
         if !lister_text.unwrap_or_default().contains("hello rust-commander") {
             errors.push("lister text".into());
         }
+        let lister_refs = self.lister.as_ref().map(|ui| (ui.view.downgrade(), ui.view.buffer().downgrade()));
         self.close_lister();
+        if lister_refs.is_some_and(|(view, buffer)| view.upgrade().is_some() || buffer.upgrade().is_some()) {
+            errors.push("lister view or buffer leaked after close".into());
+        }
 
         self.state.quick_view = true;
         self.preview.generation = self.state.preview_gen;
@@ -2507,4 +2511,3 @@ mod path_complete {
         assert_eq!(complete_path(std::path::Path::new("/"), "~").unwrap(), "~/");
     }
 }
-

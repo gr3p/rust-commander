@@ -1193,8 +1193,7 @@ fn cancel_removes_partial(dir: &Path) -> Result<(), String> {
         },
         &mut |_, _| Choice::Overwrite,
     );
-    let partial = dest.with_file_name(".rust-commander-partial-big-out");
-    if dest.exists() || partial.exists() {
+    if dest.exists() || !partial_files(dir)?.is_empty() {
         return Err("partial left behind".into());
     }
     Ok(())
@@ -1205,7 +1204,7 @@ fn pause_closes_files_and_keeps_one_writer(dir: &Path) -> Result<(), String> {
     let dest = dir.join("big-out");
     let data: Vec<u8> = (0..ops::CHUNK * 3 + 7).map(|i| (i % 251) as u8).collect();
     fs::write(&src, &data).map_err(s)?;
-    let partial = fs::canonicalize(dir).map_err(s)?.join(".rust-commander-partial-big-out");
+    let real_dir = fs::canonicalize(dir).map_err(s)?;
     let real_src = fs::canonicalize(&src).map_err(s)?;
     let (cancel, pause, armed) = (AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false));
     std::thread::scope(|scope| {
@@ -1231,11 +1230,12 @@ fn pause_closes_files_and_keeps_one_writer(dir: &Path) -> Result<(), String> {
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
         // A reflink copies the whole file in one step, so there is no pause inside it.
+        let partials = partial_files(&real_dir)?;
         let held = if dest.exists() {
             Ok(())
-        } else if !partial.exists() {
+        } else if partials.len() != 1 {
             Err("partial missing while paused".to_string())
-        } else if open_fds().iter().any(|path| *path == partial || *path == real_src) {
+        } else if open_fds().iter().any(|path| partials.contains(path) || *path == real_src) {
             Err("file still open while paused".to_string())
         } else if copy(&[(src.clone(), dest.clone())]).is_ok() || dest.exists() {
             Err("second writer allowed on the same target".to_string())
@@ -1246,11 +1246,22 @@ fn pause_closes_files_and_keeps_one_writer(dir: &Path) -> Result<(), String> {
         let done = job.join().map_err(|_| "worker panicked".to_string())?;
         held?;
         done.map_err(s)?;
-        if partial.exists() {
+        if !partial_files(dir)?.is_empty() {
             return Err("partial left behind".into());
         }
+
         eq(fs::read(&dest).map_err(s)?, data, "resumed content")
     })
+}
+
+fn partial_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    fs::read_dir(dir).map_err(s)?
+        .filter_map(|entry| match entry {
+            Ok(entry) if entry.file_name().to_string_lossy().starts_with(".rust-commander-partial-") => Some(Ok(entry.path())),
+            Ok(_) => None,
+            Err(err) => Some(Err(s(err))),
+        })
+        .collect()
 }
 
 fn open_fds() -> Vec<PathBuf> {

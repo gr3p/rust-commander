@@ -28,6 +28,7 @@ resvg = { version = "0.48", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.145"
 tar = "0.4.45"
+tempfile = "3.23"
 toml = "1.1.6"
 unrar-ng = "0.7"
 unrar-ng-sys = { version = "0.7.7", default-features = false, features = ["std"] }

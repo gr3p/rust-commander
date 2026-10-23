@@ -124,7 +124,8 @@ fn one(
     let is_link = meta.file_type().is_symlink();
     let is_dir = meta.is_dir();
 
-    let existing = fs::symlink_metadata(dest).ok();
+    let mut target = Target::new(dest)?;
+    let existing = &target.existing;
     if let Some(old) = &existing {
         use std::os::unix::fs::MetadataExt;
         if old.dev() == meta.dev() && old.ino() == meta.ino() {
@@ -160,6 +161,7 @@ fn one(
         // A file is replaced by the final rename, so a failed copy keeps the old one.
         if is_link || is_dir {
             fs::remove_file(dest)?;
+            target.existing = None;
         }
     }
 
@@ -177,7 +179,7 @@ fn one(
         if kind == Kind::Move && !dest.exists() {
             let n = count_entries(src);
             ready_parent(dest, make_parent)?;
-            match fs::rename(src, dest) {
+            match target.commit(src) {
                 Ok(()) => return bump_n(done, total, dest, n.max(1), progress),
                 Err(err) if err.raw_os_error() == Some(libc::EXDEV) => {}
                 Err(err) => return Err(err),
@@ -232,7 +234,7 @@ fn one(
 
     if kind == Kind::Move {
         ready_parent(dest, make_parent)?;
-        match fs::rename(src, dest) {
+        match target.commit(src) {
             Ok(()) => return bump(done, total, src, progress),
             Err(err) if err.raw_os_error() == Some(libc::EXDEV) => {}
             Err(err) => return Err(err),
@@ -243,7 +245,7 @@ fn one(
         return bump(done, total, src, progress);
     }
     ready_parent(dest, make_parent)?;
-    copy_file(src, dest, cancel, pause, |n| {
+    let copied = copy_file(src, &target, cancel, pause, |n| {
         progress(&Progress {
             done: *done,
             total,
@@ -253,6 +255,7 @@ fn one(
         let _ = n;
     })?;
     if kind == Kind::Move {
+        require_unchanged(src, &copied)?;
         fs::remove_file(src)?;
     }
     bump(done, total, src, progress)
@@ -300,29 +303,18 @@ fn ready_parent(dest: &Path, make: bool) -> io::Result<()> {
 
 fn copy_file(
     src: &Path,
-    dest: &Path,
+    target: &Target,
     cancel: &AtomicBool,
     pause: &AtomicBool,
     mut on_chunk: impl FnMut(u64),
-) -> io::Result<()> {
+) -> io::Result<fs::Metadata> {
     use std::os::unix::fs::MetadataExt;
-    let _claim = claim(dest)?;
-    let partial = partial_path(dest);
-    let mut mine = None;
+    let mut input = File::open(src)?;
+    let mut meta = input.metadata()?;
+    let (mut output, mut partial) = temporary_file(&target.path, 0o600)?.into_parts();
+    let identity = output.metadata()?;
     let result = (|| {
         use std::os::unix::fs::PermissionsExt;
-        let mut input = File::open(src)?;
-        let mut meta = input.metadata()?;
-        // Private until done. A reader that opens it early must not keep a handle to the data.
-        let _ = fs::remove_file(&partial);
-        let mut output = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&partial)?;
-        let ino = output.metadata()?.ino();
-        mine = Some(ino);
         if try_reflink(&input, &output) {
             on_chunk(meta.len());
         } else {
@@ -335,11 +327,11 @@ fn copy_file(
                 input = File::open(src)?;
                 output = fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(&partial)?;
                 let written = output.metadata()?;
-                if written.ino() != ino {
+                if (written.dev(), written.ino()) != (identity.dev(), identity.ino()) {
                     return Err(replaced(&partial));
                 }
                 let now = input.metadata()?;
-                let same = (now.len(), now.mtime(), now.mtime_nsec()) == (meta.len(), meta.mtime(), meta.mtime_nsec());
+                let same = unchanged(&now, &meta);
                 at = if same && written.len() == stop {
                     stop
                 } else {
@@ -348,6 +340,13 @@ fn copy_file(
                     0
                 };
             }
+            if cancel.load(Ordering::Relaxed) {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            }
+            if !unchanged(&input.metadata()?, &meta) {
+                return Err(changed(src));
+            }
+            require_unchanged(src, &meta)?;
         }
         // Mode and time follow the file. Setuid and setgid do not, since the copy gets a new owner.
         // Some file systems (vfat) refuse both, which must not fail the copy.
@@ -358,20 +357,66 @@ fn copy_file(
         output.sync_all()?;
         drop(output);
         // Another program may have taken the partial name. Only our own data is published.
-        if fs::symlink_metadata(&partial)?.ino() != ino {
+        let current = fs::symlink_metadata(&partial)?;
+        if (current.dev(), current.ino()) != (identity.dev(), identity.ino()) {
             return Err(replaced(&partial));
         }
-        fs::rename(&partial, dest)?;
-        Ok(())
+        target.commit(&partial)?;
+        Ok(meta)
     })();
-    if result.is_err() && mine.is_some_and(|ino| fs::symlink_metadata(&partial).is_ok_and(|m| m.ino() == ino)) {
-        let _ = fs::remove_file(&partial);
+    if fs::symlink_metadata(&partial).is_ok_and(|m| (m.dev(), m.ino()) != (identity.dev(), identity.ino())) {
+        partial.disable_cleanup(true);
     }
     result
 }
 
 fn replaced(partial: &Path) -> io::Error {
     io::Error::other(format!("{} was replaced by another program", partial.display()))
+}
+
+fn changed(path: &Path) -> io::Error {
+    io::Error::other(format!("{} changed during the operation; it was not removed or replaced", path.display()))
+}
+
+fn unchanged(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    (a.dev(), a.ino(), a.len(), a.mtime(), a.mtime_nsec(), a.ctime(), a.ctime_nsec())
+        == (b.dev(), b.ino(), b.len(), b.mtime(), b.mtime_nsec(), b.ctime(), b.ctime_nsec())
+}
+
+fn require_unchanged(path: &Path, expected: &fs::Metadata) -> io::Result<()> {
+    if unchanged(&fs::symlink_metadata(path)?, expected) {
+        Ok(())
+    } else {
+        Err(changed(path))
+    }
+}
+
+pub(crate) struct Target {
+    path: PathBuf,
+    existing: Option<fs::Metadata>,
+    _claim: Claim,
+}
+
+impl Target {
+    pub(crate) fn new(path: &Path) -> io::Result<Self> {
+        let claim = claim(path)?;
+        let existing = match fs::symlink_metadata(path) {
+            Ok(meta) => Some(meta),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+            Err(err) => return Err(err),
+        };
+        Ok(Self { path: path.to_path_buf(), existing, _claim: claim })
+    }
+
+    pub(crate) fn commit(&self, from: &Path) -> io::Result<()> {
+        if let Some(old) = &self.existing {
+            require_unchanged(&self.path, old)?;
+            fs::rename(from, &self.path)
+        } else {
+            rename_noreplace(from, &self.path)
+        }
+    }
 }
 
 static WRITING: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
@@ -386,8 +431,8 @@ impl Drop for Claim {
 
 // The queue runs beside a foreground copy. Two writers on one name would publish each other's half file.
 fn claim(dest: &Path) -> io::Result<Claim> {
-    let key = match (dest.parent().map(fs::canonicalize), dest.file_name()) {
-        (Some(Ok(dir)), Some(name)) => dir.join(name),
+    let key = match (dest.parent().and_then(real_path), dest.file_name()) {
+        (Some(dir), Some(name)) => dir.join(name),
         _ => dest.to_path_buf(),
     };
     if !WRITING.lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone()) {
@@ -484,46 +529,39 @@ fn try_reflink(src: &File, dst: &File) -> bool {
     unsafe { libc::ioctl(dst.as_raw_fd(), libc::FICLONE, src.as_raw_fd()) == 0 }
 }
 
-pub(crate) fn partial_path(dest: &Path) -> PathBuf {
-    let mut name = std::ffi::OsString::from(".rust-commander-partial-");
-    name.push(dest.file_name().unwrap_or(std::ffi::OsStr::new("file")));
-    dest.with_file_name(name)
+pub(crate) fn temporary_file(dest: &Path, mode: u32) -> io::Result<tempfile::NamedTempFile> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut suffix = std::ffi::OsString::new();
+    if let Some(ext) = dest.extension() {
+        suffix.push(".");
+        suffix.push(ext);
+    }
+    tempfile::Builder::new()
+        .prefix(".rust-commander-partial-")
+        .suffix(&suffix)
+        .permissions(fs::Permissions::from_mode(mode))
+        .tempfile_in(dest.parent().unwrap_or_else(|| Path::new(".")))
 }
 
-/// Writes through a temp file and a rename, so a crash or a full disk keeps the old file.
+/// Writes through a temp file and a rename. Unsafe in-place fallbacks are refused.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
     let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let old = fs::metadata(&path).ok();
-    // A rename would split a hard link or take the file from its owner.
+    let target = Target::new(&path)?;
+    let old = &target.existing;
     if old.as_ref().is_some_and(|meta| meta.nlink() > 1 || meta.uid() != unsafe { libc::geteuid() }) {
-        return fs::write(&path, bytes);
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("Cannot safely save {}: it has other hard links or a different owner. Save to a new file instead.", path.display()),
+        ));
     }
-    let temp = partial_path(&path);
-    let _ = fs::remove_file(&temp);
-    let opened = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o666)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&temp);
-    let mut file = match opened {
-        Ok(file) => file,
-        Err(err) if err.kind() == io::ErrorKind::PermissionDenied && old.is_some() => return fs::write(&path, bytes),
-        Err(err) => return Err(err),
-    };
-    let result = (|| {
-        if let Some(old) = &old {
-            file.set_permissions(old.permissions())?;
-        }
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temp, &path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
+    let mut temp = temporary_file(&path, old.as_ref().map_or(0o666, |meta| meta.mode() & 0o7777))?;
+    temp.write_all(bytes)?;
+    if let Some(old) = old {
+        temp.as_file().set_permissions(old.permissions())?;
     }
-    result
+    temp.as_file().sync_all()?;
+    target.commit(temp.path())
 }
 
 fn check_name(name: &str) -> io::Result<()> {
@@ -545,11 +583,209 @@ fn rename_noreplace(src: &Path, dest: &Path) -> io::Result<()> {
     if !matches!(err.raw_os_error(), Some(libc::EINVAL | libc::ENOSYS)) {
         return Err(err);
     }
-    // Some file systems have no RENAME_NOREPLACE.
-    if fs::symlink_metadata(dest).is_ok() {
-        return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} already exists", dest.display())));
+    Err(io::Error::new(io::ErrorKind::Unsupported, format!("cannot safely rename to {}: this filesystem does not support no-replace renames", dest.display())))
+}
+
+#[cfg(test)]
+mod safety_tests {
+    use super::*;
+
+    fn copy(src: &Path, dest: &Path, progress: &mut dyn FnMut(&Progress)) -> io::Result<Report> {
+        let off = AtomicBool::new(false);
+        transfer(&[(src.to_path_buf(), dest.to_path_buf())], Kind::Copy, &off, &off, progress, &mut |_, _| Choice::Overwrite)
     }
-    fs::rename(src, dest)
+
+    #[test]
+    fn copying_a_legacy_partial_name_keeps_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join(".rust-commander-partial-report.txt");
+        let dest = dir.path().join("report.txt");
+        fs::write(&src, b"original").unwrap();
+        assert!(!copy(&src, &dest, &mut |_| {}).unwrap().cancelled);
+        assert_eq!(fs::read(&src).unwrap(), b"original");
+        assert_eq!(fs::read(&dest).unwrap(), b"original");
+        write_atomic(&dest, b"edited").unwrap();
+        assert_eq!(fs::read(&src).unwrap(), b"original");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn a_copy_blocks_moves_and_saves_to_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source");
+        let other = dir.path().join("other");
+        let dest = dir.path().join("target");
+        fs::write(&src, b"copy").unwrap();
+        fs::write(&other, b"move").unwrap();
+        let off = AtomicBool::new(false);
+        let mut checked = false;
+        copy(&src, &dest, &mut |_| {
+            if checked { return; }
+            checked = true;
+            let moved = transfer(&[(other.clone(), dest.clone())], Kind::Move, &off, &off, &mut |_| {}, &mut |_, _| Choice::Overwrite);
+            assert!(moved.unwrap_err().to_string().contains("already being written"));
+            assert!(write_atomic(&dest, b"edited").unwrap_err().to_string().contains("already being written"));
+        }).unwrap();
+        assert!(checked);
+        assert_eq!(fs::read(&other).unwrap(), b"move");
+        assert_eq!(fs::read(&dest).unwrap(), b"copy");
+        write_atomic(&dest, b"after").unwrap();
+    }
+
+    #[test]
+    fn a_target_created_or_replaced_during_copy_is_not_overwritten() {
+        for exists in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let src = dir.path().join("source");
+            let dest = dir.path().join("target");
+            fs::write(&src, b"copy").unwrap();
+            if exists { fs::write(&dest, b"old").unwrap(); }
+            let mut changed = false;
+            let result = copy(&src, &dest, &mut |_| {
+                if changed { return; }
+                changed = true;
+                let replacement = dir.path().join("replacement");
+                fs::write(&replacement, b"new external contents").unwrap();
+                fs::rename(replacement, &dest).unwrap();
+            });
+            assert!(changed && result.is_err());
+            assert_eq!(fs::read(&dest).unwrap(), b"new external contents");
+            assert_eq!(fs::read(&src).unwrap(), b"copy");
+            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+        }
+    }
+
+    #[test]
+    fn a_changed_source_does_not_replace_the_destination() {
+        for replace in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let src = dir.path().join("source");
+            let dest = dir.path().join("target");
+            fs::write(&src, b"old source").unwrap();
+            fs::write(&dest, b"old destination").unwrap();
+            let mut changed = false;
+            let result = copy(&src, &dest, &mut |_| {
+                if changed { return; }
+                changed = true;
+                if replace {
+                    let replacement = dir.path().join("replacement");
+                    fs::write(&replacement, b"new saved contents").unwrap();
+                    fs::rename(replacement, &src).unwrap();
+                } else {
+                    fs::write(&src, b"new saved contents").unwrap();
+                }
+            });
+            assert!(changed && result.is_err());
+            assert_eq!(fs::read(&src).unwrap(), b"new saved contents");
+            assert_eq!(fs::read(&dest).unwrap(), b"old destination");
+        }
+    }
+
+    #[test]
+    fn cross_device_move_keeps_a_replaced_source() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let out = match tempfile::tempdir_in("/dev/shm") {
+            Ok(out) if out.path().metadata().unwrap().dev() != dir.path().metadata().unwrap().dev() => out,
+            _ => {
+                eprintln!("cross-device test needs a writable /dev/shm on a different filesystem");
+                return;
+            }
+        };
+        let src = dir.path().join("source");
+        let dest = out.path().join("target");
+        fs::write(&src, b"old source").unwrap();
+        let off = AtomicBool::new(false);
+        let mut changed = false;
+        let result = transfer(&[(src.clone(), dest.clone())], Kind::Move, &off, &off, &mut |_| {
+            if changed { return; }
+            changed = true;
+            let replacement = dir.path().join("replacement");
+            fs::write(&replacement, b"new saved contents").unwrap();
+            fs::rename(replacement, &src).unwrap();
+        }, &mut |_, _| Choice::Overwrite);
+        assert!(changed && result.is_err());
+        assert_eq!(fs::read(&src).unwrap(), b"new saved contents");
+        assert!(!dest.exists());
+        assert_eq!(fs::read_dir(out.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn atomic_save_refuses_hard_links_without_changing_either_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        let link = dir.path().join("link");
+        fs::write(&file, b"original").unwrap();
+        fs::hard_link(&file, &link).unwrap();
+        let err = write_atomic(&file, b"new contents").unwrap_err();
+        assert!(err.to_string().contains("hard links"));
+        assert_eq!(fs::read(&file).unwrap(), b"original");
+        assert_eq!(fs::read(&link).unwrap(), b"original");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn atomic_write_failure_keeps_original() {
+        const CHILD: &str = "RC_ATOMIC_FAILURE_TEST_DIR";
+        if let Some(dir) = std::env::var_os(CHILD) {
+            let path = PathBuf::from(dir).join("original");
+            let limit = libc::rlimit { rlim_cur: 4, rlim_max: 4 };
+            unsafe {
+                libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+                assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
+            }
+            assert!(write_atomic(&path, b"replacement contents").is_err());
+            assert_eq!(fs::read(&path).unwrap(), b"original contents");
+            assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("original"), b"original contents").unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "ops::safety_tests::atomic_write_failure_keeps_original", "--nocapture"])
+            .env(CHILD, dir.path())
+            .status().unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn a_replaced_temporary_file_is_not_published_or_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source");
+        let dest = dir.path().join("target");
+        fs::write(&src, b"source").unwrap();
+        let mut replaced = None;
+        let result = copy(&src, &dest, &mut |_| {
+            if replaced.is_some() { return; }
+            let partial = fs::read_dir(dir.path()).unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| path.file_name().unwrap().to_string_lossy().starts_with(".rust-commander-partial-"))
+                .unwrap();
+            let external = dir.path().join("external");
+            fs::write(&external, b"external contents").unwrap();
+            fs::rename(external, &partial).unwrap();
+            replaced = Some(partial);
+        });
+        assert!(result.is_err());
+        assert!(!dest.exists());
+        assert_eq!(fs::read(replaced.unwrap()).unwrap(), b"external contents");
+    }
+
+    #[test]
+    fn cancellation_preserves_an_existing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source");
+        let dest = dir.path().join("target");
+        fs::write(&src, b"source").unwrap();
+        fs::write(&dest, b"original").unwrap();
+        let cancel = AtomicBool::new(false);
+        let pause = AtomicBool::new(false);
+        let report = transfer(&[(src.clone(), dest.clone())], Kind::Copy, &cancel, &pause,
+            &mut |_| cancel.store(true, Ordering::Relaxed), &mut |_, _| Choice::Overwrite).unwrap();
+        assert!(report.cancelled);
+        assert_eq!(fs::read(&dest).unwrap(), b"original");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
 }
 
 fn count_entries(path: &Path) -> u64 {

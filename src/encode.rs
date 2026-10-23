@@ -355,22 +355,15 @@ fn mime_name(lines: &mut Lines) -> Result<String, Fail> {
 }
 
 fn write_stream(dest: &Path, write: impl FnOnce(&mut File) -> Result<(), Fail>) -> Result<(), Fail> {
+    let target = crate::ops::Target::new(dest)?;
     if fs::symlink_metadata(dest).is_ok() {
         return Err(Fail::Message(format!("{} already exists", dest.file_name().unwrap_or_default().to_string_lossy())));
     }
-    let temp = crate::ops::partial_path(dest);
-    let _ = fs::remove_file(&temp);
-    let mut file = File::create(&temp)?;
-    let result = (|| {
-        write(&mut file)?;
-        file.sync_all()?;
-        fs::rename(&temp, dest)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
+    let mut temp = crate::ops::temporary_file(dest, 0o666)?;
+    write(temp.as_file_mut())?;
+    temp.as_file().sync_all()?;
+    target.commit(temp.path())?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -134,6 +134,10 @@ The panel with focus is the source, the other is the target. Press F1 for all co
 
 Broken files are skipped and listed when unpacking finishes, and a missing rar volume is named. An archive is unpacked, it is not opened as a folder.
 
+File writes use uniquely named temporary files. Concurrent jobs cannot write the same destination, and a copy or cross-filesystem move stops with an error if it detects that its source or destination changed. Filesystems without atomic no-replace renames return an error rather than risk overwriting a newly created destination.
+
+The built-in editor refuses to save a file with multiple hard links or a different owner, or when it cannot create a temporary file beside it. This keeps the original intact instead of falling back to a destructive in-place write. Use a separate copy to edit such a file.
+
 ## Configuration
 
 Settings (F12) has two tabs: General, and Theme and colors. The log is written to `~/.local/state/rust-commander/rust-commander.log`.
