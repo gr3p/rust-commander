@@ -9,27 +9,52 @@ fn main() {
 
 fn display_version() -> String {
     let base = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.1.0".into());
-    let Some((prefix, _)) = base.rsplit_once('.') else {
-        return base;
-    };
-    if prefix.is_empty() {
-        return base;
-    }
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
     watch_git(&manifest);
-    // A tarball unpacked inside another repo (an AUR clone, a dotfiles home) must not count that repo.
-    let top = git(&manifest, &["rev-parse", "--show-toplevel"]);
-    if top.and_then(|top| std::fs::canonicalize(top.trim()).ok()) != std::fs::canonicalize(&manifest).ok() {
-        return base;
+    println!("cargo:rerun-if-env-changed=RC_PKG_VERSION");
+
+    // Packagers can pin the release version without a git checkout.
+    if let Ok(v) = std::env::var("RC_PKG_VERSION") {
+        let v = v.trim();
+        if !v.is_empty() {
+            return v.into();
+        }
     }
-    let Some(count) = git(&manifest, &["rev-list", "--count", "HEAD"]) else {
-        return base;
-    };
+    if let Some(v) = git_version(&manifest, &base) {
+        return v;
+    }
+    // GitHub source archives unpack as rust-commander-<tag> with no .git.
+    version_from_dirname(&manifest).unwrap_or(base)
+}
+
+fn git_version(manifest: &str, base: &str) -> Option<String> {
+    let (prefix, _) = base.rsplit_once('.')?;
+    if prefix.is_empty() {
+        return None;
+    }
+    // A tarball unpacked inside another repo (an AUR clone, a dotfiles home) must not count that repo.
+    let top = git(manifest, &["rev-parse", "--show-toplevel"])?;
+    if std::fs::canonicalize(top.trim()).ok()? != std::fs::canonicalize(manifest).ok()? {
+        return None;
+    }
+    let count = git(manifest, &["rev-list", "--count", "HEAD"])?;
     let count = count.trim();
     if count.is_empty() || !count.bytes().all(|b| b.is_ascii_digit()) {
-        return base;
+        return None;
     }
-    format!("{prefix}.{count}")
+    Some(format!("{prefix}.{count}"))
+}
+
+fn version_from_dirname(manifest: &str) -> Option<String> {
+    let name = Path::new(manifest).file_name()?.to_str()?;
+    let ver = name.strip_prefix("rust-commander-")?;
+    if ver.is_empty() || !ver.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
+    if !ver.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+        return None;
+    }
+    Some(ver.into())
 }
 
 fn watch_git(manifest: &str) {
