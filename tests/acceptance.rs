@@ -129,6 +129,7 @@ const MEMORY: &[(&str, fn() -> Result<(), String>)] = &[
     ("image_list_skips_other_files", image_list_skips_other_files),
     ("image_step_stops_at_end", image_step_stops_at_end),
     ("image_decode_png_and_scales", image_decode_png_and_scales),
+    ("heic_container_says_no_decoder", heic_container_says_no_decoder),
     ("lister_ansi_and_ascii", lister_ansi_and_ascii),
     ("lister_pretty_json", lister_pretty_json),
     ("hotlist_accel_submenu", hotlist_accel_submenu),
@@ -257,6 +258,8 @@ fn file_icons_by_kind() -> Result<(), String> {
     eq(listing::file_icon("clip.mov", false, false), "video-x-generic-symbolic", "mov")?;
     eq(listing::file_icon("shot.jfif", false, false), "image-x-generic-symbolic", "jfif")?;
     eq(imageview::is_image("shot.JFIF"), true, "jfif image")?;
+    eq(imageview::is_image("photo.heic"), true, "heic image")?;
+    eq(listing::file_icon("photo.heic", false, false), "image-x-generic-symbolic", "heic icon")?;
     eq(listing::file_icon("doc.pdf", false, false), "application-pdf", "pdf")?;
     eq(listing::is_pdf("doc.PDF"), true, "pdf kind")?;
     eq(listing::file_icon("data.bin", false, false), "text-x-generic-symbolic", "other")
@@ -902,6 +905,31 @@ fn image_step_stops_at_end() -> Result<(), String> {
     eq(imageview::step_index(3, 0, -1), None, "step back")?;
     eq(imageview::step_index(3, 2, 1), None, "step forward")?;
     eq(imageview::step_index(3, 1, 1), Some(2), "step mid")
+}
+
+fn heic_container_says_no_decoder() -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("rust-commander-heic-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).map_err(s)?;
+    let heic = dir.join("image.jpg");
+    // Same ftyp box as a mislabeled HEIC still.
+    fs::write(&heic, [0, 0, 0, 24, b'f', b't', b'y', b'p', b'h', b'e', b'i', b'c', 0, 0, 0, 0, b'h', b'e', b'i', b'c', b'm', b'i', b'f', b'1']).map_err(s)?;
+    let err = match imageview::decode(&heic, imageview::MAX_EDGE) {
+        Err(err) => err,
+        Ok(_) => return Err("heic decoded".into()),
+    };
+    let junk = dir.join("junk.jpg");
+    fs::write(&junk, b"not a jpeg").map_err(s)?;
+    let junk_err = match imageview::decode(&junk, 64) {
+        Err(err) => err,
+        Ok(_) => return Err("junk decoded".into()),
+    };
+    let _ = fs::remove_dir_all(&dir);
+    eq(err, "HEIC image, no decoder".into(), "heic message")?;
+    if junk_err.contains("HEIC") {
+        return Err(junk_err);
+    }
+    Ok(())
 }
 
 fn image_decode_png_and_scales() -> Result<(), String> {

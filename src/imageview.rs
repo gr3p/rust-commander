@@ -1,4 +1,5 @@
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use image::imageops::FilterType;
@@ -19,7 +20,7 @@ pub struct Rgba {
 pub fn is_image(name: &str) -> bool {
     matches!(
         listing::extension(name).to_ascii_lowercase().as_str(),
-        "jpg" | "jpeg" | "jfif" | "png" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "ico"
+        "jpg" | "jpeg" | "jfif" | "png" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "ico" | "heic" | "heif"
     )
 }
 
@@ -49,6 +50,9 @@ pub fn decode(path: &Path, max_edge: u32) -> Result<Rgba, String> {
     let len = fs::metadata(path).map_err(|err| err.to_string())?.len();
     if len > MAX_BYTES {
         return Err("Image too large".into());
+    }
+    if let Some(kind) = heif_kind(path) {
+        return Err(format!("{kind} image, no decoder"));
     }
     let mut reader = ImageReader::open(path)
         .map_err(|err| err.to_string())?
@@ -84,6 +88,42 @@ pub fn render_svg(svg: &str, edge: u32) -> Result<Rgba, String> {
         })
         .collect();
     Ok(Rgba { width: edge, height: edge, pixels })
+}
+
+// ftyp box: major brand, minor version, then compatible brands.
+fn heif_kind(path: &Path) -> Option<&'static str> {
+    let mut buf = [0u8; 64];
+    let n = File::open(path).ok()?.read(&mut buf).ok()?;
+    let header = &buf[..n];
+    if header.len() < 16 || &header[4..8] != b"ftyp" {
+        return None;
+    }
+    let end = u32::from_be_bytes(header[0..4].try_into().ok()?).min(header.len() as u32) as usize;
+    if end < 16 {
+        return None;
+    }
+    let mut heic = false;
+    let mut heif = false;
+    let mut at = 8;
+    while at + 4 <= end {
+        if at == 12 {
+            at = 16;
+            continue;
+        }
+        match &header[at..at + 4] {
+            b"heic" | b"heix" | b"hevc" | b"hevx" => heic = true,
+            b"mif1" | b"msf1" => heif = true,
+            _ => {}
+        }
+        at += 4;
+    }
+    if heic {
+        Some("HEIC")
+    } else if heif {
+        Some("HEIF")
+    } else {
+        None
+    }
 }
 
 fn downscale(img: DynamicImage, max_edge: u32) -> DynamicImage {
