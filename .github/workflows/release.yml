@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
   push:
     branches: [master]
-    paths-ignore: ["**.md", ".cursor/**", ".github/**", "LICENSE", "img/screenshot.png", "img/quick-view.png", "img/quick-edit.png", "img/thumbnails.jpg"]
+    paths-ignore: ["**.md", ".cursor/**", ".github/**", "LICENSE", "img/screenshot.png", "img/quick-view.png", "img/quick-edit.png", "img/music-player.png", "img/thumbnails.jpg"]
 
 concurrency: release
 

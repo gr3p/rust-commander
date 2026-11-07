@@ -47,6 +47,8 @@ Early release (0.1.x): expect rough edges, and please [report them](https://gith
 
 <img src="img/quick-edit.png" alt="Quick view editing a JSON file next to the file panel" width="900">
 
+<img src="img/music-player.png" alt="The built-in music player in the quick view, with the visualizer behind the cover, title and controls" width="900">
+
 ## Install
 
 **Arch and Omarchy**
