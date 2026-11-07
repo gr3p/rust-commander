@@ -8,6 +8,7 @@ const HINTS: &[Act] = &[
     Act::AudioPrev,
     Act::AudioMinimize,
     Act::AudioJump,
+    Act::AudioExpand,
     Act::AudioFocus,
     Act::AudioSend,
     Act::AudioAdd,
@@ -140,6 +141,7 @@ pub enum Act {
     AudioRepeat,
     AudioMinimize,
     AudioJump,
+    AudioExpand,
     AudioFocus,
     AudioSend,
     AudioAdd,
@@ -151,7 +153,7 @@ pub enum Act {
 }
 
 impl Act {
-    pub const ALL: [Act; 90] = [
+    pub const ALL: [Act; 91] = [
         Act::Refresh,
         Act::View,
         Act::Edit,
@@ -234,6 +236,7 @@ impl Act {
         Act::AudioRepeat,
         Act::AudioMinimize,
         Act::AudioJump,
+        Act::AudioExpand,
         Act::AudioFocus,
         Act::AudioSend,
         Act::AudioAdd,
@@ -406,6 +409,7 @@ pub fn applies(act: Act, cue: &Cue) -> bool {
         Act::AudioNext | Act::AudioPrev | Act::AudioShuffle | Act::AudioRepeat => cue.audio,
         Act::AudioMinimize => cue.player && !cue.mini,
         Act::AudioJump => cue.mini && !cue.audio,
+        Act::AudioExpand => cue.mini && cue.audio,
         Act::AudioFocus => cue.player && !cue.audio,
         Act::AudioSend => cue.song || cue.marks > 0,
         Act::AudioAdd => cue.player && (cue.song || cue.marks > 0),
@@ -421,6 +425,7 @@ fn score(act: Act, cue: &Cue) -> i32 {
     let marked = cue.marks >= 1;
     match act {
         Act::AudioJump if cue.mini && !cue.audio => 121,
+        Act::AudioExpand if cue.mini && cue.audio => 117,
         Act::AudioFocus if cue.player && !cue.mini && !cue.audio => 121,
         Act::AudioToggle if cue.audio => 120,
         Act::AudioNext if cue.audio => 119,
@@ -518,6 +523,7 @@ const CATALOG: &[Item] = &[
     Item { act: Act::AudioRepeat, keys: "R", label: "Repeat: off, all, one", group: Group::View },
     Item { act: Act::AudioMinimize, keys: "Ctrl+M", label: "Minimize player", group: Group::View },
     Item { act: Act::AudioJump, keys: "Ctrl+M", label: "Jump to player", group: Group::View },
+    Item { act: Act::AudioExpand, keys: "Ctrl+M", label: "Big player", group: Group::View },
     Item { act: Act::AudioFocus, keys: "Tab", label: "Panel or player", group: Group::View },
     Item { act: Act::AudioSend, keys: "Ctrl+P", label: "Send and replace music in player", group: Group::View },
     Item { act: Act::AudioAdd, keys: "Ctrl+Shift+P", label: "Add to current playlist", group: Group::View },
@@ -681,6 +687,17 @@ mod tests {
         assert!(applies(Act::AudioExternal, &small));
         assert!(!applies(Act::AudioMinimize, &small));
         assert!(!applies(Act::AudioJump, &list_has_keys));
+        // The small player has the keys: Ctrl+M makes it big again, so that is on offer instead of the jump.
+        let small_keys = cue(|cue| {
+            cue.player = true;
+            cue.mini = true;
+            cue.audio = true;
+            cue.file = true;
+        });
+        let ranked = rank(&small_keys);
+        assert_eq!(&ranked[..4], &[Act::AudioToggle, Act::AudioNext, Act::AudioPrev, Act::AudioExpand]);
+        assert!(!applies(Act::AudioJump, &small_keys) && !applies(Act::AudioMinimize, &small_keys));
+        assert!(!applies(Act::AudioExpand, &small) && !applies(Act::AudioExpand, &big));
         // Nothing plays: none of it is on offer.
         for act in [Act::AudioNext, Act::AudioJump, Act::AudioMinimize, Act::AudioFocus, Act::AudioAdd] {
             assert!(!applies(act, &cue(|cue| cue.file = true)), "{act:?}");

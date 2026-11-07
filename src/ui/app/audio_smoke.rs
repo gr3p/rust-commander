@@ -362,6 +362,18 @@ impl App {
         if self.audio_focused() {
             errors.push("music: escape kept the keys".into());
         }
+        // Ctrl+M with the keys in the small player makes it big, and Ctrl+M in the big one folds it again.
+        ctrl(self, Key::m);
+        ctrl(self, Key::m);
+        self.smoke_settle(sender);
+        if !self.audio_full() || !self.state.quick_view || self.audio_focused() {
+            errors.push(format!("music: ctrl+m in the small player gave full {}, quick view {}", self.audio_full(), self.state.quick_view));
+        }
+        ctrl(self, Key::m);
+        self.smoke_settle(sender);
+        if !self.audio_is_mini() || self.state.quick_view {
+            errors.push("music: ctrl+m in the big player did not fold it".into());
+        }
         // A key that is not the player's goes to the list, and the player lets go.
         ctrl(self, Key::m);
         let cursor = self.state.tab(PaneId::Left).cursor;

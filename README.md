@@ -161,7 +161,7 @@ The songs go to the player that is open: the small one if the small player is up
 | Enter on a song | Plays it in the small player, in any folder and in either panel. If no player is up and the quick view is off, it starts the small player under that panel |
 | Ctrl+Q on a song | While the small player is up, a song under the cursor plays there instead of opening the quick view. Ctrl+Q on anything else is the quick view as usual |
 | Tab | Left panel, right panel, small player, and round again |
-| Ctrl+M | Jump to the small player, and back to the list. Escape and any list key also give the keys back. Space, Ctrl+Left / Right, N / P (or Up / Down), R, S, + / − and M work on it while it has them |
+| Ctrl+M | Jump to the small player. Ctrl+M again, with the keys in it, makes it big. In the big player Ctrl+M folds it, so Ctrl+M toggles between the two. Escape and any list key give the keys back to the list. Space, Ctrl+Left / Right, N / P (or Up / Down), R, S, + / − and M work on it while it has them |
 | Expand button | Back to the big player: the list shows the folder with the cursor on the song, and the quick view opens. The X stops the music and closes the player |
 
 | Archives and checksums | |

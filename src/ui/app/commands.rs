@@ -232,6 +232,7 @@ impl App {
             Act::AudioShuffle => self.audio_toggle_shuffle(),
             Act::AudioRepeat => self.audio_cycle_repeat(),
             Act::AudioMinimize | Act::AudioJump => self.audio_jump(sender),
+            Act::AudioExpand => self.audio_expand(sender),
             Act::AudioExternal => self.audio_open_external(),
             Act::AudioFocus => self.audio_tab(false),
             Act::AudioSend => self.audio_send(false, sender),

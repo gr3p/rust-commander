@@ -891,15 +891,12 @@ impl App {
         self.focus_list();
     }
 
-    /// Ctrl+M: the big player folds away. The small one gets the keyboard, or gives it back.
+    /// Ctrl+M toggles between the players. The big one folds into the small one. Ctrl+M takes the keys to
+    /// the small one, and Ctrl+M again, with the keys there, makes it big. Escape hands the keys back.
     pub(in crate::ui::app) fn audio_jump(&mut self, sender: &ComponentSender<Self>) {
         match self.audio_mode() {
-            Some(Mode::Mini) => {
-                self.audio.focus = !self.audio.focus;
-                if !self.audio.focus {
-                    self.focus_list();
-                }
-            }
+            Some(Mode::Mini) if self.audio.focus => self.audio_expand(sender),
+            Some(Mode::Mini) => self.audio.focus = true,
             Some(Mode::Full) => self.audio_minimize(sender),
             None => self.status = "No music is playing".into(),
         }
