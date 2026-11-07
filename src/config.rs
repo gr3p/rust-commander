@@ -71,6 +71,16 @@ pub struct Config {
     pub cursor_alpha: u8,
     #[serde(default)]
     pub cursor_frame: bool,
+    /// The music player's visualizer: bars, wave, radial or ribbon.
+    #[serde(default = "default_visual")]
+    pub player_visual: String,
+    #[serde(default = "default_true")]
+    pub player_visual_on: bool,
+    /// What the player does after the last track: off, all or one.
+    #[serde(default = "default_repeat")]
+    pub player_repeat: String,
+    #[serde(default)]
+    pub player_shuffle: bool,
 }
 
 fn default_theme() -> String {
@@ -95,6 +105,14 @@ fn default_opaque() -> u8 {
 
 fn default_cursor_alpha() -> u8 {
     70
+}
+
+fn default_visual() -> String {
+    crate::audio::VisualStyle::default().name().into()
+}
+
+fn default_repeat() -> String {
+    crate::audio::Repeat::default().name().into()
 }
 
 impl Default for Config {
@@ -126,6 +144,10 @@ impl Default for Config {
             blink_color: String::new(),
             cursor_alpha: default_cursor_alpha(),
             cursor_frame: false,
+            player_visual: default_visual(),
+            player_visual_on: true,
+            player_repeat: default_repeat(),
+            player_shuffle: false,
         }
     }
 }
@@ -148,6 +170,14 @@ impl Config {
 
     pub fn sort_key(&self) -> SortKey {
         SortKey::from_config(&self.sort)
+    }
+
+    pub fn visual_style(&self) -> crate::audio::VisualStyle {
+        crate::audio::VisualStyle::from_name(&self.player_visual)
+    }
+
+    pub fn repeat(&self) -> crate::audio::Repeat {
+        crate::audio::Repeat::from_name(&self.player_repeat)
     }
 }
 
@@ -269,6 +299,36 @@ mod tests {
         assert!(!old_config.cursor_frame);
         let on: Config = toml::from_str("cursor_frame = true").unwrap();
         assert!(on.cursor_frame);
+    }
+
+    #[test]
+    fn the_player_remembers_its_modes_and_defaults_for_old_configs() {
+        let old: Config = toml::from_str("").unwrap();
+        assert!(old.player_visual_on);
+        assert_eq!(old.visual_style(), crate::audio::VisualStyle::Bars);
+        assert_eq!(old.repeat(), crate::audio::Repeat::Off);
+        assert!(!old.player_shuffle);
+        let set: Config =
+            toml::from_str("player_visual = \"radial\"\nplayer_visual_on = false\nplayer_repeat = \"all\"\nplayer_shuffle = true").unwrap();
+        assert_eq!(set.visual_style(), crate::audio::VisualStyle::Radial);
+        assert!(!set.player_visual_on);
+        assert_eq!(set.repeat(), crate::audio::Repeat::All);
+        assert!(set.player_shuffle);
+        // A name this version does not know must not break loading.
+        let odd: Config = toml::from_str("player_visual = \"lava\"\nplayer_repeat = \"sometimes\"").unwrap();
+        assert_eq!(odd.visual_style(), crate::audio::VisualStyle::Bars);
+        assert_eq!(odd.repeat(), crate::audio::Repeat::Off);
+    }
+
+    #[test]
+    fn a_saved_player_mode_survives_another_window_saving() {
+        let base = Config::default();
+        let ours = Config { player_repeat: "one".into(), player_shuffle: true, ..base.clone() };
+        let disk = Config { theme: "other".into(), ..base.clone() };
+        let merged = merge(&base, &ours, &disk);
+        assert_eq!(merged.repeat(), crate::audio::Repeat::One);
+        assert!(merged.player_shuffle);
+        assert_eq!(merged.theme, "other");
     }
 
     #[test]

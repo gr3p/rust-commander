@@ -627,3 +627,127 @@ fn pausing_while_the_last_audio_drains_resumes_into_the_end() {
     rig.wait(|e| matches!(e, Event::Ended { .. }));
     assert_eq!(rig.rec.frames(1), 88_200);
 }
+
+fn decode_mono(name: &str) -> Vec<f32> {
+    let mut source = crate::audio::FileSource::open(&fixture(name)).unwrap();
+    let mut out = Vec::new();
+    while source.read(&mut out).unwrap() {}
+    out
+}
+
+#[test]
+fn the_scope_hands_out_what_was_just_played_before_the_volume() {
+    let rig = rig_with(Options { speed: 12.0, ..Options::default() });
+    rig.player.set_volume(0.4);
+    rig.player.play(fixture("chirp.wav"), 1);
+    until("some audio", || rig.rec.len() > 30_000);
+    rig.player.pause();
+    until("paused", || rig.player.state() == State::Paused);
+    std::thread::sleep(Duration::from_millis(60));
+    let mut scope = Vec::new();
+    let rate = rig.player.scope(1024, &mut scope);
+    assert_eq!(rate, 44_100);
+    assert_eq!(scope.len(), 1024);
+    // The device heard a quieter copy, and the scope shows the source itself.
+    let heard = rig.player.shared.heard_frames.load(Ordering::Relaxed) as usize;
+    let source = decode_mono("chirp.wav");
+    let want = &source[heard - 1024..heard];
+    let worst = scope.iter().zip(want).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    assert!(worst < 1e-3, "scope differs from the source by {worst}");
+    let played = rig.rec.samples.lock().unwrap();
+    let quiet = played[heard - 1024..heard].iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    let shown = scope.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    assert!(quiet < shown * 0.2, "the device got {quiet}, the scope {shown}");
+}
+
+#[test]
+fn the_scope_lags_by_what_the_device_still_holds() {
+    let rig = rig_with(Options { speed: 12.0, queued: 4_410, ..Options::default() });
+    rig.player.play(fixture("chirp.wav"), 1);
+    until("some audio", || rig.rec.len() > 30_000);
+    rig.player.pause();
+    until("paused", || rig.player.state() == State::Paused);
+    std::thread::sleep(Duration::from_millis(60));
+    let mut scope = Vec::new();
+    rig.player.scope(256, &mut scope);
+    let heard = rig.player.shared.heard_frames.load(Ordering::Relaxed) as usize;
+    let written = rig.rec.len();
+    assert_eq!(written - heard, 4_410, "the clock must trail the writes by the queue");
+    let source = decode_mono("chirp.wav");
+    let worst = scope.iter().zip(&source[heard - 256..heard]).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    assert!(worst < 1e-3, "{worst}");
+}
+
+#[test]
+fn the_scope_is_short_at_the_start_and_empty_when_nothing_plays() {
+    let rig = rig();
+    let mut scope = vec![1.0; 10];
+    assert_eq!(rig.player.scope(512, &mut scope), 0);
+    assert!(scope.is_empty());
+    let rig = rig_with(Options { speed: 3.0, ..Options::default() });
+    rig.player.play(fixture("chirp.wav"), 1);
+    until("started", || rig.rec.len() > 1_000);
+    rig.player.pause();
+    until("paused", || rig.player.state() == State::Paused);
+    std::thread::sleep(Duration::from_millis(40));
+    let mut scope = Vec::new();
+    rig.player.scope(100_000, &mut scope);
+    assert!(!scope.is_empty() && scope.len() < 100_000, "{}", scope.len());
+    rig.player.stop();
+    until("idle", || rig.player.state() == State::Idle);
+    assert_eq!(rig.player.scope(512, &mut scope), 0);
+    assert!(scope.is_empty());
+}
+
+#[test]
+fn a_seek_clears_the_scope_until_new_sound_arrives() {
+    let rig = rig_with(Options { speed: 12.0, ..Options::default() });
+    rig.player.play(fixture("chirp.flac"), 1);
+    until("started", || rig.rec.len() > 20_000);
+    rig.player.pause();
+    until("paused", || rig.player.state() == State::Paused);
+    std::thread::sleep(Duration::from_millis(40));
+    rig.player.seek(Duration::from_millis(1500));
+    std::thread::sleep(Duration::from_millis(80));
+    let mut scope = Vec::new();
+    rig.player.scope(512, &mut scope);
+    assert!(scope.is_empty(), "the scope still shows the old place: {} samples", scope.len());
+    rig.player.resume();
+    until("new sound", || {
+        let mut s = Vec::new();
+        rig.player.scope(512, &mut s);
+        s.len() == 512
+    });
+    // What it shows now belongs to the new place, so it matches the source from there.
+    rig.player.pause();
+    until("paused again", || rig.player.state() == State::Paused);
+    std::thread::sleep(Duration::from_millis(40));
+    rig.player.scope(256, &mut scope);
+    let heard = rig.player.shared.heard_frames.load(Ordering::Relaxed) as usize;
+    assert!(heard >= 66_150, "{heard}");
+    let source = decode_mono("chirp.flac");
+    let worst = scope.iter().zip(&source[heard - 256..heard]).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    assert!(worst < 1e-3, "{worst}");
+}
+
+#[test]
+fn the_scope_mixes_stereo_down_to_mono() {
+    let rig = rig_with(Options { speed: 12.0, ..Options::default() });
+    rig.player.play(fixture("stereo.flac"), 1);
+    until("started", || rig.rec.len() > 20_000);
+    rig.player.pause();
+    until("paused", || rig.player.state() == State::Paused);
+    std::thread::sleep(Duration::from_millis(40));
+    let mut scope = Vec::new();
+    assert_eq!(rig.player.scope(512, &mut scope), 16_000);
+    assert_eq!(scope.len(), 512);
+    let mut source = crate::audio::FileSource::open(&fixture("stereo.flac")).unwrap();
+    let mut stereo = Vec::new();
+    while source.read(&mut stereo).unwrap() {}
+    let heard = rig.player.shared.heard_frames.load(Ordering::Relaxed) as usize;
+    let worst = (0..512).map(|i| {
+        let at = heard - 512 + i;
+        ((stereo[at * 2] + stereo[at * 2 + 1]) / 2.0 - scope[i]).abs()
+    }).fold(0.0f32, f32::max);
+    assert!(worst < 1e-3, "{worst}");
+}

@@ -1,6 +1,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
@@ -62,15 +63,73 @@ struct Shared {
     state: AtomicU8,
     generation: AtomicU64,
     position_ms: AtomicU64,
+    // The same moment as position_ms, in frames, for lining the scope up with what is heard.
+    heard_frames: AtomicU64,
     duration_ms: AtomicU64,
     volume: AtomicU32,
     muted: AtomicBool,
+}
+
+/// The newest decoded sound, mixed to mono and taken before the volume, for the visualizer.
+struct Tap {
+    inner: Mutex<TapInner>,
+}
+
+struct TapInner {
+    samples: VecDeque<f32>,
+    // Timeline frame just after the newest sample.
+    end: u64,
+    rate: u32,
+}
+
+/// Enough for the longest lag a sound card reports, plus the window the analyzer reads.
+const TAP_FRAMES: usize = 16_384;
+
+impl Tap {
+    fn new() -> Self {
+        Self { inner: Mutex::new(TapInner { samples: VecDeque::with_capacity(TAP_FRAMES), end: 0, rate: 0 }) }
+    }
+
+    /// A new track, a seek or a stop: what was in there no longer leads up to the next sound.
+    fn reset(&self, rate: u32, at: u64) {
+        if let Ok(mut tap) = self.inner.lock() {
+            tap.samples.clear();
+            tap.end = at;
+            tap.rate = rate;
+        }
+    }
+
+    /// `chunk` is interleaved in `width` channels, `end` the timeline frame after its last frame.
+    fn push(&self, chunk: &[f32], width: usize, end: u64) {
+        let Ok(mut tap) = self.inner.lock() else { return };
+        for frame in chunk.chunks_exact(width) {
+            let mono = frame.iter().sum::<f32>() / width as f32;
+            if tap.samples.len() == TAP_FRAMES {
+                tap.samples.pop_front();
+            }
+            tap.samples.push_back(mono);
+        }
+        tap.end = end;
+    }
+
+    /// The `want` samples up to frame `until`, or as many of them as there are.
+    fn window(&self, until: u64, want: usize, out: &mut Vec<f32>) -> u32 {
+        out.clear();
+        let Ok(tap) = self.inner.lock() else { return 0 };
+        let first = tap.end.saturating_sub(tap.samples.len() as u64);
+        let until = until.clamp(first, tap.end);
+        let from = until.saturating_sub(want as u64).max(first);
+        let (skip, take) = ((from - first) as usize, (until - from) as usize);
+        out.extend(tap.samples.iter().skip(skip).take(take));
+        tap.rate
+    }
 }
 
 /// The player handle. Cheap to call from the UI thread: every call only queues a command.
 pub struct Player {
     tx: Sender<Command>,
     shared: Arc<Shared>,
+    tap: Arc<Tap>,
 }
 
 impl Player {
@@ -81,13 +140,16 @@ impl Player {
             state: AtomicU8::new(State::Idle as u8),
             generation: AtomicU64::new(0),
             position_ms: AtomicU64::new(0),
+            heard_frames: AtomicU64::new(0),
             duration_ms: AtomicU64::new(NO_DURATION),
             volume: AtomicU32::new(volume.clamp(0.0, 1.0).to_bits()),
             muted: AtomicBool::new(false),
         });
+        let tap = Arc::new(Tap::new());
         let engine = Engine {
             rx,
             shared: Arc::clone(&shared),
+            tap: Arc::clone(&tap),
             factory,
             emit: Box::new(events),
             play: None,
@@ -98,7 +160,7 @@ impl Player {
             .name("audio".into())
             .spawn(move || engine.run())
             .expect("the audio thread starts");
-        Player { tx, shared }
+        Player { tx, shared, tap }
     }
 
     pub fn play(&self, path: PathBuf, generation: u64) {
@@ -151,6 +213,17 @@ impl Player {
 
     pub fn state(&self) -> State {
         State::from_u8(self.shared.state.load(Ordering::Relaxed))
+    }
+
+    /// The newest `want` samples that have reached the speakers, mixed to mono and taken before the
+    /// volume, so the picture does not shrink with it. Returns the sample rate, or 0 when nothing
+    /// plays. Fewer samples than asked for come back at the start of a track.
+    pub fn scope(&self, want: usize, out: &mut Vec<f32>) -> u32 {
+        if self.state() != State::Playing && self.state() != State::Paused {
+            out.clear();
+            return 0;
+        }
+        self.tap.window(self.shared.heard_frames.load(Ordering::Relaxed), want, out)
     }
 
     pub fn generation(&self) -> u64 {
@@ -217,6 +290,7 @@ impl Playback {
 struct Engine {
     rx: Receiver<Command>,
     shared: Arc<Shared>,
+    tap: Arc<Tap>,
     factory: SinkFactory,
     emit: Box<dyn Fn(Event) + Send>,
     play: Option<Playback>,
@@ -271,6 +345,7 @@ impl Engine {
     fn set_position(&self, frames: u64, rate: u32) {
         let ms = frames.saturating_mul(1000) / u64::from(rate.max(1));
         self.shared.position_ms.store(ms, Ordering::Relaxed);
+        self.shared.heard_frames.store(frames, Ordering::Relaxed);
     }
 
     fn handle(&mut self, command: Command) {
@@ -279,6 +354,7 @@ impl Engine {
             Command::Stop => {
                 self.play = None;
                 self.last = None;
+                self.tap.reset(0, 0);
                 self.shared.position_ms.store(0, Ordering::Relaxed);
                 self.shared.duration_ms.store(NO_DURATION, Ordering::Relaxed);
                 self.set_state(State::Idle);
@@ -311,6 +387,7 @@ impl Engine {
 
     fn fail(&mut self, generation: u64, message: String, unsupported: bool) {
         self.play = None;
+        self.tap.reset(0, 0);
         self.set_state(State::Failed);
         (self.emit)(Event::Failed { generation, message, unsupported });
     }
@@ -373,6 +450,7 @@ impl Engine {
             resync: None,
         });
         self.gain = 0.0;
+        self.tap.reset(rate, 0);
         self.set_state(State::Playing);
         if let Some(to) = then {
             self.seek(to);
@@ -416,6 +494,7 @@ impl Engine {
             let _ = catch_unwind(AssertUnwindSafe(|| play.source.seek(to)));
             play.restart_clock();
             self.gain = 0.0;
+            self.tap.reset(play.rate, play.start_frames);
         }
         play.phase = Phase::Playing;
         self.set_state(State::Playing);
@@ -435,6 +514,7 @@ impl Engine {
         play.resync = None;
         play.restart_clock();
         self.gain = 0.0;
+        self.tap.reset(play.rate, play.start_frames);
         let paused = matches!(play.phase, Phase::Paused { .. });
         // Whatever the device held is gone, so a resume has nothing to release.
         play.phase = if paused { Phase::Paused { hardware: true } } else { Phase::Playing };
@@ -512,8 +592,10 @@ impl Engine {
         }
         let target = self.target_gain();
         let chunk = &mut play.pending[play.cursor..end];
-        apply_gain(chunk, width, &mut self.gain, target);
         let frames = (chunk.len() / width) as u64;
+        // The visualizer sees the sound before the volume, so a quiet setting does not flatten it.
+        self.tap.push(chunk, width, play.start_frames + play.written + frames);
+        apply_gain(chunk, width, &mut self.gain, target);
         if let Err(message) = play.sink.write(chunk) {
             return Step::Failed(message);
         }

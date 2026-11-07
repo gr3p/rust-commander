@@ -1,19 +1,28 @@
 //! A small music player: Symphonia and libopus decode, ALSA plays. Nothing here knows about GTK.
 
 mod alsa;
+mod analyzer;
+mod cover;
 mod downmix;
 mod dynlib;
 mod engine;
+mod fft;
 mod ogg;
 mod opus;
+mod playlist;
 mod sink;
 mod source;
+mod style;
 
 pub use alsa::available as alsa_available;
+pub use analyzer::{Analyzer, Frame, WINDOW};
+pub use cover::folder_cover;
 pub use engine::{DEFAULT_VOLUME, Event, Player, State};
 pub use opus::available as opus_available;
+pub use playlist::{Playlist, Repeat};
 pub use sink::{Sink, SinkFactory, system_sink};
 pub use source::{Cover, FileSource, OpenError, TrackInfo};
+pub use style::VisualStyle;
 
 /// Formats the player may be asked to open. Others go to the default application.
 pub fn can_try(name: &str) -> bool {
