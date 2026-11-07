@@ -2,6 +2,16 @@
 
 Report bugs and ideas on the [issue tracker](https://github.com/gr3p/rust-commander/issues). Build instructions are in the [README](README.md#build-from-source).
 
+## Version number
+
+The version is major.minor from `Cargo.toml` and the commit count as patch, for example `0.1.88`. The release workflow and `build.rs` compute it the same way. Enable the hook once per clone so every commit also writes it into `Cargo.toml` and `Cargo.lock`, and `cargo build` prints the real number:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+To start a new minor version, change major.minor in `Cargo.toml`; the hook keeps the patch.
+
 ## Testing a change
 
 `bubblewrap` is only needed for `scripts/test-sandbox.sh`, not to build or start the program.
