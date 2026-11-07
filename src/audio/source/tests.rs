@@ -3,6 +3,15 @@ use std::time::Duration;
 
 use super::*;
 
+/// Opus needs libopus at run time. Without it the Opus files are skipped, not failed.
+fn skip(name: &str) -> bool {
+    let missing = name.ends_with(".opus") && !crate::audio::opus_available();
+    if missing {
+        eprintln!("skipped {name}: no libopus");
+    }
+    missing
+}
+
 pub fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/audio").join(name)
 }
@@ -40,6 +49,9 @@ const CHIRPS: [&str; 6] = ["chirp.wav", "chirp.flac", "chirp.mp3", "chirp.ogg", 
 #[test]
 fn every_format_reports_two_seconds_and_decodes_about_that_much() {
     for name in CHIRPS {
+        if skip(name) {
+            continue;
+        }
         let mut source = open(name);
         let rate = source.sample_rate();
         let reported = secs(&source);
@@ -59,6 +71,9 @@ fn every_format_reports_two_seconds_and_decodes_about_that_much() {
 #[test]
 fn lossless_and_opus_files_are_exactly_two_seconds() {
     for (name, rate) in [("chirp.wav", 44_100), ("chirp.flac", 44_100), ("chirp.opus", 48_000)] {
+        if skip(name) {
+            continue;
+        }
         let mut source = open(name);
         assert_eq!(source.sample_rate(), rate, "{name}");
         let samples = read_all(&mut source);
@@ -71,6 +86,9 @@ fn lossless_and_opus_files_are_exactly_two_seconds() {
 fn the_pitch_rises_through_the_file() {
     // The chirp runs from 300 Hz up to 1100 Hz, so later parts cross zero more often.
     for name in CHIRPS {
+        if skip(name) {
+            continue;
+        }
         let mut source = open(name);
         let rate = source.sample_rate() as usize;
         let samples = read_all(&mut source);
@@ -83,6 +101,9 @@ fn the_pitch_rises_through_the_file() {
 #[test]
 fn stereo_keeps_the_two_channels_apart() {
     for name in ["stereo.flac", "stereo.opus", "stereo.mp3"] {
+        if skip(name) {
+            continue;
+        }
         let mut source = open(name);
         assert_eq!(source.channels(), 2, "{name}");
         let rate = source.sample_rate() as usize;
@@ -98,6 +119,9 @@ fn stereo_keeps_the_two_channels_apart() {
 #[test]
 fn surround_files_fold_to_stereo() {
     for (name, rate) in [("surround.flac", 16_000), ("surround.opus", 48_000)] {
+        if skip(name) {
+            continue;
+        }
         let mut source = open(name);
         assert_eq!(source.info().channels, 6, "{name}");
         assert_eq!(source.channels(), 2, "{name}");
@@ -115,6 +139,9 @@ fn surround_files_fold_to_stereo() {
 #[test]
 fn tags_and_cover_art_come_through() {
     for name in ["tagged.mp3", "tagged.flac", "tagged.m4a", "tagged.opus"] {
+        if skip(name) {
+            continue;
+        }
         let source = open(name);
         let info = source.info();
         assert_eq!(info.title.as_deref(), Some("Test_Song"), "{name}");
@@ -135,6 +162,9 @@ fn tags_and_cover_art_come_through() {
 fn the_codec_is_named_for_the_details_line() {
     let expect = [("chirp.mp3", "MP3"), ("chirp.flac", "FLAC"), ("chirp.opus", "Opus"), ("chirp.ogg", "Vorbis"), ("chirp.wav", "PCM")];
     for (name, label) in expect {
+        if skip(name) {
+            continue;
+        }
         assert_eq!(open(name).info().codec, label, "{name}");
     }
     assert_eq!(open("chirp.m4a").info().codec, "AAC");
@@ -156,6 +186,9 @@ fn seeking_lands_on_the_same_audio_as_playing_through() {
     // (file, largest accepted offset in frames)
     let cases = [("chirp.wav", 0), ("chirp.flac", 0), ("chirp.mp3", 40), ("chirp.ogg", 40), ("chirp.opus", 40), ("chirp.m4a", 1100)];
     for (name, tolerance) in cases {
+        if skip(name) {
+            continue;
+        }
         let mut whole = open(name);
         let reference = read_all(&mut whole);
         let rate = whole.sample_rate() as usize;
@@ -187,6 +220,9 @@ fn seeking_lands_on_the_same_audio_as_playing_through() {
 #[test]
 fn the_tail_length_after_a_seek_matches_what_is_left() {
     for (name, tolerance) in [("chirp.wav", 0), ("chirp.flac", 0), ("chirp.opus", 64), ("chirp.ogg", 64), ("chirp.mp3", 1200)] {
+        if skip(name) {
+            continue;
+        }
         let mut source = open(name);
         let rate = source.sample_rate() as usize;
         source.seek(Duration::from_millis(1500)).unwrap();
@@ -200,6 +236,9 @@ fn the_tail_length_after_a_seek_matches_what_is_left() {
 #[test]
 fn seeking_back_and_forth_keeps_working() {
     for name in CHIRPS {
+        if skip(name) {
+            continue;
+        }
         let mut source = open(name);
         let mut block = Vec::new();
         for target in [1.2, 0.1, 1.9, 0.0, 0.7] {
@@ -214,6 +253,9 @@ fn seeking_back_and_forth_keeps_working() {
 #[test]
 fn seeking_past_the_end_ends_the_track() {
     for name in CHIRPS {
+        if skip(name) {
+            continue;
+        }
         let mut source = open(name);
         source.seek(Duration::from_secs(60)).unwrap();
         let mut out = Vec::new();
@@ -284,24 +326,21 @@ fn a_wrong_extension_does_not_stop_a_real_file() {
 fn truncated_files_play_what_is_there_and_never_hang() {
     let dir = scratch("cut");
     for name in CHIRPS {
+        if skip(name) {
+            continue;
+        }
         let bytes = std::fs::read(fixture(name)).unwrap();
         for part in [3, 2] {
             let cut = dir.join(format!("{part}-{name}"));
             std::fs::write(&cut, &bytes[..bytes.len() / part]).unwrap();
-            match FileSource::open(&cut) {
-                Ok(mut source) => {
-                    let mut out = Vec::new();
-                    let mut blocks = 0;
-                    loop {
-                        match source.read(&mut out) {
-                            Ok(true) => blocks += 1,
-                            Ok(false) | Err(_) => break,
-                        }
-                        assert!(blocks < 10_000, "{name}: never ends");
-                    }
-                    assert!(out.len() as f64 / f64::from(source.sample_rate()) < 2.1, "{name}: longer than the original");
+            if let Ok(mut source) = FileSource::open(&cut) {
+                let mut out = Vec::new();
+                let mut blocks = 0;
+                while let Ok(true) = source.read(&mut out) {
+                    blocks += 1;
+                    assert!(blocks < 10_000, "{name}: never ends");
                 }
-                Err(_) => {}
+                assert!(out.len() as f64 / f64::from(source.sample_rate()) < 2.1, "{name}: longer than the original");
             }
         }
     }
@@ -323,6 +362,9 @@ fn damaged_files_never_panic_or_hang() {
     let dir = scratch("fuzz");
     let mut rng = Lcg(0x5eed);
     for name in CHIRPS.iter().chain(["stereo.opus", "stereo.mp3", "tagged.mp3", "tagged.flac", "tagged.m4a", "surround.opus"].iter()) {
+        if skip(name) {
+            continue;
+        }
         let original = std::fs::read(fixture(name)).unwrap();
         for round in 0..25 {
             let mut bytes = original.clone();

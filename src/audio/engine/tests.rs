@@ -36,6 +36,8 @@ struct FakeSink {
     speed: f64,
     hardware_pause: bool,
     fail_after: Option<usize>,
+    // What the device claims is still queued, however long it has been since the last write.
+    queued: u64,
 }
 
 impl Sink for FakeSink {
@@ -61,7 +63,7 @@ impl Sink for FakeSink {
     }
 
     fn delay(&mut self) -> u64 {
-        0
+        self.queued
     }
 }
 
@@ -70,11 +72,12 @@ struct Options {
     hardware_pause: bool,
     fail_after: Option<usize>,
     refuse_open: bool,
+    queued: u64,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { speed: 0.0, hardware_pause: true, fail_after: None, refuse_open: false }
+        Self { speed: 0.0, hardware_pause: true, fail_after: None, refuse_open: false, queued: 0 }
     }
 }
 
@@ -87,13 +90,13 @@ struct Rig {
 fn rig_with(options: Options) -> Rig {
     let rec = Record::default();
     let made = rec.clone();
-    let Options { speed, hardware_pause, fail_after, refuse_open } = options;
+    let Options { speed, hardware_pause, fail_after, refuse_open, queued } = options;
     let factory: SinkFactory = Arc::new(move |rate, channels| {
         if refuse_open {
             return Err("No sound card".into());
         }
         made.opened.lock().unwrap().push((rate, channels));
-        Ok(Box::new(FakeSink { rec: made.clone(), rate, channels, speed, hardware_pause, fail_after }))
+        Ok(Box::new(FakeSink { rec: made.clone(), rate, channels, speed, hardware_pause, fail_after, queued }))
     });
     let (tx, events) = channel();
     let tx = Mutex::new(tx);
@@ -143,9 +146,21 @@ fn rms(samples: &[f32]) -> f32 {
 
 const FORMATS: [&str; 6] = ["chirp.wav", "chirp.flac", "chirp.mp3", "chirp.ogg", "chirp.opus", "chirp.m4a"];
 
+/// Opus needs libopus at run time. Without it the Opus files are skipped, not failed.
+fn skip(name: &str) -> bool {
+    let missing = name.ends_with(".opus") && !crate::audio::opus_available();
+    if missing {
+        eprintln!("skipped {name}: no libopus");
+    }
+    missing
+}
+
 #[test]
 fn every_format_plays_to_the_end_and_reports_it() {
     for name in FORMATS {
+        if skip(name) {
+            continue;
+        }
         let rig = rig();
         rig.player.play(fixture(name), 7);
         let loaded = rig.wait(|e| matches!(e, Event::Loaded { .. }));
@@ -168,11 +183,16 @@ fn every_format_plays_to_the_end_and_reports_it() {
 #[test]
 fn stereo_and_surround_open_the_device_with_the_right_channels() {
     let rig = rig();
-    rig.play_to_end("stereo.opus", 1);
+    let mut expect = Vec::new();
+    if !skip("stereo.opus") {
+        rig.play_to_end("stereo.opus", 1);
+        expect.push((48_000, 2));
+    }
     rig.play_to_end("surround.flac", 2);
     rig.play_to_end("chirp.wav", 3);
+    expect.extend([(16_000, 2), (44_100, 1)]);
     let opened = rig.rec.opened.lock().unwrap().clone();
-    assert_eq!(opened, vec![(48_000, 2), (16_000, 2), (44_100, 1)]);
+    assert_eq!(opened, expect);
 }
 
 #[test]
@@ -282,7 +302,7 @@ fn a_device_that_cannot_pause_resumes_where_it_stopped() {
     // The track finishes, and nothing is skipped: the total is at most the length plus the lead-in
     // that was flushed and then played again.
     let frames = rig.rec.frames(1);
-    assert!(frames >= 88_200 && frames < 88_200 + 4_800, "{frames} frames");
+    assert!((88_200..88_200 + 4_800).contains(&frames), "{frames} frames");
 }
 
 #[test]
@@ -325,6 +345,9 @@ fn stop_silences_and_forgets_the_track() {
 #[test]
 fn seeking_jumps_and_the_rest_of_the_track_follows() {
     for name in ["chirp.wav", "chirp.flac", "chirp.opus", "chirp.mp3"] {
+        if skip(name) {
+            continue;
+        }
         let rig = rig_with(Options { speed: 12.0, ..Options::default() });
         rig.player.play(fixture(name), 1);
         until("started", || rig.rec.len() > 1_000);
@@ -383,7 +406,7 @@ fn a_seek_while_paused_keeps_the_pause_and_resumes_from_the_new_place() {
 #[test]
 fn seeking_past_the_end_ends_the_track() {
     let rig = rig_with(Options { speed: 12.0, ..Options::default() });
-    rig.player.play(fixture("chirp.opus"), 1);
+    rig.player.play(fixture("chirp.flac"), 1);
     until("started", || rig.rec.len() > 1_000);
     rig.player.seek(Duration::from_secs(600));
     rig.wait(|e| matches!(e, Event::Ended { .. }));
@@ -457,7 +480,7 @@ fn every_start_fades_in_instead_of_clicking() {
 #[test]
 fn switching_files_quickly_ends_on_the_last_one() {
     let rig = rig_with(Options { speed: 30.0, ..Options::default() });
-    for (i, name) in FORMATS.iter().cycle().take(18).enumerate() {
+    for (i, name) in FORMATS.iter().filter(|name| !skip(name)).cycle().take(18).enumerate() {
         rig.player.play(fixture(name), i as u64 + 1);
     }
     rig.player.play(fixture("chirp.wav"), 99);
@@ -515,7 +538,7 @@ fn dropping_the_player_stops_its_thread() {
     let rec = Record::default();
     let made = rec.clone();
     let factory: SinkFactory = Arc::new(move |rate, channels| {
-        Ok(Box::new(FakeSink { rec: made.clone(), rate, channels, speed: 4.0, hardware_pause: true, fail_after: None }))
+        Ok(Box::new(FakeSink { rec: made.clone(), rate, channels, speed: 4.0, hardware_pause: true, fail_after: None, queued: 0 }))
     });
     let player = Player::spawn(factory, 1.0, |_| {});
     player.play(fixture("chirp.wav"), 1);
@@ -543,8 +566,8 @@ fn the_gain_ramp_reaches_its_target_and_clamps() {
 
 #[test]
 fn the_whole_chain_plays_every_format_through_the_alsa_null_device() {
-    if !crate::audio::alsa_available() {
-        eprintln!("skipped: no ALSA library");
+    if !crate::audio::alsa_available() || super::super::alsa::AlsaSink::open("null", 48_000, 2).is_err() {
+        eprintln!("skipped: no ALSA library or no null device");
         return;
     }
     let factory: SinkFactory = Arc::new(|rate, channels| {
@@ -556,6 +579,9 @@ fn the_whole_chain_plays_every_format_through_the_alsa_null_device() {
         let _ = tx.lock().unwrap().send(event);
     });
     for (i, name) in FORMATS.iter().chain(["stereo.opus", "surround.opus", "tagged.flac"].iter()).enumerate() {
+        if skip(name) {
+            continue;
+        }
         let generation = i as u64 + 1;
         player.play(fixture(name), generation);
         loop {
@@ -567,4 +593,37 @@ fn the_whole_chain_plays_every_format_through_the_alsa_null_device() {
         }
         assert_eq!(player.state(), State::Ended, "{name}");
     }
+}
+
+#[test]
+fn the_track_ends_when_the_queued_audio_has_had_time_to_play() {
+    // The device says 0.4 s is queued and keeps saying so, as PipeWire does.
+    let rig = rig_with(Options { queued: 17_640, ..Options::default() });
+    let started = Instant::now();
+    rig.player.play(fixture("chirp.wav"), 1);
+    rig.wait(|e| matches!(e, Event::Ended { .. }));
+    let took = started.elapsed();
+    assert!(took >= Duration::from_millis(350), "ended after only {took:?}");
+    assert!(took < Duration::from_millis(1500), "waited {took:?}");
+}
+
+#[test]
+fn a_device_that_claims_an_endless_queue_cannot_hold_the_track_up() {
+    let rig = rig_with(Options { queued: 44_100 * 600, ..Options::default() });
+    let started = Instant::now();
+    rig.player.play(fixture("chirp.wav"), 1);
+    rig.wait(|e| matches!(e, Event::Ended { .. }));
+    assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+}
+
+#[test]
+fn pausing_while_the_last_audio_drains_resumes_into_the_end() {
+    let rig = rig_with(Options { queued: 22_050, ..Options::default() });
+    rig.player.play(fixture("chirp.wav"), 1);
+    until("draining", || rig.rec.len() >= 88_200);
+    rig.player.pause();
+    until("paused", || rig.player.state() == State::Paused);
+    rig.player.resume();
+    rig.wait(|e| matches!(e, Event::Ended { .. }));
+    assert_eq!(rig.rec.frames(1), 88_200);
 }

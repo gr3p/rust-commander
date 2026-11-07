@@ -10,8 +10,9 @@ use super::source::{FileSource, OpenError, TrackInfo};
 
 /// Frames written between two looks at the command queue: about 21 ms at 48 kHz.
 const CHUNK_FRAMES: usize = 1024;
-/// How long a finished track may wait for its last audio to leave the device.
-const DRAIN_LIMIT: Duration = Duration::from_secs(3);
+/// The most a finished track waits for its last audio to leave the device. A device that
+/// reports a huge queue must not hold the track up for long.
+const DRAIN_LIMIT: Duration = Duration::from_secs(2);
 const NO_DURATION: u64 = u64::MAX;
 pub const DEFAULT_VOLUME: f32 = 0.8;
 
@@ -171,8 +172,9 @@ impl Player {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Playing,
-    /// The last audio is still leaving the device.
-    Draining(Instant),
+    /// The last audio is still leaving the device. PipeWire never reports an empty queue, so the
+    /// time left is taken from what was queued when the file ended.
+    Draining { since: Instant, wait: Duration },
     Paused {
         /// The device holds its queue. Otherwise the queue was flushed, and resume seeks back.
         hardware: bool,
@@ -236,7 +238,7 @@ impl Engine {
             let wait = match self.play.as_ref().map(|p| p.phase) {
                 None => Wait::Block,
                 Some(Phase::Playing) => Wait::None,
-                Some(Phase::Draining(_)) => Wait::Poll(Duration::from_millis(20)),
+                Some(Phase::Draining { .. }) => Wait::Poll(Duration::from_millis(20)),
                 Some(Phase::Paused { .. }) => Wait::Block,
             };
             let command = match wait {
@@ -399,10 +401,10 @@ impl Engine {
     fn resume(&mut self) {
         let Some(play) = self.play.as_mut() else {
             // Nothing is loaded, but a track that ended plays again.
-            if State::from_u8(self.shared.state.load(Ordering::Relaxed)) == State::Ended {
-                if let Some((path, generation)) = self.last.clone() {
-                    self.load(path, generation, None);
-                }
+            if State::from_u8(self.shared.state.load(Ordering::Relaxed)) == State::Ended
+                && let Some((path, generation)) = self.last.clone()
+            {
+                self.load(path, generation, None);
             }
             return;
         };
@@ -421,10 +423,10 @@ impl Engine {
 
     fn seek(&mut self, to: Duration) {
         let Some(play) = self.play.as_mut() else {
-            if State::from_u8(self.shared.state.load(Ordering::Relaxed)) == State::Ended {
-                if let Some((path, generation)) = self.last.clone() {
-                    self.load(path, generation, Some(to));
-                }
+            if State::from_u8(self.shared.state.load(Ordering::Relaxed)) == State::Ended
+                && let Some((path, generation)) = self.last.clone()
+            {
+                self.load(path, generation, Some(to));
             }
             return;
         };
@@ -467,11 +469,13 @@ impl Engine {
         let rate = play.rate;
         match play.phase {
             Phase::Paused { .. } => return Step::Continue,
-            Phase::Draining(since) => {
-                if play.sink.delay() == 0 || since.elapsed() > DRAIN_LIMIT {
+            Phase::Draining { since, wait } => {
+                let left = wait.saturating_sub(since.elapsed());
+                if left.is_zero() {
                     return Step::Finished;
                 }
-                let heard = play.heard_frames();
+                let queued = (left.as_secs_f64() * f64::from(rate)) as u64;
+                let heard = (play.start_frames + play.written).saturating_sub(queued).max(play.start_frames);
                 self.set_position(heard, rate);
                 return Step::Continue;
             }
@@ -480,7 +484,7 @@ impl Engine {
 
         if play.cursor >= play.pending.len() {
             if play.eof {
-                play.phase = Phase::Draining(Instant::now());
+                play.phase = drain_phase(play);
                 return Step::Continue;
             }
             play.pending.clear();
@@ -490,7 +494,7 @@ impl Engine {
                 Ok(Ok(true)) => {}
                 Ok(Ok(false)) => {
                     play.eof = true;
-                    play.phase = Phase::Draining(Instant::now());
+                    play.phase = drain_phase(play);
                     return Step::Continue;
                 }
                 Ok(Err(message)) => return Step::Failed(message),
@@ -534,6 +538,12 @@ enum Step {
     Continue,
     Finished,
     Failed(String),
+}
+
+fn drain_phase(play: &mut Playback) -> Phase {
+    let queued = play.sink.delay();
+    let wait = Duration::from_secs_f64(queued as f64 / f64::from(play.rate.max(1))).min(DRAIN_LIMIT);
+    Phase::Draining { since: Instant::now(), wait }
 }
 
 /// Steps the volume across the chunk instead of at its edge, so a change makes no click.

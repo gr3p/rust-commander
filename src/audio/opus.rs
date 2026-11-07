@@ -1,5 +1,7 @@
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::OnceLock;
+
+use super::dynlib::Lib;
 
 /// libopus, looked up at run time like the ALSA library. Symphonia has no Opus decoder, and this
 /// keeps libopus and cmake out of the build.
@@ -17,28 +19,13 @@ fn api() -> Result<&'static Api, String> {
 }
 
 fn load() -> Result<Api, String> {
-    let lib = ["libopus.so.0", "libopus.so"]
-        .iter()
-        .find_map(|name| {
-            let name = CString::new(*name).ok()?;
-            let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
-            (!handle.is_null()).then_some(handle)
-        })
+    let lib = Lib::open(&["libopus.so.0", "libopus.so"])
         .ok_or_else(|| "Opus files need the libopus library (libopus0), which is not installed".to_string())?;
-    macro_rules! symbol {
-        ($name:literal) => {{
-            let ptr = unsafe { libc::dlsym(lib, concat!($name, "\0").as_ptr().cast()) };
-            if ptr.is_null() {
-                return Err(format!("The Opus library has no {}", $name));
-            }
-            unsafe { std::mem::transmute(ptr) }
-        }};
-    }
     Ok(Api {
-        create: symbol!("opus_multistream_decoder_create"),
-        decode: symbol!("opus_multistream_decode_float"),
-        destroy: symbol!("opus_multistream_decoder_destroy"),
-        strerror: symbol!("opus_strerror"),
+        create: lib.symbol("opus_multistream_decoder_create")?,
+        decode: lib.symbol("opus_multistream_decode_float")?,
+        destroy: lib.symbol("opus_multistream_decoder_destroy")?,
+        strerror: lib.symbol("opus_strerror")?,
     })
 }
 

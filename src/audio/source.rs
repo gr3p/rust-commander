@@ -477,10 +477,10 @@ fn probe(path: &Path, gapless: bool) -> Result<Opened, OpenError> {
             other => OpenError::Failed(other.to_string()),
         })?;
     let mut info = TrackInfo::default();
-    if let Some(log) = probed.metadata.get() {
-        if let Some(rev) = log.current() {
-            absorb_tags(&mut info, rev);
-        }
+    if let Some(log) = probed.metadata.get()
+        && let Some(rev) = log.current()
+    {
+        absorb_tags(&mut info, rev);
     }
     if let Some(rev) = probed.format.metadata().current() {
         absorb_tags(&mut info, rev);
@@ -581,10 +581,10 @@ fn absorb_tags(info: &mut TrackInfo, rev: &MetadataRevision) {
             .iter()
             .find(|visual| visual.usage == Some(StandardVisualKey::FrontCover))
             .or_else(|| rev.visuals().first());
-        if let Some(visual) = visual {
-            if !visual.data.is_empty() {
-                info.cover = Some(Arc::new(Cover { mime: visual.media_type.clone(), data: visual.data.to_vec() }));
-            }
+        if let Some(visual) = visual
+            && !visual.data.is_empty()
+        {
+            info.cover = Some(Arc::new(Cover { mime: visual.media_type.clone(), data: visual.data.to_vec() }));
         }
     }
 }

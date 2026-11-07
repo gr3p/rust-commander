@@ -2,6 +2,7 @@ use std::ffi::{CStr, CString, c_char, c_int, c_long, c_uint, c_ulong, c_void};
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use super::dynlib::Lib;
 use super::sink::Sink;
 
 type Pcm = *mut c_void;
@@ -39,35 +40,19 @@ fn api() -> Result<&'static Api, String> {
 }
 
 fn load() -> Result<Api, String> {
-    let lib = ["libasound.so.2", "libasound.so"]
-        .iter()
-        .find_map(|name| {
-            let name = CString::new(*name).ok()?;
-            let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
-            (!handle.is_null()).then_some(handle)
-        })
-        .ok_or_else(|| "The ALSA library (libasound.so.2) is not installed".to_string())?;
-    macro_rules! symbol {
-        ($name:literal) => {{
-            let ptr = unsafe { libc::dlsym(lib, concat!($name, "\0").as_ptr().cast()) };
-            if ptr.is_null() {
-                return Err(format!("The ALSA library has no {}", $name));
-            }
-            unsafe { std::mem::transmute(ptr) }
-        }};
-    }
     // The library stays loaded for the life of the process.
+    let lib = Lib::open(&["libasound.so.2", "libasound.so"]).ok_or_else(|| "The ALSA library (libasound.so.2) is not installed".to_string())?;
     Ok(Api {
-        open: symbol!("snd_pcm_open"),
-        set_params: symbol!("snd_pcm_set_params"),
-        writei: symbol!("snd_pcm_writei"),
-        recover: symbol!("snd_pcm_recover"),
-        prepare: symbol!("snd_pcm_prepare"),
-        drop: symbol!("snd_pcm_drop"),
-        close: symbol!("snd_pcm_close"),
-        delay: symbol!("snd_pcm_delay"),
-        pause: symbol!("snd_pcm_pause"),
-        strerror: symbol!("snd_strerror"),
+        open: lib.symbol("snd_pcm_open")?,
+        set_params: lib.symbol("snd_pcm_set_params")?,
+        writei: lib.symbol("snd_pcm_writei")?,
+        recover: lib.symbol("snd_pcm_recover")?,
+        prepare: lib.symbol("snd_pcm_prepare")?,
+        drop: lib.symbol("snd_pcm_drop")?,
+        close: lib.symbol("snd_pcm_close")?,
+        delay: lib.symbol("snd_pcm_delay")?,
+        pause: lib.symbol("snd_pcm_pause")?,
+        strerror: lib.symbol("snd_strerror")?,
     })
 }
 
