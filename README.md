@@ -53,6 +53,8 @@ Early release (0.1.x): expect rough edges, and please [report them](https://gith
 
 ## Music Player support
 
+A music player that lives in your file manager. Press Ctrl+Q on a song and keep working while it plays. mp3, flac, ogg, opus, wav, aac, m4a and aiff are decoded by the program itself, with no extra player to install. You get the cover from the tags or from a `cover.jpg` in the folder, a visualizer in your theme's colors (bars, wave, radial or ribbon), and playlists from the folder or from the songs you mark. Shuffle, repeat and the media keys work, and the small player stays under a panel while you copy, move and browse.
+
 <img src="img/music-player.png" alt="The built-in music player in the quick view, with the visualizer behind the cover, title and controls" width="900">
 
 <br>
