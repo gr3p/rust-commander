@@ -35,8 +35,10 @@ impl App {
             lister: self.lister.is_some(),
             image_view: self.image.is_some() || (self.state.quick_view && self.cursor_is_image()),
             quick_view: self.state.quick_view,
-            audio: self.audio_keys(),
+            audio: self.audio_focused(),
             player: self.audio_alive(),
+            mini: self.audio_is_mini(),
+            song: self.cursor_is_audio(),
             editing: self.shell.editing.get(),
             drive: self.shell.drives.iter().any(|(path, _)| path == &self.state.tab(id).path),
             testable,
@@ -231,6 +233,9 @@ impl App {
             Act::AudioRepeat => self.audio_cycle_repeat(),
             Act::AudioMinimize | Act::AudioJump => self.audio_jump(sender),
             Act::AudioExternal => self.audio_open_external(),
+            Act::AudioFocus => self.audio_tab(false),
+            Act::AudioSend => self.audio_send(false, sender),
+            Act::AudioAdd => self.audio_add(false, sender),
             Act::Drive => self.status = "Press Ctrl+1 to Ctrl+9".into(),
             Act::DiskInfo => self.show_disk_info(None),
             Act::Mount => self.open_mount(sender),
@@ -255,6 +260,8 @@ impl App {
         // A reload while the menu was open may have moved the row. Act on the file that was clicked, or not at all.
         let id = self.state.active;
         let target = self.row_target.take();
+        // A click on a row that is not marked acts on that row alone. Marks are left alone.
+        let row_only = target.as_ref().is_some_and(|target| !self.state.tab(id).marked.contains(target));
         let pos = target.and_then(|target| {
             let tab = self.state.tab(id);
             self.state
@@ -283,6 +290,8 @@ impl App {
             RowAct::Trash => self.trash_one(sender),
             RowAct::CopyPath => self.copy_cursor_path(),
             RowAct::Properties => self.show_properties(sender),
+            RowAct::PlayerSend => self.audio_send(row_only, sender),
+            RowAct::PlayerAdd => self.audio_add(row_only, sender),
         }
     }
 

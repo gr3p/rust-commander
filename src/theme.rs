@@ -1086,6 +1086,12 @@ button.menu-row label.menu-key {{
 .audio-hint {{
   color: {dim};
 }}
+/* In the big player the small print sits on the visualizer, so it is a little clearer than the dim color. */
+.audio-player .audio-detail,
+.audio-player .audio-time,
+.audio-player .audio-hint {{
+  color: {soft};
+}}
 .audio-message {{
   color: {red};
 }}
@@ -1170,6 +1176,13 @@ button.media-icon.media-play:disabled {{
   background: {muted};
   color: {bg};
 }}
+/* The small player has a smaller play circle than the big one. */
+.audio-mini button.media-icon {{
+  padding: 3px;
+}}
+.audio-mini button.media-icon.media-play {{
+  padding: 5px;
+}}
 button.media-icon.media-quiet,
 menubutton.media-icon.media-quiet {{
   opacity: 0.65;
@@ -1180,9 +1193,16 @@ menubutton.media-icon.media-quiet:hover {{
 }}
 /* The small player under a file list. */
 .audio-mini {{
-  padding: 6px 10px;
+  padding: 5px 10px;
   background: {sel};
   border-top: 1px solid {muted};
+}}
+/* The big player has an outline that is only drawn while it has the keyboard, so nothing moves. */
+.audio-big {{
+  border: 2px solid transparent;
+}}
+.audio-big.focused {{
+  border-color: {accent};
 }}
 .audio-mini.focused {{
   box-shadow: inset 0 0 0 2px {accent};
@@ -1200,7 +1220,7 @@ menubutton.media-icon.media-quiet:hover {{
   color: {bright};
 }}
 .audio-mini-artist {{
-  color: {dim};
+  color: {soft};
 }}
 .audio-mini .audio-time {{
   color: {dim};
@@ -1241,6 +1261,7 @@ entry:focus-within {{
         rsel = p.row_selected,
         rhov = p.row_hover,
         dim = p.dim,
+        soft = mix(&p.dim, &p.foreground, 0.4),
         red = p.red,
         title_px = (f64::from(s.font_px) * 1.5).round() as u32,
         radius = s.radius,

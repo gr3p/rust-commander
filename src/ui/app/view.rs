@@ -539,6 +539,7 @@ impl App {
             self.status = "QUICKVIEW: view".into();
             self.note_preview_target();
             self.focus_list();
+            self.audio_quick_start(sender);
         } else {
             for pane in &self.shell.panes {
                 crate::ui::row::set_dot_spin(&pane.preview_wait, false);
@@ -752,6 +753,12 @@ impl App {
         let generation = self.state.preview_gen;
         self.preview.generation = generation;
         self.preview_sent = generation;
+        // The big player keeps the pane whatever the cursor is on.
+        if self.audio_full() {
+            self.preview.set_body(PreviewBody::Audio);
+            self.paint_preview();
+            return;
+        }
         let Some(path) = self.file_under_cursor() else {
             let text = self
                 .state
@@ -766,7 +773,7 @@ impl App {
         let charset = self.charset;
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
         if rust_commander::audio::can_try(name) && !self.audio_is_mini() {
-            // The player fills the pane. It starts and stops with the cursor, see reconcile_audio.
+            // The player fills the pane and waits for Enter. Ctrl+Q on a song starts it, see toggle_quick_view.
             self.preview.set_body(PreviewBody::Audio);
             self.paint_preview();
             return;

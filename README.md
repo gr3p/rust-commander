@@ -35,7 +35,7 @@ Early release (0.1.x): expect rough edges, and please [report them](https://gith
 
 - **See before you open.** Preview text, images and thumbnails right next to your files, and edit in place.
 
-- **Music in the quick view.** Press Ctrl+Q on a song and it plays in the other panel, with its cover, title and artist, a seek bar, volume and a visualizer in your theme's colors. Next, previous, shuffle and repeat follow the files in the folder, and the cursor goes along. Fold it into a small player under the list and keep working. mp3, flac, ogg, opus, wav, aac, m4a and aiff are decoded by the program itself.
+- **Music in the quick view.** Press Ctrl+Q on a song and it plays in the other panel, with its cover, title and artist, a seek bar, volume and a visualizer in your theme's colors. Next, previous, shuffle and repeat follow the files in the folder, and the cursor goes along. Send marked songs to it as a playlist from the right-click menu. Fold it into a small player under the list and keep working. mp3, flac, ogg, opus, wav, aac, m4a and aiff are decoded by the program itself.
 
 - **Archives without the fuss.** Pack and unpack zip, 7z, rar and tar, and verify files with checksums.
 
@@ -123,18 +123,24 @@ The panel with focus is the source, the other is the target. Press F1 for all co
 | Ctrl+Q | Quick view in the other panel, editable |
 | F4 | Open the editor you pick in F12 |
 
-| Music (quick view on an audio file) | |
+| Music (the big player in the quick view) | |
 | --- | --- |
-| Ctrl+Q | The song under the cursor starts playing in the other panel, and the playlist is the music files of that folder in the order the list shows them. Moving the cursor to another song plays it. Moving to something that is not music, or pressing Ctrl+Q again, stops the music |
-| Space (or the media key) | Play or pause. Press it after the song has ended to play it again. Insert still marks the file |
-| Ctrl+Left / Ctrl+Right | Seek 5 seconds back or forward, 30 seconds with Shift. While the player is up these seek instead of opening the panel in the other one. The seek bar and volume also work with the mouse |
+| Ctrl+Q on a song | The song starts playing in the other panel at once, and the playlist is the music files of that folder in the order the list shows them. Ctrl+Q again closes the quick view and stops the music |
+| Enter on a song | Plays that song. With the quick view on a song and nothing playing, the player waits for Enter |
+| Tab | The keys go to the player, and Tab again hands them back to the file panel. The player is outlined while it has them |
+| Space (or the media key) | Play or pause. Press it after the song has ended to play it again |
+| Ctrl+Left / Ctrl+Right | Seek 5 seconds back or forward, 30 seconds with Shift. The seek bar and volume also work with the mouse |
 | N / P (or the next and previous media keys) | Next and previous song. The cursor moves to it. P inside the first 3 seconds goes to the song before, later it starts the song again |
 | S / R | Shuffle on or off. Repeat off, all, one. Both are remembered |
 | + / − | Volume |
 | M | Mute |
 | Ctrl+M | Minimize the player (see below) |
-| Enter | Plays the song in the built-in player. In the quick view it only makes sure the song plays. With the quick view closed it starts the small player under that panel |
+| Escape | Hand the keys back to the file panel |
 | Ctrl+Enter | Open In External Player: your default player opens the file and the built-in one pauses. A format the built-in player cannot read, such as WMA, says so and waits for Ctrl+Enter |
+
+The player keys (Space, the letters, +/− and the arrows) work while the player has the keys, so Space marks files as usual while the file panel has them. The media keys work all the time.
+
+Moving the cursor never changes the song. It changes when you press Enter on another song, when you press N or P, and when a song ends. The big player keeps the quick view pane even if the cursor goes to a text file, until you press Ctrl+Q or minimize it.
 
 The cover is the one inside the file. Without one, the player looks for a picture in the folder called `cover`, `folder`, `front`, `albumart`, `album` or `poster` (jpg, png and so on), and shows it for every song there. `back`, `inlay` and `disc` pictures are skipped.
 
@@ -142,13 +148,21 @@ The cover is shown square and never larger than about 38 % of the window's short
 
 The visualizer plays behind the whole player and follows the sound itself. The small buttons in the top corner switch it on or off, open the cogwheel to pick a style (Bars, Wave, Radial or Ribbon) and minimize the player. The same choices are in F12 on the Music tab.
 
+| Playlists from marked songs | |
+| --- | --- |
+| Right-click, Send and replace music in player (or Ctrl+P) | The marked songs of the panel become the playlist, in the order the list shows them, and the first one plays. With nothing marked, the song under the cursor is sent. A right-click on a row that is not marked sends only that row and leaves the marks |
+| Right-click, Add to current playlist (or Ctrl+Shift+P) | The songs go last in the playlist that is playing. Songs already in it are not added twice. With nothing playing they start a playlist |
+
+The songs go to the player that is open: the small one if the small player is up, the big one if it is, and with none open the big one when the quick view is on and otherwise the small one. A picked playlist stays as it is, whatever the list shows.
+
 | Small player | |
 | --- | --- |
 | Minimize button or Ctrl+M | The player folds into a bar under the list it started from, the quick view closes and both lists work as usual. The music plays on, to the end of the folder, and the cursor follows it unless you have moved it away |
+| Enter on a song | Plays it in the small player, in any folder and in either panel. If no player is up and the quick view is off, it starts the small player under that panel |
+| Ctrl+Q on a song | While the small player is up, a song under the cursor plays there instead of opening the quick view. Ctrl+Q on anything else is the quick view as usual |
 | Tab | Left panel, right panel, small player, and round again |
 | Ctrl+M | Jump to the small player, and back to the list. Escape and any list key also give the keys back. Space, Ctrl+Left / Right, N / P (or Up / Down), R, S, + / − and M work on it while it has them |
-| Ctrl+Q on a song | While the small player is up, a song under the cursor plays there instead of opening the quick view, also in another folder or the other panel. Ctrl+Q on anything else is the quick view as usual |
-| Expand button | Back to the full player: the list shows the folder with the cursor on the song, and the quick view opens. The X stops the music and closes the player |
+| Expand button | Back to the big player: the list shows the folder with the cursor on the song, and the quick view opens. The X stops the music and closes the player |
 
 | Archives and checksums | |
 | --- | --- |

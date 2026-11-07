@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use relm4::gtk;
 use relm4::gtk::gdk::{Key, ModifierType};
 use relm4::gtk::prelude::*;
 use relm4::prelude::*;
@@ -19,8 +18,6 @@ use crate::ui::player::Look;
 
 use super::App;
 
-/// The quick view waits this long on a file before playing it, so scrolling through a folder is quiet.
-const START_DELAY: Duration = Duration::from_millis(220);
 /// Seeks from the slider go out at most this often while it is dragged.
 const SEEK_GAP: Duration = Duration::from_millis(90);
 /// After a seek the slider shows where it was put, until the player has caught up.
@@ -33,19 +30,23 @@ const KEY_SEEK: i64 = 5;
 const VOLUME_STEP: f32 = 0.05;
 const COVER_EDGE: u32 = 640;
 
-/// Full lives in the quick view and follows the cursor. Mini is a bar under a file list and plays on its own.
+/// Full fills the quick view pane and Mini is a bar under a file list. Neither follows the cursor:
+/// a song changes on Enter, on next and previous, or when the list ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::ui::app) enum Mode {
     Full,
     Mini,
 }
 
-/// What plays and in which order: the music files of the folder where the song started.
+/// What plays and in which order: the music files of the folder where the song started, or the songs
+/// that were sent to the player.
 struct Session {
     list: Playlist,
     folder: PathBuf,
     source: PaneId,
     mode: Mode,
+    /// The songs were picked, so the list is not made again from what the folder shows.
+    explicit: bool,
 }
 
 pub(in crate::ui::app) struct AudioState {
@@ -68,7 +69,7 @@ pub(in crate::ui::app) struct AudioState {
     seek_pending: Option<Duration>,
     seek_sent: Instant,
     scrub: Option<(Duration, Instant)>,
-    /// The mini player has the keyboard.
+    /// The player has the keyboard, instead of the file list.
     focus: bool,
     /// Expand is waiting for the folder to show the track.
     expanding: Option<Instant>,
@@ -127,22 +128,12 @@ fn is_modifier(key: Key) -> bool {
 }
 
 impl App {
-    /// The audio file the quick view is on, if it is on one.
-    fn audio_wanted(&self) -> Option<PathBuf> {
-        if !self.state.quick_view || self.shell.editing.get() || self.state.panel_terminal {
-            return None;
-        }
-        let path = self.file_under_cursor()?;
-        let name = path.file_name()?.to_str()?;
-        audio::can_try(name).then_some(path)
-    }
-
     fn audio_mode(&self) -> Option<Mode> {
         self.audio.session.as_ref().map(|session| session.mode)
     }
 
-    /// Whether the player pane is up and owns Space, the arrows and the volume keys.
-    pub(in crate::ui::app) fn audio_keys(&self) -> bool {
+    /// The big player fills the quick view pane.
+    pub(in crate::ui::app) fn audio_full(&self) -> bool {
         self.audio_mode() == Some(Mode::Full)
     }
 
@@ -160,8 +151,9 @@ impl App {
         self.audio.session.is_some()
     }
 
+    /// The player has the keyboard: Space, the arrows and the volume keys are its own.
     pub(in crate::ui::app) fn audio_focused(&self) -> bool {
-        self.audio.focus && self.audio_is_mini()
+        self.audio.focus && self.audio_alive()
     }
 
     /// The music files of a pane in the order the pane shows them.
@@ -198,52 +190,22 @@ impl App {
         true
     }
 
-    /// The cursor goes with the music, if the pane where it started still shows that folder.
+    /// The cursor goes with the music, if the pane where it started shows the folder the song is in.
     fn audio_follow(&mut self, path: &Path) {
         let Some(session) = &self.audio.session else { return };
-        let (id, folder) = (session.source, session.folder.clone());
-        if self.state.tab(id).path == folder {
+        let id = session.source;
+        if path.parent() == Some(self.state.tab(id).path.as_path()) {
             self.audio_point(id, path);
         }
     }
 
-    /// Follows the cursor: a new audio file starts after a moment, anything else stops the music.
+    /// Keeps the big player and the quick view together: closing the quick view, or turning the pane
+    /// into an editor or a shell, stops the big player. The cursor does not steer it.
     pub(in crate::ui::app) fn reconcile_audio(&mut self, sender: &ComponentSender<Self>) {
         self.settle_expand(sender);
-        // The small player plays on its own. The cursor and the quick view do not steer it.
-        if self.audio_is_mini() {
-            return;
-        }
-        let want = self.audio_wanted();
-        if want == self.audio.target {
-            return;
-        }
-        let Some(path) = want else {
+        if self.audio_full() && (!self.state.quick_view || self.shell.editing.get() || self.state.panel_terminal) {
             self.end_session();
-            return;
-        };
-        self.join_session(&path);
-        self.begin_track(Some(path));
-        self.audio.skipping = false;
-        let generation = self.audio.generation;
-        let tx = sender.input_sender().clone();
-        gtk::glib::timeout_add_local_once(START_DELAY, move || tx.emit(Msg::AudioStart(generation)));
-    }
-
-    /// The track the cursor reached belongs to the playing folder, or starts a list of its own.
-    fn join_session(&mut self, path: &Path) {
-        let id = self.state.active;
-        let folder = self.state.tab(id).path.clone();
-        let same = self.audio.session.as_ref().is_some_and(|session| session.source == id && session.folder == folder);
-        if same
-            && let Some(session) = self.audio.session.as_mut()
-            && session.list.set_current(path)
-        {
-            session.mode = Mode::Full;
-            return;
         }
-        let list = Playlist::new(self.audio_siblings(id), path, self.cfg.player_shuffle, self.cfg.repeat(), seed());
-        self.audio.session = Some(Session { list, folder, source: id, mode: Mode::Full });
     }
 
     /// A new track begins: what belonged to the old one goes. A cover from the folder stays for its neighbours.
@@ -284,13 +246,10 @@ impl App {
         }
     }
 
-    /// Starts the wanted file at once, without the pause that scrolling gets.
+    /// Starts the track that is up next.
     pub(in crate::ui::app) fn start_audio_now(&mut self, sender: &ComponentSender<Self>) {
-        self.start_audio(self.audio.generation, sender);
-    }
-
-    pub(in crate::ui::app) fn start_audio(&mut self, generation: u64, sender: &ComponentSender<Self>) {
-        if generation != self.audio.generation || self.audio.started {
+        let generation = self.audio.generation;
+        if self.audio.started {
             return;
         }
         let Some(path) = self.audio.target.clone() else { return };
@@ -324,7 +283,7 @@ impl App {
     /// The big player plays what the list shows. If a filter or hidden files changed that, the playlist is made again.
     fn refresh_playlist(&mut self) {
         let Some(session) = &self.audio.session else { return };
-        if session.mode != Mode::Full || self.state.tab(session.source).path != session.folder {
+        if session.mode != Mode::Full || session.explicit || self.state.tab(session.source).path != session.folder {
             return;
         }
         let Some(track) = self.audio.target.clone() else { return };
@@ -361,8 +320,36 @@ impl App {
         }
     }
 
-    /// The song under the cursor plays in the small player under this panel, with the folder as its playlist.
-    /// A song that already plays there starts again if `restart` is set.
+    /// Which player a song goes to: the one that is open. With none open, the big one if the quick view
+    /// is on, and otherwise the small one.
+    fn audio_target_mode(&self) -> Mode {
+        match self.audio_mode() {
+            Some(mode) => mode,
+            None if self.state.quick_view && !self.shell.editing.get() && !self.state.panel_terminal => Mode::Full,
+            None => Mode::Mini,
+        }
+    }
+
+    /// A new session on `list` begins with `track`, in the player that is open (see `audio_target_mode`).
+    fn audio_begin_session(&mut self, list: Playlist, explicit: bool, track: PathBuf, sender: &ComponentSender<Self>) {
+        let mode = self.audio_target_mode();
+        let id = self.state.active;
+        let folder = self.state.tab(id).path.clone();
+        self.audio.session = Some(Session { list, folder, source: id, mode, explicit });
+        self.audio.focus = false;
+        self.audio.expanding = None;
+        self.audio.failures = 0;
+        self.begin_track(Some(track));
+        self.audio.skipping = false;
+        if mode == Mode::Full {
+            // The pane shows the player whatever the cursor is on.
+            self.note_preview_target();
+        }
+        self.start_audio_now(sender);
+    }
+
+    /// The song under the cursor plays, with the folder as its playlist. A song that already plays
+    /// there starts again if `restart` is set.
     fn audio_play_here(&mut self, restart: bool, sender: &ComponentSender<Self>) -> bool {
         if !self.cursor_is_audio() {
             return false;
@@ -382,14 +369,69 @@ impl App {
             return true;
         }
         let list = Playlist::new(self.audio_siblings(id), &path, self.cfg.player_shuffle, self.cfg.repeat(), seed());
-        self.audio.session = Some(Session { list, folder, source: id, mode: Mode::Mini });
-        self.audio.focus = false;
-        self.audio.expanding = None;
-        self.audio.failures = 0;
-        self.begin_track(Some(path));
-        self.audio.skipping = false;
-        self.start_audio_now(sender);
+        self.audio_begin_session(list, false, path, sender);
         true
+    }
+
+    /// The songs to send to the player: the marked ones in the order the list shows them, or the song
+    /// under the cursor. `row_only` is a right-click on a row that is not marked: marks are left alone, and
+    /// only that row goes.
+    fn audio_picked(&self, row_only: bool) -> Vec<PathBuf> {
+        let id = self.state.active;
+        let tab = self.state.tab(id);
+        if !row_only && !tab.marked.is_empty() {
+            let marked: Vec<PathBuf> = self
+                .state
+                .visible(id)
+                .into_iter()
+                .filter_map(|at| tab.entries.get(at))
+                .filter(|entry| !entry.is_dir() && audio::can_try(&entry.name))
+                .map(|entry| listing::entry_path(&tab.path, entry))
+                .filter(|path| tab.marked.contains(path))
+                .collect();
+            if !marked.is_empty() {
+                return marked;
+            }
+        }
+        self.file_under_cursor().filter(|path| path.file_name().and_then(|name| name.to_str()).is_some_and(audio::can_try)).into_iter().collect()
+    }
+
+    /// Send and replace music in player: these songs become the playlist, and the first one plays.
+    pub(in crate::ui::app) fn audio_send(&mut self, row_only: bool, sender: &ComponentSender<Self>) {
+        let songs = self.audio_picked(row_only);
+        let Some(first) = songs.first().cloned() else {
+            self.status = "No music to send to the player".into();
+            return;
+        };
+        let count = songs.len();
+        let list = Playlist::new(songs, &first, self.cfg.player_shuffle, self.cfg.repeat(), seed());
+        self.audio_begin_session(list, true, first, sender);
+        self.status = if count == 1 { "Sent 1 song to the player".into() } else { format!("Sent {count} songs to the player") };
+    }
+
+    /// Add to current playlist: the songs go last in the list. With nothing playing they start a list.
+    pub(in crate::ui::app) fn audio_add(&mut self, row_only: bool, sender: &ComponentSender<Self>) {
+        let songs = self.audio_picked(row_only);
+        if songs.is_empty() {
+            self.status = "No music to add to the playlist".into();
+            return;
+        }
+        let Some(session) = self.audio.session.as_mut() else {
+            self.audio_send(row_only, sender);
+            return;
+        };
+        let added = session.list.append(songs);
+        if added == 0 {
+            self.status = "Already in the playlist".into();
+            return;
+        }
+        // The list is no longer what the folder shows.
+        session.explicit = true;
+        self.status = if added == 1 { "Added 1 song to the playlist".into() } else { format!("Added {added} songs to the playlist") };
+        // A playlist that had run out goes on with what was added.
+        if self.audio_player_state() == Some(State::Ended) {
+            self.audio_advance(sender);
+        }
     }
 
     /// Ctrl+Q on a song while the small player is up: the song plays in it, and no quick view opens.
@@ -400,17 +442,15 @@ impl App {
         self.audio_play_here(false, sender)
     }
 
-    /// Enter on a song. The big player already follows the cursor, so there it only makes sure the song plays.
+    /// Ctrl+Q has opened the quick view on a song and nothing plays yet: the big player starts with it.
+    pub(in crate::ui::app) fn audio_quick_start(&mut self, sender: &ComponentSender<Self>) {
+        if self.state.quick_view && !self.audio_alive() {
+            self.audio_play_here(false, sender);
+        }
+    }
+
+    /// Enter on a song plays it in the open player. Ctrl+Enter is the way to the external one.
     pub(in crate::ui::app) fn audio_enter(&mut self, sender: &ComponentSender<Self>) -> bool {
-        if !self.cursor_is_audio() {
-            return false;
-        }
-        if self.audio_keys() {
-            if self.audio_player_state() != Some(State::Playing) {
-                self.audio_toggle(sender);
-            }
-            return true;
-        }
         self.audio_play_here(true, sender)
     }
 
@@ -549,11 +589,6 @@ impl App {
         self.audio.volume
     }
 
-    /// How far into the track the player is.
-    pub(in crate::ui::app) fn audio_position(&self) -> Duration {
-        self.audio.player.as_ref().map_or(Duration::ZERO, Player::position)
-    }
-
     /// How many tracks the playlist holds.
     pub(in crate::ui::app) fn audio_list_len(&self) -> usize {
         self.audio.session.as_ref().map_or(0, |session| session.list.len())
@@ -564,13 +599,38 @@ impl App {
         self.audio.target.as_deref()
     }
 
+    /// What the big player shows when nothing plays: the song under the cursor, waiting for Enter.
+    fn audio_idle_look(&self) -> Look {
+        let name = self.file_under_cursor().and_then(|path| path.file_stem().map(|stem| stem.to_string_lossy().into_owned()));
+        Look {
+            title: name.unwrap_or_default(),
+            detail: "Press Enter to play".into(),
+            volume: self.audio.volume,
+            muted: self.audio.muted,
+            shuffle: self.cfg.player_shuffle,
+            repeat: self.cfg.repeat(),
+            visual_on: self.cfg.player_visual_on,
+            visual: self.cfg.visual_style(),
+            ..Look::default()
+        }
+    }
+
     /// Paints the player where it lives. Cheap when nothing changed.
     pub(in crate::ui::app) fn paint_audio(&self) {
-        let Some(session) = &self.audio.session else { return };
+        let image = self.audio.cover.as_ref().map(|(w, h, p)| (*w, *h, p.as_slice()));
+        let Some(session) = &self.audio.session else {
+            // No music yet, but the quick view is on a song: the player waits for Enter.
+            if matches!(self.preview.body, PreviewBody::Audio) {
+                let view = &self.shell.panes[self.state.active.other().index()].player;
+                view.set_cover(u64::MAX, None);
+                view.set_focused(false);
+                view.paint(&self.audio_idle_look());
+            }
+            return;
+        };
         if self.audio.target.is_none() {
             return;
         }
-        let image = self.audio.cover.as_ref().map(|(w, h, p)| (*w, *h, p.as_slice()));
         match session.mode {
             Mode::Full => {
                 for pane in &self.shell.panes {
@@ -581,6 +641,7 @@ impl App {
                 }
                 let view = &self.shell.panes[self.state.active.other().index()].player;
                 view.set_cover(self.audio.cover_rev, image);
+                view.set_focused(self.audio.focus);
                 view.paint(&self.audio_look());
             }
             Mode::Mini => {
@@ -750,6 +811,7 @@ impl App {
             return;
         }
         session.mode = Mode::Mini;
+        self.audio.focus = false;
         if self.state.quick_view {
             self.toggle_quick_view(sender);
         }
@@ -764,7 +826,13 @@ impl App {
         if session.mode != Mode::Mini {
             return;
         }
-        let (source, folder) = (session.source, session.folder.clone());
+        if self.shell.editing.get() {
+            self.status = "Close the editor first".into();
+            return;
+        }
+        // A picked playlist can hold songs from several folders, so the song says which folder to show.
+        let source = session.source;
+        let folder = track.parent().map_or_else(|| session.folder.clone(), Path::to_path_buf);
         let Some(name) = track.file_name().map(|name| name.to_string_lossy().into_owned()) else { return };
         self.audio.focus = false;
         self.audio.expanding = Some(Instant::now());
@@ -793,7 +861,7 @@ impl App {
     /// Finishes an expand once the cursor stands on the track.
     fn settle_expand(&mut self, sender: &ComponentSender<Self>) {
         let Some(since) = self.audio.expanding else { return };
-        if since.elapsed() > EXPAND_WAIT {
+        if since.elapsed() > EXPAND_WAIT || self.shell.editing.get() {
             self.audio.expanding = None;
             return;
         }
@@ -849,7 +917,8 @@ impl App {
         self.audio.focus = false;
     }
 
-    /// Tab goes left panel, right panel, small player, and round again.
+    /// Tab goes left panel, right panel, player, and round again. With the quick view up there is one
+    /// panel, so it goes panel, player, panel.
     pub(in crate::ui::app) fn audio_tab(&mut self, back: bool) {
         if self.audio.focus {
             self.audio.focus = false;

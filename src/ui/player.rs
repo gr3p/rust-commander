@@ -51,8 +51,8 @@ pub struct Transport {
 }
 
 impl Transport {
-    pub fn new(sender: &relm4::Sender<Msg>, side: i32, play_side: i32) -> Self {
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    pub fn new(sender: &relm4::Sender<Msg>, side: i32, play_side: i32, gap: i32) -> Self {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, gap);
         row.set_halign(gtk::Align::Center);
         let shuffle = IconButton::new(Icon::Shuffle, side, "media-aux");
         shuffle.set_tooltip("Shuffle (S)");
@@ -117,24 +117,25 @@ pub fn scale(max: f64) -> gtk::Scale {
     scale
 }
 
-/// The progress bar with elapsed and total time around it.
-pub fn progress_row(sender: &relm4::Sender<Msg>) -> (gtk::Box, gtk::Label, gtk::Scale, gtk::Label) {
+/// The progress bar with elapsed and total time around it. `chars` is the room for each time and
+/// `line` the least width of the bar.
+pub fn progress_row(sender: &relm4::Sender<Msg>, chars: i32, line: i32) -> (gtk::Box, gtk::Label, gtk::Scale, gtk::Label) {
     let elapsed = label("audio-time");
     let total = label("audio-time");
     for time in [&elapsed, &total] {
-        time.set_width_chars(5);
+        time.set_width_chars(chars);
         time.set_wrap(false);
     }
     elapsed.set_xalign(1.0);
     total.set_xalign(0.0);
     let seek = scale(1000.0);
-    seek.set_size_request(40, -1);
+    seek.set_size_request(line, -1);
     let tx = sender.clone();
     seek.connect_change_value(move |_, _, value| {
         tx.emit(Msg::AudioSeek((value / 1000.0).clamp(0.0, 1.0)));
         gtk::glib::Propagation::Proceed
     });
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, if chars < 5 { 4 } else { 8 });
     row.append(&elapsed);
     row.append(&seek);
     row.append(&total);
@@ -290,8 +291,8 @@ impl PlayerView {
             meta.append(widget);
         }
 
-        let (progress, elapsed, seek, total) = progress_row(sender);
-        let transport = Transport::new(sender, 22, 30);
+        let (progress, elapsed, seek, total) = progress_row(sender, 5, 40);
+        let transport = Transport::new(sender, 22, 30, 6);
         let (volume_box, speaker, volume) = volume_row(sender, 120);
         let controls = gtk::CenterBox::new();
         // The spacer balances the volume, so the buttons sit in the middle of the row.
@@ -318,6 +319,7 @@ impl PlayerView {
         content.append(&hint);
 
         let root = gtk::Overlay::new();
+        root.add_css_class("audio-big");
         root.set_child(Some(&visual.area));
         root.add_overlay(&content);
         root.set_hexpand(true);
@@ -347,6 +349,17 @@ impl PlayerView {
             visual_on,
             shown: RefCell::new(Look { volume: -1.0, ..Look::default() }),
             cover_rev: Cell::new(0),
+        }
+    }
+
+    /// The keyboard drives the player: it is outlined in the accent color.
+    pub fn set_focused(&self, focused: bool) {
+        if self.root.has_css_class("focused") != focused {
+            if focused {
+                self.root.add_css_class("focused");
+            } else {
+                self.root.remove_css_class("focused");
+            }
         }
     }
 

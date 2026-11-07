@@ -103,6 +103,26 @@ impl Playlist {
         self.rebuild(at);
     }
 
+    /// Adds songs to the end of the list. Ones already in the list are left out. Returns how many were added.
+    /// With shuffle on, they are mixed in with what has not played yet.
+    pub fn append(&mut self, paths: Vec<PathBuf>) -> usize {
+        let before = self.items.len();
+        for path in paths {
+            if !self.items.contains(&path) {
+                self.items.push(path);
+            }
+        }
+        let added = self.items.len() - before;
+        self.order.extend(before..self.items.len());
+        if self.shuffle && added > 0 {
+            let from = (self.pos + 1).min(self.order.len());
+            let mut tail = self.order.split_off(from);
+            self.shuffle_slice(&mut tail);
+            self.order.extend(tail);
+        }
+        added
+    }
+
     /// The listener moved to `path`. False if it is not in the list.
     pub fn set_current(&mut self, path: &Path) -> bool {
         let Some(at) = self.items.iter().position(|item| item == path) else { return false };
@@ -349,6 +369,46 @@ mod tests {
         assert!(s.set_current(Path::new("/music/03.mp3")));
         assert_eq!(name(s.current()), "03.mp3");
         assert!(s.next(true).is_some() || s.len() == 1);
+    }
+
+    #[test]
+    fn added_songs_play_after_the_ones_in_the_list() {
+        let mut p = list(2, 0, false, Repeat::Off, 1);
+        let more = vec![PathBuf::from("/other/a.mp3"), PathBuf::from("/music/02.mp3"), PathBuf::from("/other/b.mp3"), PathBuf::from("/other/a.mp3")];
+        // 02.mp3 is already there and a.mp3 is given twice.
+        assert_eq!(p.append(more), 2);
+        assert_eq!(p.len(), 4);
+        assert_eq!(name(p.current()), "01.mp3");
+        let played: Vec<String> = std::iter::from_fn(|| p.next(true).map(|song| name(Some(song)))).collect();
+        assert_eq!(played, ["02.mp3", "a.mp3", "b.mp3"]);
+        assert_eq!(p.append(vec![]), 0);
+    }
+
+    #[test]
+    fn songs_added_after_the_end_carry_on_from_it() {
+        let mut p = list(2, 1, false, Repeat::Off, 1);
+        assert_eq!(name(p.next(true)), "-");
+        assert_eq!(p.append(vec![PathBuf::from("/other/c.mp3")]), 1);
+        assert_eq!(name(p.current()), "02.mp3");
+        assert_eq!(name(p.next(false)), "c.mp3");
+    }
+
+    #[test]
+    fn added_songs_are_shuffled_in_without_touching_what_has_played() {
+        let mut p = list(6, 2, true, Repeat::Off, 7);
+        let head = [name(p.current()), name(p.next(false)), name(p.next(false))];
+        let extra: Vec<PathBuf> = (1..=5).map(|i| PathBuf::from(format!("/other/x{i}.mp3"))).collect();
+        assert_eq!(p.append(extra), 5);
+        let mut rest: Vec<String> = std::iter::from_fn(|| p.next(true).map(|song| name(Some(song)))).collect();
+        // Everything plays exactly once: the 6 songs and the 5 new ones, and the first three stay where they were.
+        let mut all: Vec<String> = head.to_vec();
+        all.append(&mut rest);
+        assert_eq!(all.len(), 11);
+        let mut sorted = all.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 11);
+        assert_eq!(&all[..3], &head);
     }
 
     #[test]

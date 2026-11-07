@@ -123,7 +123,6 @@ pub enum Msg {
     SumKind(u8),
     EncodePick { decode: bool, codec: u8 },
     AudioEvent(rust_commander::audio::Event),
-    AudioStart(u64),
     AudioCover { generation: u64, image: Option<(u32, u32, Vec<u8>)>, key: Option<std::path::PathBuf> },
     AudioSeek(f64),
     AudioVolume(f64),

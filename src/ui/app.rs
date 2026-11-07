@@ -529,7 +529,6 @@ impl App {
                 self.tick_audio();
             }
             Msg::AudioEvent(event) => self.on_audio_event(event, sender),
-            Msg::AudioStart(generation) => self.start_audio(generation, sender),
             Msg::AudioCover { generation, image, key } => self.on_audio_cover(generation, image, key),
             Msg::AudioSeek(fraction) => self.audio_seek_to(fraction),
             Msg::AudioVolume(volume) => self.audio_set_volume(volume as f32),
@@ -848,6 +847,8 @@ impl App {
                 }
                 Key::m | Key::M => self.audio_jump(sender),
                 Key::Return | Key::KP_Enter => self.audio_open_external(),
+                Key::p | Key::P if shift => self.audio_add(false, sender),
+                Key::p | Key::P => self.audio_send(false, sender),
                 Key::l | Key::L => self.focus_path(),
                 Key::y | Key::Y => self.toggle_syntax(),
                 Key::t | Key::T => self.open_new_tab(sender),
@@ -879,9 +880,6 @@ impl App {
                     self.touch(id);
                     self.note_preview_target();
                 }
-                // The big player is up: these seek, as they do in the small player.
-                Key::Left | Key::KP_Left if self.audio_keys() => self.audio_key_seek(false, shift),
-                Key::Right | Key::KP_Right if self.audio_keys() => self.audio_key_seek(true, shift),
                 Key::Left | Key::KP_Left if self.state.active == PaneId::Right => self.show_active_on_other(sender),
                 Key::Right | Key::KP_Right if self.state.active == PaneId::Left => self.show_active_on_other(sender),
                 _ => {}
@@ -920,7 +918,7 @@ impl App {
             Key::F9 if shift => self.ask_checksum(sender),
             Key::F9 => self.toggle_panel_terminal(sender),
             Key::ISO_Left_Tab | Key::Tab if self.shell.editing.get() => {}
-            Key::ISO_Left_Tab | Key::Tab if self.audio_is_mini() && !self.state.panel_terminal => {
+            Key::ISO_Left_Tab | Key::Tab if self.audio_alive() && !self.state.panel_terminal => {
                 self.audio_tab(key == Key::ISO_Left_Tab || shift);
             }
             Key::ISO_Left_Tab | Key::Tab if self.state.quick_view => {}
@@ -936,7 +934,6 @@ impl App {
                 self.paint_mark(self.state.active, index);
                 self.focus_list();
             }
-            Key::space | Key::KP_Space | Key::AudioPlay | Key::AudioPause if self.audio_keys() => self.audio_toggle(sender),
             Key::AudioPlay | Key::AudioPause if self.audio_alive() => self.audio_toggle(sender),
             Key::AudioStop if self.audio_alive() => self.audio_stop(),
             Key::AudioNext if self.audio_alive() => self.audio_next(sender),
@@ -951,13 +948,6 @@ impl App {
             Key::Return => self.activate_cursor(sender),
             Key::Left | Key::KP_Left if self.thumbs_shown() => self.move_list(-1),
             Key::Right | Key::KP_Right if self.thumbs_shown() => self.move_list(1),
-            Key::plus | Key::KP_Add | Key::equal if self.audio_keys() => self.audio_volume_step(0.05),
-            Key::minus | Key::KP_Subtract if self.audio_keys() => self.audio_volume_step(-0.05),
-            Key::m | Key::M if self.audio_keys() => self.audio_toggle_mute(),
-            Key::n | Key::N if self.audio_keys() => self.audio_next(sender),
-            Key::p | Key::P if self.audio_keys() => self.audio_prev(sender),
-            Key::r | Key::R if self.audio_keys() => self.audio_cycle_repeat(),
-            Key::s | Key::S if self.audio_keys() => self.audio_toggle_shuffle(),
             Key::Left | Key::KP_Left if self.state.quick_view => self.step_quick_image(-1),
             Key::Right | Key::KP_Right if self.state.quick_view => self.step_quick_image(1),
             Key::Up | Key::KP_Up => self.move_list(-self.row_step(false)),
@@ -1645,94 +1635,13 @@ impl App {
         SYNCING.store(false, Ordering::Relaxed);
     }
 
-    // The music player on a real file, through the real engine and ALSA's null device.
+    // The music player on real files, through the real engine and ALSA's null device.
     fn smoke_music(&mut self, errors: &mut Vec<String>, sender: &ComponentSender<Self>) {
         if !rust_commander::audio::alsa_available() {
             println!("SMOKE_MUSIC skipped: no ALSA library");
             return;
         }
-        use rust_commander::audio::State;
-        let wait = |cond: &mut dyn FnMut() -> bool| {
-            let end = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < end {
-                if cond() {
-                    return true;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            false
-        };
-        self.reload_pane(PaneId::Left);
-        if !self.point_at(PaneId::Left, "tone.wav") {
-            errors.push("music: missing tone.wav".into());
-            return;
-        }
-        self.state.quick_view = true;
-        self.note_preview_target();
-        self.kick_preview(sender);
-        self.reconcile_audio(sender);
-        self.sync();
-        if self.shell.panes[1].stack.visible_child_name().as_deref() != Some("preview")
-            || self.shell.panes[1].preview_kind.visible_child_name().as_deref() != Some("player")
-        {
-            errors.push("music: player not shown".into());
-        }
-        if self.shell.panes[1].player.looks().title != "tone" {
-            errors.push(format!("music: title {:?}", self.shell.panes[1].player.looks().title));
-        }
-        if !self.audio_keys() {
-            errors.push("music: keys not claimed".into());
-        }
-        // The start is delayed while scrolling. Starting now plays the track through to its end.
-        self.start_audio_now(sender);
-        if !wait(&mut || self.audio_player_state() == Some(State::Ended)) {
-            errors.push(format!("music: did not play to the end, {:?}", self.audio_player_state()));
-        }
-        // Space on a finished track plays it again.
-        self.on_key(Key::space, ModifierType::empty(), sender);
-        let again = wait(&mut || self.audio_player_state() == Some(State::Playing) || self.audio_player_state() == Some(State::Ended));
-        if !again || !wait(&mut || self.audio_player_state() == Some(State::Ended)) {
-            errors.push("music: space did not replay".into());
-        }
-        // Arrow keys and volume keys belong to the player while it is up.
-        let volume = self.audio_volume();
-        self.on_key(Key::minus, ModifierType::empty(), sender);
-        if self.audio_volume() >= volume {
-            errors.push("music: volume key".into());
-        }
-        let cursor = self.state.tab(PaneId::Left).cursor;
-        self.on_key(Key::Right, ModifierType::CONTROL_MASK, sender);
-        if self.state.tab(PaneId::Left).cursor != cursor {
-            errors.push("music: ctrl+right moved the cursor".into());
-        }
-        // Space does not mark the file while the player has it.
-        if !self.state.tab(PaneId::Left).marked.is_empty() {
-            errors.push("music: space marked the file".into());
-        }
-        self.smoke_playlist(errors, sender, &wait);
-        // A file that is not music takes the pane back and silences the player.
-        if !self.point_at(PaneId::Left, "note.txt") {
-            errors.push("music: missing note.txt".into());
-        }
-        self.note_preview_target();
-        self.kick_preview(sender);
-        self.reconcile_audio(sender);
-        self.sync();
-        if self.audio_keys() {
-            errors.push("music: keys kept after leaving".into());
-        }
-        if !wait(&mut || self.audio_player_state() == Some(State::Idle)) {
-            errors.push("music: not stopped after leaving".into());
-        }
-        self.on_key(Key::space, ModifierType::empty(), sender);
-        if self.state.tab(PaneId::Left).marked.is_empty() {
-            errors.push("music: space no longer marks".into());
-        }
-        self.state.tab_mut(PaneId::Left).marked.clear();
-        self.state.quick_view = false;
-        self.note_preview_target();
-        self.reconcile_audio(sender);
-        self.sync();
+        self.smoke_player(errors, sender);
         println!("SMOKE_MUSIC ran");
     }
 
