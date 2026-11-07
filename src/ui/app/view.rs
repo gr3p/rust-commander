@@ -526,6 +526,10 @@ impl App {
     }
 
     pub(in crate::ui::app) fn toggle_quick_view(&mut self, sender: &ComponentSender<Self>) {
+        // The small player is up and the cursor is on a song: the song plays there instead of opening the quick view.
+        if self.audio_quick_over_mini(sender) {
+            return;
+        }
         if self.shell.editing.get() && !self.leave_quick_edit(sender) {
             return;
         }

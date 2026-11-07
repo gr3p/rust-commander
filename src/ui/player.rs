@@ -8,6 +8,7 @@ use rust_commander::audio::{Repeat, Scope, VisualStyle};
 
 use super::media::{Icon, IconButton, IconMenu};
 use super::msg::Msg;
+use super::poster::Poster;
 use super::visual::Visualizer;
 
 /// Everything the player shows, so painting is one call and a repeat costs nothing.
@@ -274,11 +275,11 @@ impl PlayerView {
         note.set_hexpand(true);
         note.set_vexpand(true);
         let art = gtk::Stack::new();
-        art.set_vexpand(true);
-        art.set_hexpand(true);
         art.add_named(&cover, Some("cover"));
         art.add_named(&note, Some("note"));
         art.set_visible_child_name("note");
+        // The cover keeps to a size the window sets, however much room the pane has.
+        let poster = Poster::new(&art);
 
         let title = label("audio-title");
         let artist = label("audio-artist");
@@ -302,14 +303,14 @@ impl PlayerView {
 
         let message = label("audio-message");
         let hint = label("audio-hint");
-        hint.set_text("Space pause  \u{b7}  \u{2190}/\u{2192} seek  \u{b7}  N/P next, previous  \u{b7}  +/\u{2212} volume  \u{b7}  M mute  \u{b7}  Ctrl+Enter Open In External Player");
+        hint.set_text("Space pause  \u{b7}  Ctrl+\u{2190}/\u{2192} seek  \u{b7}  N/P next, previous  \u{b7}  +/\u{2212} volume  \u{b7}  M mute  \u{b7}  Ctrl+Enter Open In External Player");
 
         let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
         content.add_css_class("audio-player");
         content.set_hexpand(true);
         content.set_vexpand(true);
         content.append(&corner);
-        content.append(&art);
+        content.append(&poster);
         content.append(&meta);
         content.append(&progress);
         content.append(&controls);

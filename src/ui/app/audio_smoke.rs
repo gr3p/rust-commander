@@ -183,5 +183,97 @@ impl App {
         // The filter box was shown by the test. The checks after this one start from a hidden one.
         self.shell.panes[0].filter.set_visible(false);
         self.sync();
+
+        self.smoke_mini_play(errors, sender, wait);
+    }
+
+    /// Enter and Ctrl+Q play songs in the small player, and Ctrl+arrows seek in both players.
+    fn smoke_mini_play(&mut self, errors: &mut Vec<String>, sender: &ComponentSender<Self>, wait: Wait) {
+        let press = |app: &mut Self, key: Key| app.on_key(key, ModifierType::empty(), sender);
+        let ctrl = |app: &mut Self, key: Key| app.on_key(key, ModifierType::CONTROL_MASK, sender);
+
+        // Enter in the big player keeps the song going. It does not open another program.
+        press(self, Key::Return);
+        if !self.audio_keys() || self.smoke_track() != "tone3.wav" {
+            errors.push(format!("music: enter in the big player changed the track to {}", self.smoke_track()));
+        }
+        if !wait(&mut || self.audio_player_state() == Some(State::Playing)) {
+            errors.push("music: enter in the big player did not play".into());
+        }
+        // Ctrl+arrows belong to the big player. With the left panel active, Ctrl+Right would have mirrored it.
+        let right_before = self.state.tab(PaneId::Right).path.clone();
+        let (at, left_cursor) = (self.audio_position(), self.state.tab(PaneId::Left).cursor);
+        ctrl(self, Key::Right);
+        if self.state.tab(PaneId::Right).path != right_before || self.state.tab(PaneId::Left).cursor != left_cursor {
+            errors.push("music: ctrl+right went to the panels while the big player was up".into());
+        }
+        // Plain arrows leave the song alone.
+        press(self, Key::Left);
+        if self.audio_position() + std::time::Duration::from_secs(1) < at {
+            errors.push("music: a plain arrow seeked".into());
+        }
+
+        // A song in another folder, in the other panel.
+        let sub = self.state.tab(PaneId::Left).path.join("sub");
+        self.audio_minimize(sender);
+        self.state.navigate(PaneId::Right, sub, true);
+        self.reload_pane(PaneId::Right);
+        self.sync();
+        self.point_at(PaneId::Right, "other.wav");
+        self.reconcile_audio(sender);
+        ctrl(self, Key::q);
+        self.reconcile_audio(sender);
+        self.sync();
+        self.paint_audio();
+        if self.state.quick_view || !self.audio_is_mini() || self.smoke_track() != "other.wav" {
+            errors.push(format!("music: ctrl+q over the small player gave quick view {} and track {}", self.state.quick_view, self.smoke_track()));
+        }
+        if self.shell.panes[0].mini.root.is_visible() || !self.shell.panes[1].mini.root.is_visible() {
+            errors.push("music: the small player did not move under the right list".into());
+        }
+        // Ctrl+Q on the song that already plays changes nothing.
+        let generation = self.audio_track().map(ToOwned::to_owned);
+        ctrl(self, Key::q);
+        if self.state.quick_view || self.audio_track().map(ToOwned::to_owned) != generation {
+            errors.push("music: ctrl+q on the playing song did something".into());
+        }
+        // Enter on another song of that folder plays it in the small player.
+        self.point_at(PaneId::Right, "other2.wav");
+        press(self, Key::Return);
+        self.reconcile_audio(sender);
+        if self.smoke_track() != "other2.wav" || !self.audio_is_mini() || self.state.quick_view {
+            errors.push(format!("music: enter gave track {}, mini {}, quick view {}", self.smoke_track(), self.audio_is_mini(), self.state.quick_view));
+        }
+        // Ctrl+Q on something that is not music is the quick view as ever, and the music plays on.
+        self.point_at(PaneId::Right, "b.txt");
+        ctrl(self, Key::q);
+        if !self.state.quick_view || !self.audio_is_mini() || self.smoke_track() != "other2.wav" {
+            errors.push("music: ctrl+q on a text file did not open the quick view next to the small player".into());
+        }
+        ctrl(self, Key::q);
+        if self.state.quick_view {
+            errors.push("music: ctrl+q did not close the quick view".into());
+        }
+
+        // The small player takes Ctrl+arrows too, and keeps the keys.
+        ctrl(self, Key::m);
+        if !self.audio_focused() {
+            errors.push("music: ctrl+m did not reach the small player".into());
+        }
+        let right_after = self.state.tab(PaneId::Right).path.clone();
+        let cursor = self.state.tab(PaneId::Right).cursor;
+        ctrl(self, Key::Right);
+        press(self, Key::Right);
+        if !self.audio_focused() || self.state.tab(PaneId::Right).path != right_after || self.state.tab(PaneId::Right).cursor != cursor {
+            errors.push("music: ctrl+right left the small player".into());
+        }
+        press(self, Key::Escape);
+
+        // Back to the start: the song in the folder of the left panel stops, and the right panel goes home.
+        self.audio_close();
+        self.state.navigate(PaneId::Right, right_before, true);
+        self.reload_pane(PaneId::Right);
+        self.state.active = PaneId::Left;
+        self.sync();
     }
 }

@@ -361,6 +361,59 @@ impl App {
         }
     }
 
+    /// The song under the cursor plays in the small player under this panel, with the folder as its playlist.
+    /// A song that already plays there starts again if `restart` is set.
+    fn audio_play_here(&mut self, restart: bool, sender: &ComponentSender<Self>) -> bool {
+        if !self.cursor_is_audio() {
+            return false;
+        }
+        let Some(path) = self.file_under_cursor() else { return false };
+        let id = self.state.active;
+        let folder = self.state.tab(id).path.clone();
+        let same = self.audio.target.as_deref() == Some(path.as_path())
+            && self.audio.session.as_ref().is_some_and(|session| session.source == id && session.folder == folder);
+        if same {
+            if restart {
+                match self.audio_player_state() {
+                    Some(State::Playing) => self.audio_restart(),
+                    _ => self.audio_toggle(sender),
+                }
+            }
+            return true;
+        }
+        let list = Playlist::new(self.audio_siblings(id), &path, self.cfg.player_shuffle, self.cfg.repeat(), seed());
+        self.audio.session = Some(Session { list, folder, source: id, mode: Mode::Mini });
+        self.audio.focus = false;
+        self.audio.expanding = None;
+        self.audio.failures = 0;
+        self.begin_track(Some(path));
+        self.audio.skipping = false;
+        self.start_audio_now(sender);
+        true
+    }
+
+    /// Ctrl+Q on a song while the small player is up: the song plays in it, and no quick view opens.
+    pub(in crate::ui::app) fn audio_quick_over_mini(&mut self, sender: &ComponentSender<Self>) -> bool {
+        if self.state.quick_view || !self.audio_is_mini() || !self.cursor_is_audio() {
+            return false;
+        }
+        self.audio_play_here(false, sender)
+    }
+
+    /// Enter on a song. The big player already follows the cursor, so there it only makes sure the song plays.
+    pub(in crate::ui::app) fn audio_enter(&mut self, sender: &ComponentSender<Self>) -> bool {
+        if !self.cursor_is_audio() {
+            return false;
+        }
+        if self.audio_keys() {
+            if self.audio_player_state() != Some(State::Playing) {
+                self.audio_toggle(sender);
+            }
+            return true;
+        }
+        self.audio_play_here(true, sender)
+    }
+
     /// The same track again from its start.
     fn audio_restart(&mut self) {
         self.audio.scrub = Some((Duration::ZERO, Instant::now() + SCRUB_HOLD));
@@ -494,6 +547,11 @@ impl App {
 
     pub(in crate::ui::app) fn audio_volume(&self) -> f32 {
         self.audio.volume
+    }
+
+    /// How far into the track the player is.
+    pub(in crate::ui::app) fn audio_position(&self) -> Duration {
+        self.audio.player.as_ref().map_or(Duration::ZERO, Player::position)
     }
 
     /// How many tracks the playlist holds.
@@ -824,14 +882,18 @@ impl App {
         if ctrl && !alt && matches!(key, Key::m | Key::M) {
             return false;
         }
+        if ctrl && !alt && matches!(key, Key::Left | Key::KP_Left | Key::Right | Key::KP_Right) {
+            self.audio_key_seek(matches!(key, Key::Right | Key::KP_Right), shift);
+            return true;
+        }
         if ctrl || alt {
             self.audio.focus = false;
             return false;
         }
         match key {
             Key::space | Key::KP_Space | Key::AudioPlay | Key::AudioPause => self.audio_toggle(sender),
-            Key::Left | Key::KP_Left => self.audio_key_seek(false, shift),
-            Key::Right | Key::KP_Right => self.audio_key_seek(true, shift),
+            // Plain arrows do nothing here. Seeking is Ctrl+arrow, so the player does not let go on a stray key.
+            Key::Left | Key::KP_Left | Key::Right | Key::KP_Right => {}
             Key::Down | Key::KP_Down | Key::n | Key::N | Key::AudioNext => self.audio_next(sender),
             Key::Up | Key::KP_Up | Key::p | Key::P | Key::AudioPrev => self.audio_prev(sender),
             Key::r | Key::R => self.audio_cycle_repeat(),

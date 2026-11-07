@@ -879,6 +879,9 @@ impl App {
                     self.touch(id);
                     self.note_preview_target();
                 }
+                // The big player is up: these seek, as they do in the small player.
+                Key::Left | Key::KP_Left if self.audio_keys() => self.audio_key_seek(false, shift),
+                Key::Right | Key::KP_Right if self.audio_keys() => self.audio_key_seek(true, shift),
                 Key::Left | Key::KP_Left if self.state.active == PaneId::Right => self.show_active_on_other(sender),
                 Key::Right | Key::KP_Right if self.state.active == PaneId::Left => self.show_active_on_other(sender),
                 _ => {}
@@ -945,13 +948,9 @@ impl App {
                 self.focus_list();
             }
             Key::BackSpace => self.go_up(sender),
-            // Enter is easy to hit by mistake, so it does not leave the built-in player. Ctrl+Enter does.
-            Key::Return if self.audio_keys() => {}
             Key::Return => self.activate_cursor(sender),
             Key::Left | Key::KP_Left if self.thumbs_shown() => self.move_list(-1),
             Key::Right | Key::KP_Right if self.thumbs_shown() => self.move_list(1),
-            Key::Left | Key::KP_Left if self.audio_keys() => self.audio_key_seek(false, shift),
-            Key::Right | Key::KP_Right if self.audio_keys() => self.audio_key_seek(true, shift),
             Key::plus | Key::KP_Add | Key::equal if self.audio_keys() => self.audio_volume_step(0.05),
             Key::minus | Key::KP_Subtract if self.audio_keys() => self.audio_volume_step(-0.05),
             Key::m | Key::M if self.audio_keys() => self.audio_toggle_mute(),
@@ -1223,6 +1222,10 @@ impl App {
         }
         if self.file_under_cursor().is_some_and(|path| jobs::is_check_file(&path)) {
             self.start_verify(sender);
+            return;
+        }
+        // A song plays in the built-in player. Ctrl+Enter is the way to the external one.
+        if self.audio_enter(sender) {
             return;
         }
         if let Some((id, path, token)) = self.state.enter() {
@@ -1698,9 +1701,9 @@ impl App {
             errors.push("music: volume key".into());
         }
         let cursor = self.state.tab(PaneId::Left).cursor;
-        self.on_key(Key::Right, ModifierType::empty(), sender);
+        self.on_key(Key::Right, ModifierType::CONTROL_MASK, sender);
         if self.state.tab(PaneId::Left).cursor != cursor {
-            errors.push("music: right arrow moved the cursor".into());
+            errors.push("music: ctrl+right moved the cursor".into());
         }
         // Space does not mark the file while the player has it.
         if !self.state.tab(PaneId::Left).marked.is_empty() {
@@ -2638,6 +2641,8 @@ fn smoke_dirs() -> (PathBuf, PathBuf) {
     let _ = std::fs::write(left.join("tone.wav"), tone_wav(1));
     let _ = std::fs::write(left.join("tone2.wav"), tone_wav(20));
     let _ = std::fs::write(left.join("tone3.wav"), tone_wav(20));
+    let _ = std::fs::write(left.join("sub").join("other.wav"), tone_wav(20));
+    let _ = std::fs::write(left.join("sub").join("other2.wav"), tone_wav(20));
     (left, right)
 }
 

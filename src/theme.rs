@@ -1096,11 +1096,18 @@ button.menu-row label.menu-key {{
 .audio-mini scale trough {{
   background: {muted};
   min-height: 4px;
+  border: none;
+  box-shadow: none;
+  outline: none;
   border-radius: 2px;
 }}
 .audio-player scale highlight,
 .audio-mini scale highlight {{
   background: {accent};
+  min-height: 4px;
+  border: none;
+  box-shadow: none;
+  outline: none;
   border-radius: 2px;
 }}
 .audio-player scale slider,

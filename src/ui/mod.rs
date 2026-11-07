@@ -6,6 +6,7 @@ mod media;
 mod mini;
 mod msg;
 mod player;
+mod poster;
 mod row;
 mod shell;
 mod visual;

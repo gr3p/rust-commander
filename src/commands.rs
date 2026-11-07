@@ -483,7 +483,7 @@ const CATALOG: &[Item] = &[
     Item { act: Act::CopyPaths, keys: "Ctrl+Shift+C", label: "Copy path", group: Group::Clipboard },
     Item { act: Act::CopyImage, keys: "Ctrl+C", label: "Copy image", group: Group::Clipboard },
     Item { act: Act::AudioToggle, keys: "Space", label: "Play or pause", group: Group::View },
-    Item { act: Act::AudioSeek, keys: "Left/Right", label: "Seek 5 s, Shift 30 s", group: Group::View },
+    Item { act: Act::AudioSeek, keys: "Ctrl+Left/Right", label: "Seek 5 s, Shift 30 s", group: Group::View },
     Item { act: Act::AudioVolume, keys: "+/-", label: "Volume", group: Group::View },
     Item { act: Act::AudioMute, keys: "M", label: "Mute", group: Group::View },
     Item { act: Act::AudioNext, keys: "N", label: "Next track", group: Group::View },
