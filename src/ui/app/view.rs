@@ -131,6 +131,8 @@ impl App {
                 picture.set_size_request(if fit { -1 } else { width as i32 }, if fit { -1 } else { height as i32 });
             }
             PreviewBody::Text(err) => self.status = err,
+            // The F3 window only ever shows an image or an error.
+            PreviewBody::Audio => {}
         }
     }
 
@@ -759,6 +761,12 @@ impl App {
         };
         let charset = self.charset;
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        if rust_commander::audio::can_try(name) {
+            // The player fills the pane. It starts and stops with the cursor, see reconcile_audio.
+            self.preview.set_body(PreviewBody::Audio);
+            self.paint_preview();
+            return;
+        }
         if let Some(art) = rust_commander::icons::art_for(name) {
             let palette = rust_commander::theme::load_named(&rust_commander::theme::active_name(
                 &self.cfg.theme,
@@ -1064,6 +1072,12 @@ pub(in crate::ui::app) fn show_slot(ui: &crate::ui::shell::PaneUi, slot: &lister
                 ui.preview.scroll_to_iter(&mut start, 0.0, true, 0.0, 0.0);
             }
             paint_syntax(&ui.preview, name, syntax);
+            None
+        }
+        PreviewBody::Audio => {
+            if ui.preview_kind.visible_child_name().as_deref() != Some("player") {
+                ui.preview_kind.set_visible_child_name("player");
+            }
             None
         }
         PreviewBody::Image { width, height, pixels } => {

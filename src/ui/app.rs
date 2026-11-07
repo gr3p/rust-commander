@@ -24,6 +24,7 @@ static SIZING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 use super::row::{self, EntryObject};
 use super::shell::{self, Shell};
 
+mod audio;
 mod commands;
 mod disk;
 mod mount;
@@ -182,6 +183,7 @@ struct SettingsUi {
 }
 
 pub struct App {
+    audio: audio::AudioState,
     state: AppState,
     shell: Shell,
     cfg: Config,
@@ -348,6 +350,7 @@ impl SimpleComponent for App {
             gtk::glib::Propagation::Proceed
         });
         let mut model = App {
+            audio: audio::AudioState::new(),
             state,
             shell,
             cfg,
@@ -443,6 +446,10 @@ impl SimpleComponent for App {
         self.on_msg(msg, &sender);
         self.arm_watches(&sender);
         self.kick_preview(&sender);
+        // Finding the file under the cursor sorts the folder, so an idle poll leaves it be.
+        if !idle_poll || self.dirty.iter().any(|pane| *pane) {
+            self.reconcile_audio(&sender);
+        }
         if !(idle_poll && self.job.is_none() && !self.dirty.iter().any(|pane| *pane)) {
             self.sync();
         }
@@ -512,7 +519,15 @@ impl App {
                 self.poll_job(sender);
                 self.poll_archive_list();
                 self.poll_queue(sender);
+                self.tick_audio();
             }
+            Msg::AudioEvent(event) => self.on_audio_event(event, sender),
+            Msg::AudioStart(generation) => self.start_audio(generation, sender),
+            Msg::AudioCover { generation, image } => self.on_audio_cover(generation, image),
+            Msg::AudioSeek(fraction) => self.audio_seek_to(fraction),
+            Msg::AudioVolume(volume) => self.audio_set_volume(volume as f32),
+            Msg::AudioToggle => self.audio_toggle(sender),
+            Msg::AudioMute => self.audio_toggle_mute(),
             Msg::Enqueue(text) => self.enqueue(&text, sender),
             Msg::QueuePause => self.toggle_queue_pause(),
             Msg::QueueRemove => self.remove_queued(),
@@ -890,6 +905,8 @@ impl App {
                 self.paint_mark(self.state.active, index);
                 self.focus_list();
             }
+            Key::space | Key::KP_Space | Key::AudioPlay | Key::AudioPause if self.audio_keys() => self.audio_toggle(sender),
+            Key::AudioStop if self.audio_keys() => self.audio_stop(),
             Key::space | Key::KP_Space => {
                 let index = self.state.tab(self.state.active).cursor;
                 self.state.toggle_mark_stay();
@@ -900,6 +917,11 @@ impl App {
             Key::Return => self.activate_cursor(sender),
             Key::Left | Key::KP_Left if self.thumbs_shown() => self.move_list(-1),
             Key::Right | Key::KP_Right if self.thumbs_shown() => self.move_list(1),
+            Key::Left | Key::KP_Left if self.audio_keys() => self.audio_key_seek(false, shift),
+            Key::Right | Key::KP_Right if self.audio_keys() => self.audio_key_seek(true, shift),
+            Key::plus | Key::KP_Add | Key::equal if self.audio_keys() => self.audio_volume_step(0.05),
+            Key::minus | Key::KP_Subtract if self.audio_keys() => self.audio_volume_step(-0.05),
+            Key::m | Key::M if self.audio_keys() => self.audio_toggle_mute(),
             Key::Left | Key::KP_Left if self.state.quick_view => self.step_quick_image(-1),
             Key::Right | Key::KP_Right if self.state.quick_view => self.step_quick_image(1),
             Key::Up | Key::KP_Up => self.move_list(-self.row_step(false)),
@@ -1170,6 +1192,10 @@ impl App {
             let tab = self.state.pane(id).active;
             self.spawn_load(sender, id, tab, path, token);
         } else {
+            // The default player takes over, so the built-in one steps aside.
+            if self.audio_keys() {
+                self.audio_stop();
+            }
             self.open_external(true);
         }
     }
@@ -1513,6 +1539,7 @@ impl App {
                 if let Some(rev) = view::show_slot(ui, &self.preview, self.preview_shown[pane], self.quick_fit, syntax, &name) {
                     self.preview_shown[pane] = rev;
                 }
+                self.paint_audio();
             }
             let labels = tab_labels(&tab_titles, tab_active);
             if tabs_current(&ui.tabs) != labels {
@@ -1577,6 +1604,96 @@ impl App {
         self.paint_mode_bar();
         self.mark_drives();
         SYNCING.store(false, Ordering::Relaxed);
+    }
+
+    // The music player on a real file, through the real engine and ALSA's null device.
+    fn smoke_music(&mut self, errors: &mut Vec<String>, sender: &ComponentSender<Self>) {
+        if !rust_commander::audio::alsa_available() {
+            println!("SMOKE_MUSIC skipped: no ALSA library");
+            return;
+        }
+        use rust_commander::audio::State;
+        let wait = |cond: &mut dyn FnMut() -> bool| {
+            let end = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < end {
+                if cond() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            false
+        };
+        self.reload_pane(PaneId::Left);
+        if !self.point_at(PaneId::Left, "tone.wav") {
+            errors.push("music: missing tone.wav".into());
+            return;
+        }
+        self.state.quick_view = true;
+        self.note_preview_target();
+        self.kick_preview(sender);
+        self.reconcile_audio(sender);
+        self.sync();
+        if self.shell.panes[1].stack.visible_child_name().as_deref() != Some("preview")
+            || self.shell.panes[1].preview_kind.visible_child_name().as_deref() != Some("player")
+        {
+            errors.push("music: player not shown".into());
+        }
+        if self.shell.panes[1].player.looks().title != "tone" {
+            errors.push(format!("music: title {:?}", self.shell.panes[1].player.looks().title));
+        }
+        if !self.audio_keys() {
+            errors.push("music: keys not claimed".into());
+        }
+        // The start is delayed while scrolling. Starting now plays the track through to its end.
+        self.start_audio_now(sender);
+        if !wait(&mut || self.audio_player_state() == Some(State::Ended)) {
+            errors.push(format!("music: did not play to the end, {:?}", self.audio_player_state()));
+        }
+        // Space on a finished track plays it again.
+        self.on_key(Key::space, ModifierType::empty(), sender);
+        let again = wait(&mut || self.audio_player_state() == Some(State::Playing) || self.audio_player_state() == Some(State::Ended));
+        if !again || !wait(&mut || self.audio_player_state() == Some(State::Ended)) {
+            errors.push("music: space did not replay".into());
+        }
+        // Arrow keys and volume keys belong to the player while it is up.
+        let volume = self.audio_volume();
+        self.on_key(Key::minus, ModifierType::empty(), sender);
+        if self.audio_volume() >= volume {
+            errors.push("music: volume key".into());
+        }
+        let cursor = self.state.tab(PaneId::Left).cursor;
+        self.on_key(Key::Right, ModifierType::empty(), sender);
+        if self.state.tab(PaneId::Left).cursor != cursor {
+            errors.push("music: right arrow moved the cursor".into());
+        }
+        // Space does not mark the file while the player has it.
+        if !self.state.tab(PaneId::Left).marked.is_empty() {
+            errors.push("music: space marked the file".into());
+        }
+        // A file that is not music takes the pane back and silences the player.
+        if !self.point_at(PaneId::Left, "note.txt") {
+            errors.push("music: missing note.txt".into());
+        }
+        self.note_preview_target();
+        self.kick_preview(sender);
+        self.reconcile_audio(sender);
+        self.sync();
+        if self.audio_keys() {
+            errors.push("music: keys kept after leaving".into());
+        }
+        if !wait(&mut || self.audio_player_state() == Some(State::Idle)) {
+            errors.push("music: not stopped after leaving".into());
+        }
+        self.on_key(Key::space, ModifierType::empty(), sender);
+        if self.state.tab(PaneId::Left).marked.is_empty() {
+            errors.push("music: space no longer marks".into());
+        }
+        self.state.tab_mut(PaneId::Left).marked.clear();
+        self.state.quick_view = false;
+        self.note_preview_target();
+        self.reconcile_audio(sender);
+        self.sync();
+        println!("SMOKE_MUSIC ran");
     }
 
     fn run_smoke(&mut self, sender: &ComponentSender<Self>) {
@@ -1821,6 +1938,7 @@ impl App {
         if self.shell.panes[1].stack.visible_child_name().as_deref() != Some("list") {
             errors.push("quick view stayed".into());
         }
+        self.smoke_music(&mut errors, sender);
 
         self.toggle_settings(sender);
         let shown = self.settings.as_ref().map(|ui| ui.columns.text().to_string());
@@ -2480,7 +2598,31 @@ fn smoke_dirs() -> (PathBuf, PathBuf) {
     let _ = std::fs::write(left.join("note.txt"), "hello rust-commander\n");
     let _ = std::fs::write(left.join("sub").join("b.txt"), "nested\n");
     let _ = std::fs::write(left.join("move-me.txt"), "move\n");
+    let _ = std::fs::write(left.join("tone.wav"), tone_wav());
     (left, right)
+}
+
+// A tenth of a second of 440 Hz as a mono 8 kHz WAV, for the music smoke test.
+fn tone_wav() -> Vec<u8> {
+    let rate = 8000u32;
+    let samples: Vec<u8> = (0..rate / 10)
+        .flat_map(|i| (((i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 8000.0) as i16).to_le_bytes())
+        .collect();
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + samples.len() as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&rate.to_le_bytes());
+    wav.extend_from_slice(&(rate * 2).to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&samples);
+    wav
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@ use crate::listing;
 // The context row is for everyday commands. Special commands stay in the F1 menu.
 // Higher is more likely. Several marked files outrank the file type.
 const HINTS: &[Act] = &[
+    Act::AudioToggle,
     Act::Copy,
     Act::Move,
     Act::Pack,
@@ -122,6 +123,10 @@ pub enum Act {
     Discard,
     LeaveEdit,
     CopyImage,
+    AudioToggle,
+    AudioSeek,
+    AudioVolume,
+    AudioMute,
     Drive,
     DiskInfo,
     Mount,
@@ -129,7 +134,7 @@ pub enum Act {
 }
 
 impl Act {
-    pub const ALL: [Act; 76] = [
+    pub const ALL: [Act; 80] = [
         Act::Refresh,
         Act::View,
         Act::Edit,
@@ -202,6 +207,10 @@ impl Act {
         Act::Discard,
         Act::LeaveEdit,
         Act::CopyImage,
+        Act::AudioToggle,
+        Act::AudioSeek,
+        Act::AudioVolume,
+        Act::AudioMute,
         Act::Drive,
         Act::DiskInfo,
         Act::Mount,
@@ -221,6 +230,8 @@ pub struct Cue {
     pub lister: bool,
     pub image_view: bool,
     pub quick_view: bool,
+    /// The quick view shows the music player.
+    pub audio: bool,
     pub editing: bool,
     // The active panel stands at the root of a drive, as right after picking one.
     pub drive: bool,
@@ -241,6 +252,7 @@ impl Cue {
             lister: false,
             image_view: false,
             quick_view: false,
+            audio: false,
             editing: false,
             drive: false,
             testable: false,
@@ -350,6 +362,7 @@ pub fn applies(act: Act, cue: &Cue) -> bool {
         Act::QuickEdit => cue.quick_view && cue.file && !cue.image && !cue.archive && !cue.editing,
         Act::ImageFit | Act::ImageStep => cue.image_view,
         Act::CopyImage => cue.image_view,
+        Act::AudioToggle | Act::AudioSeek | Act::AudioVolume | Act::AudioMute => cue.audio,
         Act::ListerText | Act::ListerBinary | Act::ListerHex => cue.lister,
         Act::ListerAnsi | Act::ListerAscii | Act::ListerJson => cue.lister || cue.quick_view,
         _ => true,
@@ -360,6 +373,7 @@ fn score(act: Act, cue: &Cue) -> i32 {
     let multi = cue.marks >= 2;
     let marked = cue.marks >= 1;
     match act {
+        Act::AudioToggle if cue.audio => 120,
         Act::Copy if multi => 100,
         Act::Move if multi => 90,
         Act::Pack if multi => 80,
@@ -440,6 +454,10 @@ const CATALOG: &[Item] = &[
     Item { act: Act::SortAttr, keys: "Ctrl+F7", label: "Sort by attributes", group: Group::Navigate },
     Item { act: Act::CopyPaths, keys: "Ctrl+Shift+C", label: "Copy path", group: Group::Clipboard },
     Item { act: Act::CopyImage, keys: "Ctrl+C", label: "Copy image", group: Group::Clipboard },
+    Item { act: Act::AudioToggle, keys: "Space", label: "Play or pause", group: Group::View },
+    Item { act: Act::AudioSeek, keys: "Left/Right", label: "Seek 5 s, Shift 30 s", group: Group::View },
+    Item { act: Act::AudioVolume, keys: "+/-", label: "Volume", group: Group::View },
+    Item { act: Act::AudioMute, keys: "M", label: "Mute", group: Group::View },
     Item { act: Act::CopyDir, keys: "Alt+Shift+C", label: "Copy dir path", group: Group::Clipboard },
     Item { act: Act::Filter, keys: "Ctrl+S", label: "Filter", group: Group::View },
     Item { act: Act::Search, keys: "Ctrl+Shift+S", label: "Search", group: Group::View },
@@ -534,6 +552,24 @@ mod tests {
     fn catalog_lists_each_act_once() {
         for act in Act::ALL {
             assert_eq!(catalog().iter().filter(|item| item.act == act).count(), 1, "{act:?}");
+        }
+    }
+
+    #[test]
+    fn the_music_player_puts_play_and_pause_first() {
+        let ranked = rank(&cue(|cue| {
+            cue.audio = true;
+            cue.file = true;
+            cue.quick_view = true;
+        }));
+        assert_eq!(ranked[0], Act::AudioToggle);
+        assert_eq!(ranked.last(), Some(&Act::QuickView));
+        assert!(hint_label(Act::AudioToggle, "right").contains("Play or pause"));
+        // Off the player, none of its keys are on offer.
+        assert!(!rank(&cue(|cue| cue.file = true)).contains(&Act::AudioToggle));
+        for act in [Act::AudioToggle, Act::AudioSeek, Act::AudioVolume, Act::AudioMute] {
+            assert!(applies(act, &cue(|cue| cue.audio = true)), "{act:?}");
+            assert!(!applies(act, &cue(|cue| cue.file = true)), "{act:?}");
         }
     }
 

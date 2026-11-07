@@ -1052,6 +1052,70 @@ button.menu-row label.menu-key {{
   color: {dim};
   margin-left: 24px;
 }}
+/* Music player in the quick view pane. */
+.audio-player {{
+  padding: 14px 18px;
+}}
+.audio-note {{
+  font-size: 110px;
+  color: {muted};
+}}
+.audio-title {{
+  font-size: {title_px}px;
+  font-weight: bold;
+  color: {bright};
+}}
+.audio-artist,
+.audio-album {{
+  color: {fg};
+}}
+.audio-detail,
+.audio-time,
+.audio-hint {{
+  color: {dim};
+}}
+.audio-message {{
+  color: {red};
+}}
+.audio-time {{
+  font-feature-settings: "tnum";
+}}
+.audio-player scale trough {{
+  background: {muted};
+  min-height: 4px;
+  border-radius: 2px;
+}}
+.audio-player scale highlight {{
+  background: {accent};
+  border-radius: 2px;
+}}
+.audio-player scale slider {{
+  background: {accent};
+  min-width: 12px;
+  min-height: 12px;
+  border-radius: 6px;
+  border: none;
+  box-shadow: none;
+  margin: -4px;
+}}
+.audio-player scale:disabled slider {{
+  background: {muted};
+}}
+button.audio-button {{
+  background: {sel};
+  color: {fg};
+  border: none;
+  box-shadow: none;
+  padding: 4px 14px;
+  min-height: 0;
+  min-width: 0;
+}}
+button.audio-button:hover {{
+  background: {rhov};
+}}
+button.audio-button:disabled {{
+  color: {dim};
+}}
 @define-color accent_color {accent};
 @define-color accent_bg_color {accent};
 @define-color accent_fg_color {bg};
@@ -1084,6 +1148,8 @@ entry:focus-within {{
         rsel = p.row_selected,
         rhov = p.row_hover,
         dim = p.dim,
+        red = p.red,
+        title_px = (f64::from(s.font_px) * 1.5).round() as u32,
         radius = s.radius,
         icon_gap = s.space(6),
         cell_pad = format!("0 {}px", s.space(6)),

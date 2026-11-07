@@ -122,4 +122,11 @@ pub enum Msg {
     MakeLink { symbolic: bool, target: String, link: String },
     SumKind(u8),
     EncodePick { decode: bool, codec: u8 },
+    AudioEvent(rust_commander::audio::Event),
+    AudioStart(u64),
+    AudioCover { generation: u64, image: Option<(u32, u32, Vec<u8>)> },
+    AudioSeek(f64),
+    AudioVolume(f64),
+    AudioToggle,
+    AudioMute,
 }

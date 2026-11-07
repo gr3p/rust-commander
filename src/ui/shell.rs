@@ -17,6 +17,7 @@ use rust_commander::listing::SortKey;
 
 use super::iconpack;
 
+use super::player::PlayerView;
 use super::row::{self, EntryObject};
 
 static FLASH_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -40,6 +41,7 @@ pub struct PaneUi {
     pub picture: gtk::Picture,
     pub picture_scroll: gtk::ScrolledWindow,
     pub preview_kind: gtk::Stack,
+    pub player: PlayerView,
     pub preview_wait: gtk::DrawingArea,
     pub terminal_slot: gtk::Box,
 }
@@ -1278,6 +1280,8 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     let preview_kind = gtk::Stack::new();
     preview_kind.add_named(&preview_scroll, Some("text"));
     preview_kind.add_named(&picture_scroll, Some("image"));
+    let player = PlayerView::new(sender);
+    preview_kind.add_named(&player.root, Some("player"));
     preview_kind.set_vexpand(true);
     let preview_wait = row::dot_spin();
     let preview_overlay = gtk::Overlay::new();
@@ -1364,6 +1368,7 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
         picture,
         picture_scroll,
         preview_kind,
+        player,
         preview_wait,
         terminal_slot,
     }

@@ -3,6 +3,7 @@ mod drives;
 mod hotlist;
 mod iconpack;
 mod msg;
+mod player;
 mod row;
 mod shell;
 
