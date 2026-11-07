@@ -35,7 +35,7 @@ Early release (0.1.x): expect rough edges, and please [report them](https://gith
 
 - **See before you open.** Preview text, images and thumbnails right next to your files, and edit in place.
 
-- **Music in the quick view.** Press Ctrl+Q on a song and it plays in the other panel, with its cover, title and artist, a seek bar, volume and a visualizer in your theme's colors. Next, previous, shuffle and repeat follow the files in the folder, and the cursor goes along. Send marked songs to it as a playlist from the right-click menu. Fold it into a small player under the list and keep working. mp3, flac, ogg, opus, wav, aac, m4a and aiff are decoded by the program itself.
+- **Music built in.** Press Ctrl+Q on a song and it plays in the other panel, with its cover, tags, a seek bar, volume and a visualizer in your theme's colors. The playlist is the folder, or the songs you marked and sent from the right-click menu, with next, previous, shuffle and repeat. Fold it into a small player under a panel and keep working. mp3, flac, ogg, opus, wav, aac, m4a and aiff are decoded by the program itself and played through ALSA, so PipeWire and PulseAudio work. The keys are under Music below.
 
 - **Archives without the fuss.** Pack and unpack zip, 7z, rar and tar, and verify files with checksums.
 
