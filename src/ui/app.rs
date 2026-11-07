@@ -115,6 +115,8 @@ struct Job {
     done_rx: mpsc::Receiver<Result<Report, String>>,
     started: Instant,
     conflict_open: bool,
+    // Title for the progress window when the status line would not say what is going on.
+    caption: Option<&'static str>,
 }
 
 struct ListerUi {

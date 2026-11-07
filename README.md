@@ -135,6 +135,8 @@ The panel with focus is the source, the other is the target. Press F1 for all co
 
 Broken files are skipped and listed when unpacking finishes, and a missing rar volume is named. An archive is unpacked, it is not opened as a folder.
 
+A delete that takes longer than half a second opens a progress window with a Cancel button. Delete for good counts the selection first, so the bar has a total, and refuses a folder with another disk mounted inside before anything is removed.
+
 File writes use uniquely named temporary files. Concurrent jobs cannot write the same destination, and a copy or cross-filesystem move stops with an error if it detects that its source or destination changed. On filesystems without atomic no-replace renames (NFS, NTFS-3g and other FUSE mounts), a file is placed with a hard link and a folder replaces a freshly made empty folder, so a newly created destination is still never overwritten. If the filesystem has no hard links either, an error is returned.
 
 The built-in editor refuses to save a file with multiple hard links or a different owner, or when it cannot create a temporary file beside it. This keeps the original intact instead of falling back to a destructive in-place write. Use a separate copy to edit such a file.

@@ -16,6 +16,8 @@ use crate::ui::msg::Msg;
 
 use super::{App, Ask, Job, JobOut, PendingUnpack, Phase, Queued, Work, home_dir};
 
+const DELETE_WINDOW_AFTER: Duration = Duration::from_millis(500);
+
 impl App {
     pub(in crate::ui::app) fn spawn_transfer(&mut self, items: Vec<(PathBuf, PathBuf)>, kind: Kind, sender: &ComponentSender<Self>) {
         if items.is_empty() {
@@ -34,8 +36,20 @@ impl App {
             return;
         }
         let Some(pipes) = self.open_job(Work::Delete) else { return };
+        let caption = if permanent { "Deleting" } else { "Moving to trash" };
+        if let Some(job) = self.job.as_mut() {
+            job.caption = Some(caption);
+        }
+        self.status = caption.into();
         let JobOut { cancel, progress_tx, done_tx, .. } = pipes;
         spawn_worker(move || {
+            if permanent {
+                let result = ops::remove_paths(&paths, &cancel, &mut |progress| {
+                    let _ = progress_tx.send(progress.clone());
+                });
+                let _ = done_tx.send(result.map_err(|err| err.to_string()));
+                return;
+            }
             let total = paths.len() as u64;
             for (done, path) in paths.iter().enumerate() {
                 if cancel.load(Ordering::Relaxed) {
@@ -43,7 +57,7 @@ impl App {
                     return;
                 }
                 let _ = progress_tx.send(ops::Progress { done: done as u64, total, current: path.clone(), note: String::new() });
-                let result = ops::delete_paths(std::slice::from_ref(path), permanent, &mut |path| gio_trash(path));
+                let result = ops::delete_paths(std::slice::from_ref(path), false, &mut |path| gio_trash(path));
                 if let Err(err) = result {
                     let _ = done_tx.send(Err(format!("{}: {err}", path.display())));
                     return;
@@ -93,7 +107,7 @@ impl App {
                         rust_commander::listing::format_size(progress.done),
                         rust_commander::listing::format_size(progress.total)
                     ));
-                } else if matches!(job.work, Work::Verify) && progress.total > 0 {
+                } else if matches!(job.work, Work::Verify | Work::Delete) && progress.total > 0 {
                     amount = Some(format!("{} / {}", progress.done, progress.total));
                 }
                 show = job.started.elapsed() > Duration::from_millis(200);
@@ -110,6 +124,10 @@ impl App {
             // A fast test only leaves the result. A longer one keeps this window and fills the bar.
             if matches!(job.work, Work::Test) {
                 show = done.is_none() && job.started.elapsed() > Duration::from_millis(200);
+            }
+            // A small delete never shows it. A long one gets it even while one big folder sends nothing new.
+            if matches!(job.work, Work::Delete) {
+                show = done.is_none() && job.started.elapsed() > DELETE_WINDOW_AFTER;
             }
             (line, broken, show, fraction, amount, conflict, done)
         };
@@ -1169,8 +1187,11 @@ impl App {
         }
         let win = gtk::Window::new();
         let testing = matches!(self.job.as_ref().map(|job| job.work), Some(Work::Test));
+        let named = self.job.as_ref().and_then(|job| job.caption);
         let caption = if testing {
             "Testing archive"
+        } else if let Some(named) = named {
+            named
         } else if self.status.is_empty() {
             "Working"
         } else {
@@ -1360,6 +1381,7 @@ pub(in crate::ui::app) fn new_job(work: Work) -> (Job, JobOut) {
         done_rx,
         started: Instant::now(),
         conflict_open: false,
+        caption: None,
     };
     (job, JobOut { cancel, progress_tx, conflict_tx, answer_rx, done_tx })
 }

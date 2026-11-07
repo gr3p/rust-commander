@@ -977,41 +977,133 @@ pub fn delete_paths(
     permanent: bool,
     trash: &mut dyn FnMut(&Path) -> io::Result<()>,
 ) -> io::Result<()> {
+    if permanent {
+        remove_paths(paths, &AtomicBool::new(false), &mut |_| {})?;
+        return Ok(());
+    }
     for path in paths {
-        if permanent {
-            use std::os::unix::fs::MetadataExt;
-            let meta = fs::symlink_metadata(path)?;
-            if meta.is_dir() && !meta.file_type().is_symlink() {
-                let dev = match path.parent() {
-                    Some(parent) if !parent.as_os_str().is_empty() => fs::metadata(parent)?.dev(),
-                    _ => meta.dev(),
-                };
-                remove_tree(path, dev)?;
-            } else {
-                fs::remove_file(path)?;
-            }
-        } else {
-            trash(path)?;
-        }
+        trash(path)?;
     }
     Ok(())
 }
 
-// Like `rm -r --one-file-system`: a disk mounted inside the tree is refused, never emptied.
-fn remove_tree(path: &Path, dev: u64) -> io::Result<()> {
-    use std::os::unix::fs::MetadataExt;
-    if fs::symlink_metadata(path)?.dev() != dev {
-        return Err(io::Error::other(format!("{} is another disk", path.display())));
-    }
-    for entry in fs::read_dir(path)? {
-        let child = entry?.path();
-        if fs::symlink_metadata(&child)?.is_dir() {
-            remove_tree(&child, dev)?;
-        } else {
-            fs::remove_file(&child)?;
+/// Deletes for good, like `rm -r --one-file-system`. Everything is counted first, so progress has a
+/// total and a disk mounted inside a folder is refused before anything is gone. `cancel` stops it
+/// between two entries; what is already deleted stays deleted.
+pub fn remove_paths(paths: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut(&Progress)) -> io::Result<Report> {
+    let mut sweep = Sweep { cancel, progress, counting: true, total: 0, done: 0, last: None };
+    let result = (|| {
+        let mut roots = Vec::with_capacity(paths.len());
+        for path in paths {
+            let dev = root_dev(path)?;
+            sweep.count(path, dev)?;
+            roots.push((path, dev));
         }
+        sweep.counting = false;
+        if let Some((first, _)) = roots.first() {
+            sweep.report(first, true);
+        }
+        for (path, dev) in roots {
+            sweep.remove(path, dev)?;
+        }
+        Ok(())
+    })();
+    let files = sweep.done;
+    match result {
+        Ok(()) => Ok(Report { cancelled: false, files }),
+        Err(_) if cancel.load(Ordering::Relaxed) => Ok(Report { cancelled: true, files }),
+        Err(err) => Err(err),
     }
-    fs::remove_dir(path)
+}
+
+// A folder must be on its parent's disk, so a mount point is refused rather than emptied.
+fn root_dev(path: &Path) -> io::Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = fs::symlink_metadata(path).map_err(|err| at(path, err))?;
+    if !meta.is_dir() {
+        return Ok(meta.dev());
+    }
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => Ok(fs::metadata(parent).map_err(|err| at(parent, err))?.dev()),
+        _ => Ok(meta.dev()),
+    }
+}
+
+fn at(path: &Path, err: io::Error) -> io::Error {
+    io::Error::new(err.kind(), format!("{}: {err}", path.display()))
+}
+
+struct Sweep<'a> {
+    cancel: &'a AtomicBool,
+    progress: &'a mut dyn FnMut(&Progress),
+    counting: bool,
+    total: u64,
+    done: u64,
+    last: Option<std::time::Instant>,
+}
+
+impl Sweep<'_> {
+    const EVERY: Duration = Duration::from_millis(50);
+
+    fn stopped(&self) -> io::Result<()> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        Ok(())
+    }
+
+    // A total of 0 while counting leaves the bar pulsing.
+    fn report(&mut self, current: &Path, force: bool) {
+        if !force && self.last.is_some_and(|last| last.elapsed() < Self::EVERY) {
+            return;
+        }
+        self.last = Some(std::time::Instant::now());
+        let progress = if self.counting {
+            Progress { done: 0, total: 0, current: current.to_path_buf(), note: format!("Counting... {}", self.total) }
+        } else {
+            Progress { done: self.done, total: self.total.max(self.done), current: current.to_path_buf(), note: String::new() }
+        };
+        (self.progress)(&progress);
+    }
+
+    fn count(&mut self, path: &Path, dev: u64) -> io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        self.stopped()?;
+        let meta = fs::symlink_metadata(path).map_err(|err| at(path, err))?;
+        self.total += 1;
+        self.report(path, false);
+        if meta.is_dir() {
+            if meta.dev() != dev {
+                return Err(io::Error::other(format!("{} is another disk", path.display())));
+            }
+            for entry in fs::read_dir(path).map_err(|err| at(path, err))? {
+                let child = entry.map_err(|err| at(path, err))?.path();
+                self.count(&child, dev)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn remove(&mut self, path: &Path, dev: u64) -> io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        self.stopped()?;
+        let meta = fs::symlink_metadata(path).map_err(|err| at(path, err))?;
+        if meta.is_dir() {
+            if meta.dev() != dev {
+                return Err(io::Error::other(format!("{} is another disk", path.display())));
+            }
+            for entry in fs::read_dir(path).map_err(|err| at(path, err))? {
+                let child = entry.map_err(|err| at(path, err))?.path();
+                self.remove(&child, dev)?;
+            }
+            fs::remove_dir(path).map_err(|err| at(path, err))?;
+        } else {
+            fs::remove_file(path).map_err(|err| at(path, err))?;
+        }
+        self.done += 1;
+        self.report(path, false);
+        Ok(())
+    }
 }
 
 /// The trash is the home disk. A file anywhere else is deleted where it stands.
@@ -1174,6 +1266,55 @@ mod shred_tests {
         assert!(shred(&dir.join("link"), &cancel).is_err());
         assert_eq!(fs::read(dir.join("twin.txt")).unwrap(), b"keep");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_paths_counts_then_deletes_with_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("tree");
+        fs::create_dir_all(tree.join("a/b")).unwrap();
+        fs::write(tree.join("one"), b"1").unwrap();
+        fs::write(tree.join("a/two"), b"2").unwrap();
+        fs::write(tree.join("a/b/three"), b"3").unwrap();
+        std::os::unix::fs::symlink(dir.path(), tree.join("a/up")).unwrap();
+        let single = dir.path().join("single");
+        fs::write(&single, b"s").unwrap();
+        let mut seen = Vec::new();
+        let off = AtomicBool::new(false);
+        let report = remove_paths(&[tree.clone(), single.clone()], &off, &mut |p| seen.push((p.done, p.total, p.note.clone()))).unwrap();
+        // tree, a, b, one, two, three, up, single. The symlink goes, its target stays.
+        assert_eq!(report.files, 8);
+        assert!(!report.cancelled);
+        assert!(!tree.exists() && !single.exists() && dir.path().exists());
+        assert!(seen.first().is_some_and(|(_, total, note)| *total == 0 && note.starts_with("Counting")));
+        assert!(seen.iter().any(|(done, total, note)| *done == 0 && *total == 8 && note.is_empty()));
+    }
+
+    #[test]
+    fn remove_paths_cancel_stops_before_the_next_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("tree");
+        fs::create_dir_all(tree.join("sub")).unwrap();
+        fs::write(tree.join("sub/file"), b"x").unwrap();
+        let cancel = AtomicBool::new(false);
+        let report = remove_paths(std::slice::from_ref(&tree), &cancel, &mut |p| {
+            if p.total > 0 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        })
+        .unwrap();
+        assert!(report.cancelled);
+        assert_eq!(report.files, 0);
+        assert!(tree.join("sub/file").exists());
+    }
+
+    #[test]
+    fn remove_paths_names_the_missing_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("not-there");
+        let err = remove_paths(std::slice::from_ref(&gone), &AtomicBool::new(false), &mut |_| {}).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(err.to_string().contains("not-there"));
     }
 
     #[test]
