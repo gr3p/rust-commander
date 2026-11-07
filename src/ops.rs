@@ -944,19 +944,25 @@ pub fn on_home_disk(path: &Path) -> bool {
 }
 
 /// One random pass, then the file is removed. A symlink is refused so the target stays.
+/// A socket or fifo has no data blocks, so only the name is removed.
 pub fn shred(path: &Path, cancel: &AtomicBool) -> io::Result<()> {
     if cancel.load(Ordering::Relaxed) {
         return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
     }
     let meta = fs::symlink_metadata(path)?;
-    if meta.file_type().is_symlink() {
+    let kind = meta.file_type();
+    if kind.is_symlink() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("refusing symlink {}", path.display())));
+    }
+    if name_only(kind) {
+        return fs::remove_file(path);
     }
     if meta.is_dir() {
         use std::os::unix::fs::MetadataExt;
         // Everything is checked before the first overwrite, so a refusal never leaves a half-destroyed tree.
         let dev = meta.dev();
         let mut files = Vec::new();
+        let mut names = Vec::new();
         let mut dirs = vec![path.to_path_buf()];
         let mut stack = vec![path.to_path_buf()];
         while let Some(dir) = stack.pop() {
@@ -964,16 +970,18 @@ pub fn shred(path: &Path, cancel: &AtomicBool) -> io::Result<()> {
                 let entry = entry?;
                 let child = entry.path();
                 let meta = fs::symlink_metadata(&child)?;
-                if meta.file_type().is_symlink() {
+                let kind = meta.file_type();
+                if kind.is_symlink() {
                     return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("refusing symlink {}", child.display())));
                 }
+                let bare = name_only(kind);
                 let refuse = if meta.dev() != dev {
                     Some("is another disk")
-                } else if !meta.is_dir() && !meta.is_file() {
+                } else if !meta.is_dir() && !meta.is_file() && !bare {
                     Some("is not a regular file")
-                } else if !meta.is_dir() && meta.nlink() > 1 {
+                } else if !meta.is_dir() && !bare && meta.nlink() > 1 {
                     Some("has other hard links")
-                } else if !writable(&child) {
+                } else if !bare && !writable(&child) {
                     Some("is not writable")
                 } else {
                     None
@@ -984,6 +992,8 @@ pub fn shred(path: &Path, cancel: &AtomicBool) -> io::Result<()> {
                 if meta.is_dir() {
                     stack.push(child.clone());
                     dirs.push(child);
+                } else if bare {
+                    names.push(child);
                 } else {
                     files.push(child);
                 }
@@ -992,13 +1002,28 @@ pub fn shred(path: &Path, cancel: &AtomicBool) -> io::Result<()> {
         for file in &files {
             shred_file(file, cancel)?;
         }
+        for name in &names {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            }
+            fs::remove_file(name)?;
+        }
         dirs.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
         for dir in dirs {
             fs::remove_dir(&dir)?;
         }
         return Ok(());
     }
+    if !meta.is_file() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("not a regular file {}", path.display())));
+    }
     shred_file(path, cancel)
+}
+
+fn name_only(kind: fs::FileType) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    // Socket and fifo: nothing to overwrite.
+    kind.is_socket() || kind.is_fifo()
 }
 
 fn writable(path: &Path) -> bool {
@@ -1063,6 +1088,29 @@ mod shred_tests {
         std::os::unix::fs::symlink(dir.join("twin.txt"), dir.join("link")).unwrap();
         assert!(shred(&dir.join("link"), &cancel).is_err());
         assert_eq!(fs::read(dir.join("twin.txt")).unwrap(), b"keep");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shred_unlinks_sockets_and_fifos() {
+        let dir = std::env::temp_dir().join(format!("rc-shred-sock-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("tree")).unwrap();
+        fs::write(dir.join("tree/a.txt"), b"secret").unwrap();
+        let sock = dir.join("tree/iface_socket");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let pipe = dir.join("tree/pipe");
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(pipe.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+        let cancel = AtomicBool::new(false);
+        shred(&dir.join("tree"), &cancel).unwrap();
+        assert!(!dir.join("tree").exists());
+
+        let alone = dir.join("alone.sock");
+        let _alone = std::os::unix::net::UnixListener::bind(&alone).unwrap();
+        shred(&alone, &cancel).unwrap();
+        assert!(!alone.exists());
         let _ = fs::remove_dir_all(&dir);
     }
 

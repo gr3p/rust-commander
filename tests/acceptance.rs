@@ -130,6 +130,7 @@ const MEMORY: &[(&str, fn() -> Result<(), String>)] = &[
     ("image_step_stops_at_end", image_step_stops_at_end),
     ("image_decode_png_and_scales", image_decode_png_and_scales),
     ("heic_container_says_no_decoder", heic_container_says_no_decoder),
+    ("psd_container_says_no_decoder", psd_container_says_no_decoder),
     ("lister_ansi_and_ascii", lister_ansi_and_ascii),
     ("lister_pretty_json", lister_pretty_json),
     ("hotlist_accel_submenu", hotlist_accel_submenu),
@@ -260,6 +261,8 @@ fn file_icons_by_kind() -> Result<(), String> {
     eq(imageview::is_image("shot.JFIF"), true, "jfif image")?;
     eq(imageview::is_image("photo.heic"), true, "heic image")?;
     eq(listing::file_icon("photo.heic", false, false), "image-x-generic-symbolic", "heic icon")?;
+    eq(imageview::is_image("layer.psd"), true, "psd image")?;
+    eq(listing::file_icon("layer.psb", false, false), "image-x-generic-symbolic", "psb icon")?;
     eq(listing::file_icon("doc.pdf", false, false), "application-pdf", "pdf")?;
     eq(listing::is_pdf("doc.PDF"), true, "pdf kind")?;
     eq(listing::file_icon("data.bin", false, false), "text-x-generic-symbolic", "other")
@@ -930,6 +933,28 @@ fn heic_container_says_no_decoder() -> Result<(), String> {
         return Err(junk_err);
     }
     Ok(())
+}
+
+fn psd_container_says_no_decoder() -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("rust-commander-psd-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).map_err(s)?;
+    let psd = dir.join("flat.jpg");
+    // Mislabeled Photoshop document. Version 1 is PSD.
+    fs::write(&psd, b"8BPS\x00\x01rest-of-header").map_err(s)?;
+    let err = match imageview::decode(&psd, imageview::MAX_EDGE) {
+        Err(err) => err,
+        Ok(_) => return Err("psd decoded".into()),
+    };
+    let psb = dir.join("big.psb");
+    fs::write(&psb, b"8BPS\x00\x02rest-of-header").map_err(s)?;
+    let psb_err = match imageview::decode(&psb, imageview::MAX_EDGE) {
+        Err(err) => err,
+        Ok(_) => return Err("psb decoded".into()),
+    };
+    let _ = fs::remove_dir_all(&dir);
+    eq(err, "PSD image, no decoder".into(), "psd message")?;
+    eq(psb_err, "PSB image, no decoder".into(), "psb message")
 }
 
 fn image_decode_png_and_scales() -> Result<(), String> {

@@ -782,7 +782,8 @@ impl App {
                 Key::F6 => self.set_sort(rust_commander::listing::SortKey::Size),
                 Key::F7 if shift => self.ask_encode(sender),
                 Key::F7 => self.set_sort(rust_commander::listing::SortKey::Attr),
-                Key::Delete | Key::KP_Delete if !shift => self.ask_shred(sender),
+                Key::Delete | Key::KP_Delete if shift => self.ask_shred(sender),
+                Key::Delete | Key::KP_Delete => self.on_fkey(8, true, sender),
                 Key::F9 if shift => self.start_verify(sender),
                 Key::F9 => self.new_shell(sender),
                 Key::s | Key::S => {

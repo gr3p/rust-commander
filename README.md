@@ -107,8 +107,9 @@ The panel with focus is the source, the other is the target. Press F1 for all co
 | F5 / F6 | Copy / move to the other panel |
 | Shift+F5 / Shift+F6 | Copy under a new name / rename |
 | F7 / Shift+F7 | Make a folder / make a symbolic or hard link |
-| F8 / Shift+F8 | Send to the trash / delete for good |
-| Ctrl+Delete | Overwrite once, then delete |
+| F8 / Delete | Send to the trash |
+| Ctrl+Delete / Shift+F8 | Delete for good |
+| Ctrl+Shift+Delete | Overwrite once, then delete |
 | Alt+Enter | Properties and permissions, and folder size |
 
 | View and edit | |
