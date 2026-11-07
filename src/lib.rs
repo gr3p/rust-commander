@@ -7,6 +7,7 @@ pub fn app_title() -> &'static str {
 }
 
 pub mod archive;
+pub mod audio;
 pub mod encode;
 pub mod sizes;
 pub mod commands;
