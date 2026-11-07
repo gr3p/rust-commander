@@ -59,7 +59,10 @@ pub fn transfer(
     if let Some((_, dest)) = items.iter().find(|(_, dest)| !targets.insert(dest)) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("two items would both become {}", dest.display())));
     }
-    let total: u64 = items.iter().map(|(src, _)| count_entries(src)).sum();
+    let total = match count_all(items, cancel, progress) {
+        Some(total) => total,
+        None => return Ok(Report { cancelled: true, files: 0 }),
+    };
     let mut done = 0u64;
     let mut policy = Policy::Ask;
     for (src, dest) in items {
@@ -96,6 +99,61 @@ pub fn transfer(
         cancelled: false,
         files: done,
     })
+}
+
+/// Lets a long loop report at most every 50 ms, so a million small files do not flood the channel.
+#[derive(Default)]
+pub(crate) struct Ticker(Option<std::time::Instant>);
+
+impl Ticker {
+    // The first report waits a tick too, so a small job never says it is counting.
+    pub(crate) fn later() -> Self {
+        Self(Some(std::time::Instant::now()))
+    }
+
+    pub(crate) fn due(&mut self) -> bool {
+        if self.0.is_some_and(|last| last.elapsed() < Duration::from_millis(50)) {
+            return false;
+        }
+        self.0 = Some(std::time::Instant::now());
+        true
+    }
+}
+
+fn counting(total: u64, current: &Path) -> Progress {
+    Progress { done: 0, total: 0, current: current.to_path_buf(), note: format!("Counting... {total}") }
+}
+
+// Same count as `count_entries`, but a huge tree shows that it is counting and can be cancelled. None is cancelled.
+fn count_all(items: &[(PathBuf, PathBuf)], cancel: &AtomicBool, progress: &mut dyn FnMut(&Progress)) -> Option<u64> {
+    fn walk(path: &Path, total: &mut u64, tick: &mut Ticker, cancel: &AtomicBool, progress: &mut dyn FnMut(&Progress)) -> bool {
+        if cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        *total += 1;
+        if tick.due() {
+            progress(&counting(*total, path));
+        }
+        let is_dir = fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
+        if is_dir {
+            if let Ok(rd) = fs::read_dir(path) {
+                for child in rd.flatten() {
+                    if !walk(&child.path(), total, tick, cancel, progress) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+    let mut total = 0;
+    let mut tick = Ticker::later();
+    for (src, _) in items {
+        if !walk(src, &mut total, &mut tick, cancel, progress) {
+            return None;
+        }
+    }
+    Some(total)
 }
 
 enum Stop {
@@ -991,10 +1049,11 @@ pub fn delete_paths(
 /// total and a disk mounted inside a folder is refused before anything is gone. `cancel` stops it
 /// between two entries; what is already deleted stays deleted.
 pub fn remove_paths(paths: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut(&Progress)) -> io::Result<Report> {
-    let mut sweep = Sweep { cancel, progress, counting: true, total: 0, done: 0, last: None };
+    let paths = outermost(paths);
+    let mut sweep = Sweep { cancel, progress, counting: true, total: 0, done: 0, tick: Ticker::default() };
     let result = (|| {
         let mut roots = Vec::with_capacity(paths.len());
-        for path in paths {
+        for path in &paths {
             let dev = root_dev(path)?;
             sweep.count(path, dev)?;
             roots.push((path, dev));
@@ -1014,6 +1073,22 @@ pub fn remove_paths(paths: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn F
         Err(_) if cancel.load(Ordering::Relaxed) => Ok(Report { cancelled: true, files }),
         Err(err) => Err(err),
     }
+}
+
+// Search results can list a folder and something inside it. The folder covers both, once.
+// Paths sort by component, so whatever is inside a folder comes right after it.
+fn outermost(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut sorted = paths.to_vec();
+    sorted.sort();
+    sorted.dedup();
+    let mut kept: Vec<PathBuf> = Vec::with_capacity(sorted.len());
+    for path in sorted {
+        if kept.last().is_some_and(|root| path.starts_with(root)) {
+            continue;
+        }
+        kept.push(path);
+    }
+    kept
 }
 
 // A folder must be on its parent's disk, so a mount point is refused rather than emptied.
@@ -1039,12 +1114,10 @@ struct Sweep<'a> {
     counting: bool,
     total: u64,
     done: u64,
-    last: Option<std::time::Instant>,
+    tick: Ticker,
 }
 
 impl Sweep<'_> {
-    const EVERY: Duration = Duration::from_millis(50);
-
     fn stopped(&self) -> io::Result<()> {
         if self.cancel.load(Ordering::Relaxed) {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
@@ -1054,12 +1127,11 @@ impl Sweep<'_> {
 
     // A total of 0 while counting leaves the bar pulsing.
     fn report(&mut self, current: &Path, force: bool) {
-        if !force && self.last.is_some_and(|last| last.elapsed() < Self::EVERY) {
+        if !self.tick.due() && !force {
             return;
         }
-        self.last = Some(std::time::Instant::now());
         let progress = if self.counting {
-            Progress { done: 0, total: 0, current: current.to_path_buf(), note: format!("Counting... {}", self.total) }
+            counting(self.total, current)
         } else {
             Progress { done: self.done, total: self.total.max(self.done), current: current.to_path_buf(), note: String::new() }
         };
@@ -1123,78 +1195,116 @@ pub fn on_home_disk(path: &Path) -> bool {
 /// One random pass, then the file is removed. A symlink is refused so the target stays.
 /// A socket or fifo has no data blocks, so only the name is removed.
 pub fn shred(path: &Path, cancel: &AtomicBool) -> io::Result<()> {
-    if cancel.load(Ordering::Relaxed) {
+    let report = shred_paths(std::slice::from_ref(&path.to_path_buf()), cancel, &mut |_| {})?;
+    if report.cancelled {
         return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
     }
-    let meta = fs::symlink_metadata(path)?;
-    let kind = meta.file_type();
-    if kind.is_symlink() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("refusing symlink {}", path.display())));
+    Ok(())
+}
+
+/// Shreds a whole selection. Every item is checked before the first overwrite, so a refusal anywhere
+/// leaves all of it intact. Progress is in bytes overwritten.
+pub fn shred_paths(paths: &[PathBuf], cancel: &AtomicBool, progress: &mut dyn FnMut(&Progress)) -> io::Result<Report> {
+    let mut plan = ShredPlan::default();
+    for path in &outermost(paths) {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(Report { cancelled: true, files: 0 });
+        }
+        plan.add(path)?;
     }
-    if name_only(kind) {
-        return fs::remove_file(path);
+    let total: u64 = plan.files.iter().map(|(_, len)| len).sum();
+    let count = plan.files.len();
+    let mut done = 0u64;
+    let mut tick = Ticker::default();
+    for (index, (file, _)) in plan.files.iter().enumerate() {
+        let result = shred_file(file, cancel, &mut |n| {
+            done += n;
+            if tick.due() {
+                let note = format!("{}/{count}  {}", index + 1, file.display());
+                progress(&Progress { done, total: total.max(done), current: file.clone(), note });
+            }
+        });
+        match result {
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => return Ok(Report { cancelled: true, files: index as u64 }),
+            Err(err) => return Err(at(file, err)),
+            Ok(()) => {}
+        }
     }
-    if meta.is_dir() {
+    for name in &plan.names {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(Report { cancelled: true, files: count as u64 });
+        }
+        fs::remove_file(name).map_err(|err| at(name, err))?;
+    }
+    plan.dirs.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
+    for dir in &plan.dirs {
+        fs::remove_dir(dir).map_err(|err| at(dir, err))?;
+    }
+    Ok(Report { cancelled: false, files: (count + plan.names.len()) as u64 })
+}
+
+#[derive(Default)]
+struct ShredPlan {
+    files: Vec<(PathBuf, u64)>,
+    names: Vec<PathBuf>,
+    dirs: Vec<PathBuf>,
+}
+
+impl ShredPlan {
+    fn add(&mut self, path: &Path) -> io::Result<()> {
         use std::os::unix::fs::MetadataExt;
-        // Everything is checked before the first overwrite, so a refusal never leaves a half-destroyed tree.
+        let meta = fs::symlink_metadata(path).map_err(|err| at(path, err))?;
         let dev = meta.dev();
-        let mut files = Vec::new();
-        let mut names = Vec::new();
-        let mut dirs = vec![path.to_path_buf()];
+        self.check(path, &meta, dev)?;
+        if !meta.is_dir() {
+            return Ok(());
+        }
         let mut stack = vec![path.to_path_buf()];
         while let Some(dir) = stack.pop() {
-            for entry in fs::read_dir(&dir)? {
-                let entry = entry?;
-                let child = entry.path();
-                let meta = fs::symlink_metadata(&child)?;
-                let kind = meta.file_type();
-                if kind.is_symlink() {
-                    return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("refusing symlink {}", child.display())));
-                }
-                let bare = name_only(kind);
-                let refuse = if meta.dev() != dev {
-                    Some("is another disk")
-                } else if !meta.is_dir() && !meta.is_file() && !bare {
-                    Some("is not a regular file")
-                } else if !meta.is_dir() && !bare && meta.nlink() > 1 {
-                    Some("has other hard links")
-                } else if !bare && !writable(&child) {
-                    Some("is not writable")
-                } else {
-                    None
-                };
-                if let Some(why) = refuse {
-                    return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{} {why}", child.display())));
-                }
+            for entry in fs::read_dir(&dir).map_err(|err| at(&dir, err))? {
+                let child = entry.map_err(|err| at(&dir, err))?.path();
+                let meta = fs::symlink_metadata(&child).map_err(|err| at(&child, err))?;
+                self.check(&child, &meta, dev)?;
                 if meta.is_dir() {
-                    stack.push(child.clone());
-                    dirs.push(child);
-                } else if bare {
-                    names.push(child);
-                } else {
-                    files.push(child);
+                    stack.push(child);
                 }
             }
         }
-        for file in &files {
-            shred_file(file, cancel)?;
-        }
-        for name in &names {
-            if cancel.load(Ordering::Relaxed) {
-                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
-            }
-            fs::remove_file(name)?;
-        }
-        dirs.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
-        for dir in dirs {
-            fs::remove_dir(&dir)?;
-        }
-        return Ok(());
+        Ok(())
     }
-    if !meta.is_file() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("not a regular file {}", path.display())));
+
+    // Refuses what cannot be overwritten safely, then files the entry under what will be done with it.
+    fn check(&mut self, path: &Path, meta: &fs::Metadata, dev: u64) -> io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let kind = meta.file_type();
+        if kind.is_symlink() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("refusing symlink {}", path.display())));
+        }
+        let bare = name_only(kind);
+        let refuse = if meta.dev() != dev {
+            Some("is another disk")
+        } else if !meta.is_dir() && !meta.is_file() && !bare {
+            Some("is not a regular file")
+        } else if !meta.is_dir() && !bare && meta.nlink() > 1 {
+            Some("has other hard links")
+        } else if !bare && !writable(path) {
+            // A folder must be writable too, or its entries could not be removed after they are overwritten.
+            Some("is not writable")
+        } else {
+            None
+        };
+        if let Some(why) = refuse {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{} {why}", path.display())));
+        }
+        if meta.is_dir() {
+            self.dirs.push(path.to_path_buf());
+        } else if bare {
+            self.names.push(path.to_path_buf());
+        } else {
+            self.files.push((path.to_path_buf(), meta.len()));
+        }
+        Ok(())
     }
-    shred_file(path, cancel)
 }
 
 fn name_only(kind: fs::FileType) -> bool {
@@ -1208,7 +1318,7 @@ fn writable(path: &Path) -> bool {
     std::ffi::CString::new(path.as_os_str().as_bytes()).is_ok_and(|c| unsafe { libc::access(c.as_ptr(), libc::W_OK) } == 0)
 }
 
-fn shred_file(path: &Path, cancel: &AtomicBool) -> io::Result<()> {
+fn shred_file(path: &Path, cancel: &AtomicBool, on_write: &mut dyn FnMut(u64)) -> io::Result<()> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let mut file = fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_NOFOLLOW).open(path)?;
     let meta = file.metadata()?;
@@ -1231,6 +1341,7 @@ fn shred_file(path: &Path, cancel: &AtomicBool) -> io::Result<()> {
         random.read_exact(&mut buf[..n])?;
         file.write_all(&buf[..n])?;
         left -= n as u64;
+        on_write(n as u64);
     }
     file.sync_all()?;
     drop(file);
@@ -1315,6 +1426,62 @@ mod shred_tests {
         let err = remove_paths(std::slice::from_ref(&gone), &AtomicBool::new(false), &mut |_| {}).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
         assert!(err.to_string().contains("not-there"));
+    }
+
+    #[test]
+    fn shred_paths_checks_the_whole_selection_before_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let linked = dir.path().join("linked");
+        fs::write(&first, b"keep me").unwrap();
+        fs::write(&linked, b"shared").unwrap();
+        fs::hard_link(&linked, dir.path().join("other-name")).unwrap();
+        let off = AtomicBool::new(false);
+        let err = shred_paths(&[first.clone(), linked.clone()], &off, &mut |_| {}).unwrap_err();
+        assert!(err.to_string().contains("has other hard links"));
+        assert_eq!(fs::read(&first).unwrap(), b"keep me");
+
+        let tree = dir.path().join("tree");
+        fs::create_dir(&tree).unwrap();
+        fs::write(tree.join("a"), vec![1u8; 300_000]).unwrap();
+        let mut seen = Vec::new();
+        let report = shred_paths(&[first.clone(), tree.clone()], &off, &mut |p| seen.push((p.done, p.total))).unwrap();
+        assert_eq!(report.files, 2);
+        assert!(!first.exists() && !tree.exists());
+        assert!(seen.first().is_some_and(|(done, total)| *done > 0 && *total == 300_007));
+    }
+
+    #[test]
+    fn a_folder_and_something_inside_it_are_handled_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let off = AtomicBool::new(false);
+        for shredding in [false, true] {
+            let tree = dir.path().join("tree");
+            fs::create_dir_all(tree.join("sub")).unwrap();
+            fs::write(tree.join("sub/a"), b"a").unwrap();
+            let paths = [tree.clone(), tree.join("sub/a"), tree.join("sub"), tree.clone()];
+            let report = if shredding {
+                shred_paths(&paths, &off, &mut |_| {}).unwrap()
+            } else {
+                remove_paths(&paths, &off, &mut |_| {}).unwrap()
+            };
+            assert!(!report.cancelled && !tree.exists());
+        }
+    }
+
+    #[test]
+    fn transfer_cancelled_while_counting_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("a"), b"a").unwrap();
+        let dest = dir.path().join("dest");
+        let on = AtomicBool::new(true);
+        let off = AtomicBool::new(false);
+        let report = transfer(&[(src.clone(), dest.clone())], Kind::Copy, &on, &off, &mut |_| {}, &mut |_, _| Choice::Overwrite).unwrap();
+        assert!(report.cancelled);
+        assert_eq!(report.files, 0);
+        assert!(!dest.exists());
     }
 
     #[test]

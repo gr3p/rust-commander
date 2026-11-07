@@ -104,7 +104,7 @@ pub enum Msg {
     CursorAlpha(u8),
     ToggleCursorFrame,
     CloseSettings,
-    ArchiveListed(Result<rust_commander::archive::Listed, String>),
+    ArchiveListed(u64, Result<rust_commander::archive::Listed, String>),
     UnpackPick(String, Vec<String>),
     PackPick(String, rust_commander::pack::Options),
     SetSevenZip(String),

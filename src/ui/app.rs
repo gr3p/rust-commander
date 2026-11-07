@@ -201,6 +201,10 @@ pub struct App {
     lister: Option<ListerUi>,
     lister_wait: bool,
     archive_wait: bool,
+    // The archive being read before unpack: its cancel flag and when it began. A late answer for an older
+    // generation is dropped.
+    list_wait: Option<(Arc<std::sync::atomic::AtomicBool>, Instant)>,
+    list_gen: u64,
     lister_gen: u64,
     lister_draw: u64,
     image: Option<ImageUi>,
@@ -358,6 +362,8 @@ impl SimpleComponent for App {
             progress: None,
             lister_wait: false,
             archive_wait: false,
+            list_wait: None,
+            list_gen: 0,
             meter: None,
             pending: None,
             queued: None,
@@ -504,6 +510,7 @@ impl App {
             }
             Msg::Poll => {
                 self.poll_job(sender);
+                self.poll_archive_list();
                 self.poll_queue(sender);
             }
             Msg::Enqueue(text) => self.enqueue(&text, sender),
@@ -610,7 +617,7 @@ impl App {
             Msg::CursorAlpha(alpha) => self.set_cursor_alpha(alpha),
             Msg::ToggleCursorFrame => self.toggle_cursor_frame(),
             Msg::CloseSettings => self.close_settings(),
-            Msg::ArchiveListed(result) => self.on_archive_listed(result, sender),
+            Msg::ArchiveListed(generation, result) => self.on_archive_listed(generation, result, sender),
             Msg::UnpackPick(dest, names) => self.on_unpack_pick(dest, names, sender),
             Msg::PackPick(dest, opts) => {
                 self.close_dialog();

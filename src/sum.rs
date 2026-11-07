@@ -60,18 +60,18 @@ pub fn create(
         return Err(Fail::Message("Nothing selected".into()));
     }
     let total = files.len() as u64;
+    let mut hashing = crate::sfv::Hashing::new(&files, progress);
     let mut out = String::new();
     for (index, (path, rel)) in files.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             return Ok(Report { cancelled: true, files: index as u64 });
         }
-        let hash = match hash_file(kind, path, cancel) {
+        let hash = match hash_file(kind, path, cancel, &mut |n| hashing.read(index, path, n)) {
             Ok(hash) => hash,
             Err(Fail::Cancelled) => return Ok(Report { cancelled: true, files: index as u64 }),
             Err(err) => return Err(err),
         };
         out.push_str(&format!("{hash}  {rel}\n"));
-        progress(&Progress { done: index as u64 + 1, total, current: path.clone(), note: String::new() });
     }
     crate::ops::write_atomic(dest, out.as_bytes())?;
     Ok(Report { cancelled: false, files: total })
@@ -152,7 +152,7 @@ fn check_one(kind: Kind, root: &Path, name: &str, expect: &str, cancel: &AtomicB
     if !crate::sfv::inside(root, &path) {
         return Check::Bad;
     }
-    match hash_file(kind, &path, cancel) {
+    match hash_file(kind, &path, cancel, &mut |_| {}) {
         Ok(hash) if hash.eq_ignore_ascii_case(expect) => Check::Ok,
         Ok(_) => Check::Mismatch,
         Err(Fail::Cancelled) => Check::Cancelled,
@@ -161,16 +161,16 @@ fn check_one(kind: Kind, root: &Path, name: &str, expect: &str, cancel: &AtomicB
     }
 }
 
-fn hash_file(kind: Kind, path: &Path, cancel: &AtomicBool) -> Result<String, Fail> {
+fn hash_file(kind: Kind, path: &Path, cancel: &AtomicBool, on_read: &mut dyn FnMut(u64)) -> Result<String, Fail> {
     let mut file = File::open(path)?;
     match kind {
-        Kind::Md5 => hash_read::<Md5>(&mut file, cancel),
-        Kind::Sha1 => hash_read::<Sha1>(&mut file, cancel),
-        Kind::Sha256 => hash_read::<Sha256>(&mut file, cancel),
+        Kind::Md5 => hash_read::<Md5>(&mut file, cancel, on_read),
+        Kind::Sha1 => hash_read::<Sha1>(&mut file, cancel, on_read),
+        Kind::Sha256 => hash_read::<Sha256>(&mut file, cancel, on_read),
     }
 }
 
-fn hash_read<D: Digest>(file: &mut File, cancel: &AtomicBool) -> Result<String, Fail> {
+fn hash_read<D: Digest>(file: &mut File, cancel: &AtomicBool, on_read: &mut dyn FnMut(u64)) -> Result<String, Fail> {
     let mut hasher = D::new();
     let mut buf = vec![0u8; 1024 * 1024];
     loop {
@@ -183,6 +183,7 @@ fn hash_read<D: Digest>(file: &mut File, cancel: &AtomicBool) -> Result<String, 
             break;
         }
         hasher.update(&buf[..n]);
+        on_read(n as u64);
     }
     Ok(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
 }
@@ -211,6 +212,23 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn create_reports_bytes_while_hashing() {
+        let dir = dir("bytes");
+        fs::write(dir.join("big.bin"), vec![7u8; 3 * 1024 * 1024]).unwrap();
+        fs::write(dir.join("small.txt"), b"abc").unwrap();
+        let dest = dir.join("all.sha256");
+        let mut seen = Vec::new();
+        let sources = [dir.join("big.bin"), dir.join("small.txt")];
+        create(Kind::Sha256, &dir, &sources, &dest, &AtomicBool::new(false), &mut |p| seen.push((p.done, p.total, p.note.clone()))).unwrap();
+        let total = 3 * 1024 * 1024 + 3;
+        // The first megabyte of the big file is reported before that file is done.
+        let (done, all, note) = seen.first().cloned().unwrap();
+        assert_eq!((done, all), (1024 * 1024, total));
+        assert!(note.starts_with("1/2  ") && note.ends_with("big.bin"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

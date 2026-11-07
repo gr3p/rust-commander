@@ -105,10 +105,15 @@ pub fn is_testable(path: &Path) -> bool {
 }
 
 pub fn list(path: &Path, password: Option<&str>) -> Result<Listed, Fail> {
+    list_until(path, password, &AtomicBool::new(false))
+}
+
+/// Like `list`, but `cancel` stops it between members with `Fail::Cancelled`. A large tgz is read to the end.
+pub fn list_until(path: &Path, password: Option<&str>, cancel: &AtomicBool) -> Result<Listed, Fail> {
     match extension(path) {
-        Some("zip") => list_zip(path, password),
-        Some("rar") => list_rar(path, password),
-        Some("tar" | "tgz") => list_tar(path),
+        Some("zip") => list_zip(path, password, cancel),
+        Some("rar") => list_rar(path, password, cancel),
+        Some("tar" | "tgz") => list_tar(path, cancel),
         _ => Err(Fail::Message("Not an archive".into())),
     }
 }
@@ -177,11 +182,14 @@ fn extension(path: &Path) -> Option<&str> {
     }
 }
 
-fn list_zip(path: &Path, password: Option<&str>) -> Result<Listed, Fail> {
+fn list_zip(path: &Path, password: Option<&str>, cancel: &AtomicBool) -> Result<Listed, Fail> {
     let mut archive = zip::ZipArchive::new(File::open(path)?)?;
     let mut listed = Listed { members: Vec::new(), needs_password: false };
     let mut verified = false;
     for index in 0..archive.len() {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Fail::Cancelled);
+        }
         // Raw access reads metadata only; decrypting AES costs a key derivation per entry.
         let file = archive.by_index_raw(index)?;
         let encrypted = file.encrypted();
@@ -386,10 +394,13 @@ fn classify(entry: &tar::Entry<Box<dyn Read>>) -> Result<Option<Seen>, Fail> {
     }))
 }
 
-fn list_tar(path: &Path) -> Result<Listed, Fail> {
+fn list_tar(path: &Path, cancel: &AtomicBool) -> Result<Listed, Fail> {
     let mut archive = open_tar(path)?;
     let mut listed = Listed { members: Vec::new(), needs_password: false };
     for entry in archive.entries()? {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Fail::Cancelled);
+        }
         match classify(&entry?)? {
             Some(Seen::File { name, size }) => listed.members.push(Member { name, size, dir: false }),
             Some(Seen::Dir { name }) => listed.members.push(Member { name, size: 0, dir: true }),
@@ -506,11 +517,14 @@ fn skipped_report(files: u64, skipped: Vec<String>) -> Result<Report, Fail> {
     Err(Fail::Message(text))
 }
 
-fn list_rar(path: &Path, password: Option<&str>) -> Result<Listed, Fail> {
+fn list_rar(path: &Path, password: Option<&str>, cancel: &AtomicBool) -> Result<Listed, Fail> {
     let owned = rar_path(path);
     let opened = open_rar(&owned, password).open_for_listing().map_err(|err| in_volume(err.into(), &volume_label(&owned)))?;
     let mut listed = Listed { members: Vec::new(), needs_password: false };
     for item in opened {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Fail::Cancelled);
+        }
         let header = item.map_err(|err| in_volume(err.into(), &volume_label(&owned)))?;
         if header.is_encrypted() {
             listed.needs_password = true;
@@ -714,7 +728,7 @@ fn extract_rar(
     conflict: &mut dyn FnMut(&Path, &Path) -> Choice,
 ) -> Result<Report, Fail> {
     let owned = rar_path(path);
-    let listed = list_rar(&owned, password)?;
+    let listed = list_rar(&owned, password, cancel)?;
     if listed.needs_password && password.is_none() {
         return Err(Fail::NeedPassword);
     }
@@ -1246,7 +1260,7 @@ fn report_test(done: u64, sent: &mut u64, total: u64, current: &Path, progress: 
 
 fn test_rar(path: &Path, password: Option<&str>, cancel: &AtomicBool, progress: &mut dyn FnMut(&Progress)) -> Result<Report, Fail> {
     let owned = rar_path(path);
-    let listed = list_rar(&owned, password)?;
+    let listed = list_rar(&owned, password, cancel)?;
     if listed.needs_password && password.is_none() {
         return Err(Fail::NeedPassword);
     }
@@ -1535,7 +1549,7 @@ fn hit_tar(path: &Path, name_needle: &str, text_needle: &str, case_sensitive: bo
 
 fn hit_rar(path: &Path, name_needle: &str, text_needle: &str, case_sensitive: bool, cancel: &dyn Fn() -> bool) -> Result<bool, Fail> {
     let owned = rar_path(path);
-    let listed = list_rar(&owned, None)?;
+    let listed = list_rar(&owned, None, &AtomicBool::new(false))?;
     if listed.needs_password {
         return Err(Fail::NeedPassword);
     }
@@ -1701,6 +1715,26 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn listing_stops_when_cancelled() {
+        let dir = tmp("list-cancel");
+        let zip = zip_with(&dir, &[("a.txt", "a"), ("b.txt", "b")], None);
+        assert_eq!(list_until(&zip, None, &AtomicBool::new(false)).unwrap().members.len(), 2);
+        assert!(matches!(list_until(&zip, None, &AtomicBool::new(true)), Err(Fail::Cancelled)));
+        let tar = dir.join("sample.tar");
+        let mut builder = tar::Builder::new(File::create(&tar).unwrap());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(1);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append_data(&mut header, "c.txt", &b"c"[..]).unwrap();
+        builder.finish().unwrap();
+        drop(builder);
+        assert_eq!(list_until(&tar, None, &AtomicBool::new(false)).unwrap().members.len(), 1);
+        assert!(matches!(list_until(&tar, None, &AtomicBool::new(true)), Err(Fail::Cancelled)));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn zip_with(dir: &Path, files: &[(&str, &str)], link: Option<(&str, &str)>) -> PathBuf {
