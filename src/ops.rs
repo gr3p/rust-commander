@@ -583,7 +583,40 @@ fn rename_noreplace(src: &Path, dest: &Path) -> io::Result<()> {
     if !matches!(err.raw_os_error(), Some(libc::EINVAL | libc::ENOSYS)) {
         return Err(err);
     }
-    Err(io::Error::new(io::ErrorKind::Unsupported, format!("cannot safely rename to {}: this filesystem does not support no-replace renames", dest.display())))
+    // NFS and many FUSE mounts (NTFS-3g, sshfs) reject the flag.
+    noreplace_fallback(src, dest)
+}
+
+/// Places `src` at `dest` without replacing anything there, using only calls that refuse an existing name.
+/// A file gets a hard link, then loses its old name. A folder takes the place of a fresh empty folder,
+/// and rename refuses that if something was put in it meanwhile.
+fn noreplace_fallback(src: &Path, dest: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = fs::symlink_metadata(src)?;
+    if meta.is_dir() {
+        fs::create_dir(dest)?;
+        if let Err(err) = fs::rename(src, dest) {
+            let _ = fs::remove_dir(dest);
+            return Err(err);
+        }
+        return Ok(());
+    }
+    if let Err(err) = fs::hard_link(src, dest) {
+        return match err.raw_os_error() {
+            Some(libc::EPERM | libc::EOPNOTSUPP | libc::ENOSYS | libc::EMLINK) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("cannot safely rename to {}: this filesystem supports neither no-replace renames nor hard links", dest.display()),
+            )),
+            _ => Err(err),
+        };
+    }
+    if let Err(err) = fs::remove_file(src) {
+        if fs::symlink_metadata(dest).is_ok_and(|now| (now.dev(), now.ino()) == (meta.dev(), meta.ino())) {
+            let _ = fs::remove_file(dest);
+        }
+        return Err(err);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -679,6 +712,58 @@ mod safety_tests {
             assert_eq!(fs::read(&src).unwrap(), b"new saved contents");
             assert_eq!(fs::read(&dest).unwrap(), b"old destination");
         }
+    }
+
+    #[test]
+    fn noreplace_fallback_moves_files_links_and_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        fs::write(&file, b"data").unwrap();
+        noreplace_fallback(&file, &dir.path().join("moved")).unwrap();
+        assert!(!file.exists());
+        assert_eq!(fs::read(dir.path().join("moved")).unwrap(), b"data");
+
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink("nowhere", &link).unwrap();
+        noreplace_fallback(&link, &dir.path().join("link2")).unwrap();
+        assert!(fs::symlink_metadata(&link).is_err());
+        assert_eq!(fs::read_link(dir.path().join("link2")).unwrap(), Path::new("nowhere"));
+
+        let folder = dir.path().join("folder");
+        fs::create_dir_all(folder.join("sub")).unwrap();
+        fs::write(folder.join("sub/inner"), b"inner").unwrap();
+        noreplace_fallback(&folder, &dir.path().join("folder2")).unwrap();
+        assert!(!folder.exists());
+        assert_eq!(fs::read(dir.path().join("folder2/sub/inner")).unwrap(), b"inner");
+    }
+
+    #[test]
+    fn noreplace_fallback_never_replaces_an_existing_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let taken = dir.path().join("taken");
+        fs::write(&src, b"new").unwrap();
+        fs::write(&taken, b"old").unwrap();
+        assert_eq!(noreplace_fallback(&src, &taken).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&src).unwrap(), b"new");
+        assert_eq!(fs::read(&taken).unwrap(), b"old");
+
+        let folder = dir.path().join("folder");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("a"), b"a").unwrap();
+        let busy = dir.path().join("busy");
+        fs::create_dir(&busy).unwrap();
+        assert_eq!(noreplace_fallback(&folder, &busy).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(noreplace_fallback(&folder, &taken).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(folder.join("a")).unwrap(), b"a");
+        assert!(busy.is_dir());
+        assert_eq!(fs::read(&taken).unwrap(), b"old");
+
+        // A folder cannot go inside itself; the empty placeholder is cleaned up.
+        let inside = folder.join("inside");
+        assert!(noreplace_fallback(&folder, &inside).is_err());
+        assert!(!inside.exists());
+        assert!(folder.join("a").exists());
     }
 
     #[test]
