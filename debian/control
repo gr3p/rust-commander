@@ -15,7 +15,8 @@ Homepage: https://github.com/gr3p/rust-commander
 Package: rust-commander
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}, hicolor-icon-theme
+Recommends: libasound2t64 | libasound2, libopus0
 Suggests: p7zip-full
 Description: dual-pane file manager
  Rust Commander copies and moves files, views and edits text, shows images,
- and packs and unpacks archives.
+ plays music, and packs and unpacks archives.

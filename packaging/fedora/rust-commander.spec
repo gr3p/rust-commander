@@ -16,6 +16,8 @@ BuildRequires:  gcc
 BuildRequires:  gtk4-devel
 BuildRequires:  vte291-gtk4-devel
 Requires:       hicolor-icon-theme
+Requires:       alsa-lib
+Recommends:     opus
 
 %description
 Dual-pane file manager for Linux, with built-in terminals, viewers and themes.

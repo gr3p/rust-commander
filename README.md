@@ -35,6 +35,8 @@ Early release (0.1.x): expect rough edges, and please [report them](https://gith
 
 - **See before you open.** Preview text, images and thumbnails right next to your files, and edit in place.
 
+- **Music in the quick view.** Press Ctrl+Q on a song and it plays in the other panel, with its cover, title and artist, a seek bar and volume. mp3, flac, ogg, opus, wav, aac, m4a and aiff are decoded by the program itself.
+
 - **Archives without the fuss.** Pack and unpack zip, 7z, rar and tar, and verify files with checksums.
 
 - **A terminal at hand.** Open real shells beside your files and jump between them.
@@ -85,6 +87,8 @@ sudo dnf install rust-commander
 
 Start it from the application menu, or run `rust-commander`. To remove it: `sudo apt remove rust-commander`, `yay -R rust-commander` or `sudo dnf remove rust-commander`.
 
+Music plays through ALSA, which PipeWire and PulseAudio answer to, so it works with the sound setup you already have. The package asks for `libasound2` and, for Opus files, `libopus0`. Without them the player says so and everything else works as before.
+
 For `.7z` and `.rar` archives, also install 7-Zip (`p7zip-full` on Ubuntu, `p7zip` on Arch) and RARLAB `rar`. `.zip` works without them.
 
 ## Usage
@@ -119,6 +123,15 @@ The panel with focus is the source, the other is the target. Press F1 for all co
 | Ctrl+Q | Quick view in the other panel, editable |
 | F4 | Open the editor you pick in F12 |
 
+| Music (quick view on an audio file) | |
+| --- | --- |
+| Ctrl+Q | The song under the cursor starts playing in the other panel. Moving to another file stops it and plays the new one |
+| Space (or the media key) | Play or pause. Press it after the song has ended to play it again. Insert still marks the file |
+| Left / Right | Seek 5 seconds back or forward, 30 seconds with Shift. The seek bar and volume also work with the mouse |
+| + / − | Volume |
+| M | Mute |
+| Enter | Open the file with your default player instead. A format the built-in player cannot read, such as WMA, says so and waits for Enter |
+
 | Archives and checksums | |
 | --- | --- |
 | Alt+F5 | Pack the selection to `.zip`, `.7z` or `.rar` |
@@ -151,6 +164,10 @@ The theme is the base for fonts and colors. The Theme dropdown starts with `omar
 
 Under Colors you can override the background color, the cursor color, the cursor text color (the text on the cursor bar only) and the mark color (files marked with Space). Each has a Reset that hands it back to the theme. Your own colors stay when you switch theme; a dialog says so and lets you drop them.
 
+### Music
+
+The player needs no setup. To play through a particular sound card, name its ALSA device in `RUST_COMMANDER_AUDIO_DEVICE`, for example `plughw:1,0` (see `aplay -L`). It starts at 80 % volume, which is a gentle level on the curve the volume follows, and the volume is not saved between runs.
+
 ### Omarchy
 
 With `omarchy` selected the window reads `~/.local/state/omarchy/current/theme/colors.toml` (the same names, aliases and light/dark mode as `omarchy-theme-color`) and restyles by itself when `omarchy theme set` rewrites `current/theme.name`. No hook is needed. It also follows:
@@ -180,10 +197,12 @@ sudo dnf install cargo rust pkgconf-pkg-config gcc gtk4-devel vte291-gtk4-devel
 cargo run --release
 ```
 
-If `cargo build` fails on `vte-2.91-gtk4`, install the VTE GTK4 package from the commands above. Packing `.7z` and `.rar` needs 7-Zip and RARLAB `rar` (`unrar` does not pack). The `.desktop` file is in `data/rust-commander.desktop`.
+The music player needs nothing extra to build: it loads ALSA and libopus when it first plays. If `cargo build` fails on `vte-2.91-gtk4`, install the VTE GTK4 package from the commands above. Packing `.7z` and `.rar` needs 7-Zip and RARLAB `rar` (`unrar` does not pack). The `.desktop` file is in `data/rust-commander.desktop`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how to test a change.
 
 ## License
 
 [MIT](LICENSE)
+
+The music player builds on [Symphonia](https://github.com/pdeljanov/Symphonia) (MPL-2.0, used unchanged, source on crates.io and at that link), which decodes mp3, flac, ogg vorbis, wav, aac, m4a and aiff. At run time it loads ALSA (LGPL-2.1) and libopus (BSD-3-Clause) from your system, so neither is part of the binary.

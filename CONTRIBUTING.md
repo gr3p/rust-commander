@@ -25,3 +25,10 @@ Try copy, move and delete in a scratch directory, for example `~/rust-commander-
 5. F8 moves a file to the trash. Restore it from the trash if you want to see that it is not really gone.
 6. F3 shows a text file, or an image in its own window. Ctrl+Q previews in the other panel. Left and right change the image in that folder.
 7. Close and start again. The window comes back.
+
+
+## Music player tests
+
+The audio tests (`cargo test --lib audio`) need no sound card. They play through a recording sink, and through ALSA's `null` device where the library exists. Tests that need libopus or ALSA skip themselves when the library is missing.
+
+The test files live in `tests/fixtures/audio` and are committed, so ffmpeg is only needed to change them: `scripts/make-audio-fixtures.sh` rebuilds all of them. The GUI smoke test (`scripts/gui-smoke.sh`) also plays a file through the whole app, on the `null` device.
