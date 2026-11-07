@@ -643,7 +643,7 @@ pub fn cursor_bar(p: &Palette, color: &str, alpha: u8, text: &str, frame: bool) 
         )
     };
     format!(
-        "frame.pane columnview > listview > row:selected,\nframe.pane columnview > listview > row:selected > cell,\nframe.pane gridview > child:selected {{\n  background-color: transparent;\n  background-image: none;\n  color: {idle};\n}}\n{active}"
+        "frame.pane columnview > listview > row:selected,\nframe.pane columnview > listview > row:selected > cell,\nframe.pane gridview > child:selected {{\n  background-color: transparent;\n  background-image: none;\n  color: {idle};\n}}\n{active}frame.pane-active gridview > child:selected {{\n  border-color: {color};\n}}\n"
     )
 }
 
@@ -789,6 +789,12 @@ label.icon-glyph {{
   min-width: 0;
   padding: 0;
   margin: 0 {icon_gap}px 0 0;
+}}
+/* Thumbnail cells always carry a border, so the cursor ring does not shift the grid. */
+frame.pane gridview > child,
+frame.pane-active gridview > child {{
+  border: 2px solid transparent;
+  border-radius: 4px;
 }}
 .thumb-cell .file-icon,
 .thumb-cell label.icon-glyph {{

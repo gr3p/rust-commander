@@ -2123,8 +2123,14 @@ impl App {
         let (dest, path, token) = self.state.mirror_to_other();
         let tab = self.state.pane(dest).active;
         self.spawn_load(sender, dest, tab, path, token);
-        // The other pane has no accent, so the blink must not require pane-active.
-        shell::blink_frame(&self.shell.panes[dest.index()].frame, dest.index(), false);
+        // Quick view keeps the other pane as its preview, so focus stays put there.
+        if self.state.quick_view {
+            shell::blink_frame(&self.shell.panes[dest.index()].frame, dest.index(), false);
+            return;
+        }
+        // The keys point at the other pane, so focus follows. Sync blinks the pane as it takes the accent.
+        self.state.active = dest;
+        self.focus_list();
     }
 
     fn move_list(&mut self, delta: isize) {

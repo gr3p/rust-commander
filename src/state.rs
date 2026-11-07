@@ -57,6 +57,8 @@ pub struct Tab {
     pub feed: bool,
     // The tab stays in the old folder until the listing for `token` arrives.
     pending: Option<(PathBuf, Step)>,
+    // File the cursor lands on when the pending listing arrives.
+    aim: Option<String>,
 }
 
 impl Tab {
@@ -71,11 +73,13 @@ impl Tab {
             token: fresh_token(),
             feed: false,
             pending: None,
+            aim: None,
         }
     }
 
     fn wait_for(&mut self, path: PathBuf, step: Step) -> u64 {
         self.pending = Some((path, step));
+        self.aim = None;
         self.token = fresh_token();
         self.token
     }
@@ -197,6 +201,7 @@ impl AppState {
         // A folder load still on its way must not replace the hits.
         tab.token = fresh_token();
         tab.pending = None;
+        tab.aim = None;
         tab.feed = true;
         tab.entries = entries;
         tab.cursor = 0;
@@ -307,14 +312,18 @@ impl AppState {
     pub fn mirror_to_other(&mut self) -> (PaneId, PathBuf, u64) {
         let src = self.active;
         let current = self.tab(src).path.clone();
-        // The folder under the cursor. A file keeps this panel's own directory.
-        let path = self
-            .cursor_entry(src)
+        // The folder under the cursor. A file keeps this panel's own directory, and the other cursor follows it.
+        let under = self.cursor_entry(src).filter(|entry| entry.name.as_ref() != "..");
+        let file = under.filter(|entry| !entry.is_dir() && !self.tab(src).feed).map(|entry| entry.name.to_string());
+        let path = under
             .filter(|entry| entry.is_dir())
             .map(|entry| listing::entry_path(&current, entry))
             .unwrap_or(current);
         let dest = src.other();
         let token = self.navigate(dest, path.clone(), true);
+        if let Some(name) = file {
+            self.tab_mut(dest).aim = Some(name);
+        }
         (dest, path, token)
     }
 
@@ -372,6 +381,7 @@ impl AppState {
             return false;
         };
         let _ = tab_index;
+        let aim = tab.aim.take();
         // A reload of the same folder keeps the cursor on its file, not on its row number.
         let kept = tab.pending.is_none().then(|| {
             let visible = listing::visible_indices(&tab.entries, sort, ascending, show_hidden, &filter);
@@ -386,7 +396,10 @@ impl AppState {
         tab.entries = entries;
         let shown = if left { "" } else { filter.as_str() };
         let visible = listing::visible_indices(&tab.entries, sort, ascending, show_hidden, shown);
-        if let Some(at) = kept.flatten().and_then(|name| visible.iter().position(|&slot| tab.entries[slot].name == name)) {
+        let aimed = aim.and_then(|name| visible.iter().position(|&slot| tab.entries[slot].name.as_ref() == name));
+        if let Some(at) = aimed {
+            tab.cursor = at;
+        } else if let Some(at) = kept.flatten().and_then(|name| visible.iter().position(|&slot| tab.entries[slot].name == name)) {
             tab.cursor = at;
         } else if visible.is_empty() {
             tab.cursor = 0;
@@ -405,6 +418,7 @@ impl AppState {
             return false;
         };
         tab.pending = None;
+        tab.aim = None;
         tab.token = fresh_token();
         true
     }
@@ -582,6 +596,19 @@ mod tests {
         let (dest, path, _) = state.mirror_to_other();
         assert_eq!(dest, PaneId::Left);
         assert_eq!(path, PathBuf::from("/home/marcus"));
+    }
+
+    #[test]
+    fn ctrl_arrow_on_a_file_puts_the_other_cursor_on_it() {
+        let mut state = AppState::new("/left".into(), "/right".into());
+        let listing = || vec![Entry::dotdot(), file("a.png"), file("b.png"), file("c.png")];
+        state.tab_mut(PaneId::Left).entries = listing();
+        state.set_cursor(2);
+        let (dest, path, token) = state.mirror_to_other();
+        assert_eq!(path, PathBuf::from("/left"));
+        assert!(state.apply_listing(dest, 0, token, listing()));
+        assert_eq!(state.tab(dest).cursor, 2);
+        assert_eq!(state.tab(PaneId::Left).cursor, 2);
     }
 
     #[test]
