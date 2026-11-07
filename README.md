@@ -45,9 +45,15 @@ Early release (0.1.x): expect rough edges, and please [report them](https://gith
 
 - **Looks like your desktop.** Ships with popular themes, and follows Omarchy when you change theme.
 
-<img src="img/quick-edit.png" alt="Quick view editing a JSON file next to the file panel" width="900">
+<p align="center">
+  <img src="img/quick-edit.png" alt="Quick view editing a JSON file next to the file panel" width="900"><br>
+  Edit support
+</p>
 
-<img src="img/music-player.png" alt="The built-in music player in the quick view, with the visualizer behind the cover, title and controls" width="900">
+<p align="center">
+  <img src="img/music-player.png" alt="The built-in music player in the quick view, with the visualizer behind the cover, title and controls" width="900"><br>
+  Music Player support
+</p>
 
 ## Install
 
