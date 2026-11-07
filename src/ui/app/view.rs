@@ -131,6 +131,8 @@ impl App {
                 picture.set_size_request(if fit { -1 } else { width as i32 }, if fit { -1 } else { height as i32 });
             }
             PreviewBody::Text(err) => self.status = err,
+            // The F3 window only ever shows an image or an error.
+            PreviewBody::Audio => {}
         }
     }
 
@@ -524,6 +526,10 @@ impl App {
     }
 
     pub(in crate::ui::app) fn toggle_quick_view(&mut self, sender: &ComponentSender<Self>) {
+        // The small player is up and the cursor is on a song: the song plays there instead of opening the quick view.
+        if self.audio_quick_over_mini(sender) {
+            return;
+        }
         if self.shell.editing.get() && !self.leave_quick_edit(sender) {
             return;
         }
@@ -533,6 +539,7 @@ impl App {
             self.status = "QUICKVIEW: view".into();
             self.note_preview_target();
             self.focus_list();
+            self.audio_quick_start(sender);
         } else {
             for pane in &self.shell.panes {
                 crate::ui::row::set_dot_spin(&pane.preview_wait, false);
@@ -746,6 +753,12 @@ impl App {
         let generation = self.state.preview_gen;
         self.preview.generation = generation;
         self.preview_sent = generation;
+        // The big player keeps the pane whatever the cursor is on.
+        if self.audio_full() {
+            self.preview.set_body(PreviewBody::Audio);
+            self.paint_preview();
+            return;
+        }
         let Some(path) = self.file_under_cursor() else {
             let text = self
                 .state
@@ -759,6 +772,12 @@ impl App {
         };
         let charset = self.charset;
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        if rust_commander::audio::can_try(name) && !self.audio_is_mini() {
+            // The player fills the pane and waits for Enter. Ctrl+Q on a song starts it, see toggle_quick_view.
+            self.preview.set_body(PreviewBody::Audio);
+            self.paint_preview();
+            return;
+        }
         if let Some(art) = rust_commander::icons::art_for(name) {
             let palette = rust_commander::theme::load_named(&rust_commander::theme::active_name(
                 &self.cfg.theme,
@@ -1064,6 +1083,12 @@ pub(in crate::ui::app) fn show_slot(ui: &crate::ui::shell::PaneUi, slot: &lister
                 ui.preview.scroll_to_iter(&mut start, 0.0, true, 0.0, 0.0);
             }
             paint_syntax(&ui.preview, name, syntax);
+            None
+        }
+        PreviewBody::Audio => {
+            if ui.preview_kind.visible_child_name().as_deref() != Some("player") {
+                ui.preview_kind.set_visible_child_name("player");
+            }
             None
         }
         PreviewBody::Image { width, height, pixels } => {

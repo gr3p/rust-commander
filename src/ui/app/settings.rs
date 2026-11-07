@@ -367,8 +367,9 @@ impl App {
         column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         column.append(&commands_row(tx.clone()));
         let about = about_page();
+        let (music, music_ui) = super::music::music_page(&self.cfg, &tx);
         let tabs = gtk::Notebook::new();
-        for (title, page) in [("General", &column), ("Theme and colors", &look), ("About", &about)] {
+        for (title, page) in [("General", &column), ("Theme and colors", &look), ("Music", &music), ("About", &about)] {
             let label = gtk::Label::new(Some(title));
             let flash = label.clone();
             let click = gtk::GestureClick::new();
@@ -432,6 +433,7 @@ impl App {
             icon_pack,
             icon_pack_ids,
             icon_pack_guard,
+            music: music_ui,
         });
     }
 
@@ -841,7 +843,7 @@ fn overrides_text(cfg: &config::Config) -> String {
     if own.is_empty() { "No custom colors. Everything follows the theme.".into() } else { format!("Your own colors on top of the theme: {}.", own.join(", ")) }
 }
 
-fn note(text: &str) -> gtk::Label {
+pub(in crate::ui::app) fn note(text: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(text));
     label.set_wrap(true);
     label.set_xalign(0.0);
@@ -884,7 +886,7 @@ fn about_page() -> gtk::Box {
     page
 }
 
-fn section(title: &str) -> gtk::Label {
+pub(in crate::ui::app) fn section(title: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(title));
     label.add_css_class("dialog-title");
     label.set_xalign(0.0);

@@ -35,6 +35,8 @@ Early release (0.1.x): expect rough edges, and please [report them](https://gith
 
 - **See before you open.** Preview text, images and thumbnails right next to your files, and edit in place.
 
+- **Music built in.** Press Ctrl+Q on a song and it plays in the other panel, with its cover, tags, a seek bar, volume and a visualizer in your theme's colors. The playlist is the folder, or the songs you marked and sent from the right-click menu, with next, previous, shuffle and repeat. Fold it into a small player under a panel and keep working. mp3, flac, ogg, opus, wav, aac, m4a and aiff are decoded by the program itself and played through ALSA, so PipeWire and PulseAudio work. The keys are under Music below.
+
 - **Archives without the fuss.** Pack and unpack zip, 7z, rar and tar, and verify files with checksums.
 
 - **A terminal at hand.** Open real shells beside your files and jump between them.
@@ -85,6 +87,8 @@ sudo dnf install rust-commander
 
 Start it from the application menu, or run `rust-commander`. To remove it: `sudo apt remove rust-commander`, `yay -R rust-commander` or `sudo dnf remove rust-commander`.
 
+Music plays through ALSA, which PipeWire and PulseAudio answer to, so it works with the sound setup you already have. The package asks for `libasound2` and, for Opus files, `libopus0`. Without them the player says so and everything else works as before.
+
 For `.7z` and `.rar` archives, also install 7-Zip (`p7zip-full` on Ubuntu, `p7zip` on Arch) and RARLAB `rar`. `.zip` works without them.
 
 ## Usage
@@ -119,6 +123,47 @@ The panel with focus is the source, the other is the target. Press F1 for all co
 | Ctrl+Q | Quick view in the other panel, editable |
 | F4 | Open the editor you pick in F12 |
 
+| Music (the big player in the quick view) | |
+| --- | --- |
+| Ctrl+Q on a song | The song starts playing in the other panel at once, and the playlist is the music files of that folder in the order the list shows them. Ctrl+Q again closes the quick view and stops the music |
+| Enter on a song | Plays that song. With the quick view on a song and nothing playing, the player waits for Enter |
+| Tab | The keys go to the player, and Tab again hands them back to the file panel. The player is outlined while it has them |
+| Space (or the media key) | Play or pause. Press it after the song has ended to play it again |
+| Ctrl+Left / Ctrl+Right | Seek 5 seconds back or forward, 30 seconds with Shift. The seek bar and volume also work with the mouse |
+| N / P (or the next and previous media keys) | Next and previous song. The cursor moves to it. P inside the first 3 seconds goes to the song before, later it starts the song again |
+| S / R | Shuffle on or off. Repeat off, all, one. Both are remembered |
+| + / − | Volume |
+| M | Mute |
+| Ctrl+M | Minimize the player (see below) |
+| Escape | Hand the keys back to the file panel |
+| Ctrl+Enter | Open In External Player: your default player opens the file and the built-in one pauses. A format the built-in player cannot read, such as WMA, says so and waits for Ctrl+Enter |
+
+The player keys (Space, the letters, +/− and the arrows) work while the player has the keys, so Space marks files as usual while the file panel has them. The media keys work all the time.
+
+Moving the cursor never changes the song. It changes when you press Enter on another song, when you press N or P, and when a song ends. The big player keeps the quick view pane even if the cursor goes to a text file, until you press Ctrl+Q or minimize it.
+
+The cover is the one inside the file. Without one, the player looks for a picture in the folder called `cover`, `folder`, `front`, `albumart`, `album` or `poster` (jpg, png and so on), and shows it for every song there. `back`, `inlay` and `disc` pictures are skipped.
+
+The cover is shown square and never larger than about 38 % of the window's shorter side, and it shrinks to fit when there is little room.
+
+The visualizer plays behind the whole player and follows the sound itself. The small buttons in the top corner switch it on or off, open the cogwheel to pick a style (Bars, Wave, Radial or Ribbon) and minimize the player. The same choices are in F12 on the Music tab.
+
+| Playlists from marked songs | |
+| --- | --- |
+| Right-click, Send and replace music in player (or Ctrl+P) | The marked songs of the panel become the playlist, in the order the list shows them, and the first one plays. With nothing marked, the song under the cursor is sent. A right-click on a row that is not marked sends only that row and leaves the marks |
+| Right-click, Add to current playlist (or Ctrl+Shift+P) | The songs go last in the playlist that is playing. Songs already in it are not added twice. With nothing playing they start a playlist |
+
+The songs go to the player that is open: the small one if the small player is up, the big one if it is, and with none open the big one when the quick view is on and otherwise the small one. A picked playlist stays as it is, whatever the list shows.
+
+| Small player | |
+| --- | --- |
+| Minimize button or Ctrl+M | The player folds into a bar under the list it started from, the quick view closes and both lists work as usual. The music plays on, to the end of the folder, and the cursor follows it unless you have moved it away |
+| Enter on a song | Plays it in the small player, in any folder and in either panel. If no player is up and the quick view is off, it starts the small player under that panel |
+| Ctrl+Q on a song | While the small player is up, a song under the cursor plays there instead of opening the quick view. Ctrl+Q on anything else is the quick view as usual |
+| Tab | Left panel, right panel, small player, and round again |
+| Ctrl+M | Jump to the small player. Ctrl+M again, with the keys in it, makes it big. In the big player Ctrl+M folds it, so Ctrl+M toggles between the two. Escape and any list key give the keys back to the list. Space, Ctrl+Left / Right, N / P (or Up / Down), R, S, + / − and M work on it while it has them |
+| Expand button | Back to the big player: the list shows the folder with the cursor on the song, and the quick view opens. The X stops the music and closes the player |
+
 | Archives and checksums | |
 | --- | --- |
 | Alt+F5 | Pack the selection to `.zip`, `.7z` or `.rar` |
@@ -151,6 +196,10 @@ The theme is the base for fonts and colors. The Theme dropdown starts with `omar
 
 Under Colors you can override the background color, the cursor color, the cursor text color (the text on the cursor bar only) and the mark color (files marked with Space). Each has a Reset that hands it back to the theme. Your own colors stay when you switch theme; a dialog says so and lets you drop them.
 
+### Music
+
+The player needs no setup. To play through a particular sound card, name its ALSA device in `RUST_COMMANDER_AUDIO_DEVICE`, for example `plughw:1,0` (see `aplay -L`). It starts at 80 % volume, which is a gentle level on the curve the volume follows, and the volume is not saved between runs. Shuffle, repeat, and the visualizer's on/off and style are saved in `config.toml` (`player_shuffle`, `player_repeat`, `player_visual_on`, `player_visual`).
+
 ### Omarchy
 
 With `omarchy` selected the window reads `~/.local/state/omarchy/current/theme/colors.toml` (the same names, aliases and light/dark mode as `omarchy-theme-color`) and restyles by itself when `omarchy theme set` rewrites `current/theme.name`. No hook is needed. It also follows:
@@ -180,10 +229,12 @@ sudo dnf install cargo rust pkgconf-pkg-config gcc gtk4-devel vte291-gtk4-devel
 cargo run --release
 ```
 
-If `cargo build` fails on `vte-2.91-gtk4`, install the VTE GTK4 package from the commands above. Packing `.7z` and `.rar` needs 7-Zip and RARLAB `rar` (`unrar` does not pack). The `.desktop` file is in `data/rust-commander.desktop`.
+The music player needs nothing extra to build: it loads ALSA and libopus when it first plays. If `cargo build` fails on `vte-2.91-gtk4`, install the VTE GTK4 package from the commands above. Packing `.7z` and `.rar` needs 7-Zip and RARLAB `rar` (`unrar` does not pack). The `.desktop` file is in `data/rust-commander.desktop`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how to test a change.
 
 ## License
 
 [MIT](LICENSE)
+
+The music player builds on [Symphonia](https://github.com/pdeljanov/Symphonia) (MPL-2.0, used unchanged, source on crates.io and at that link), which decodes mp3, flac, ogg vorbis, wav, aac, m4a and aiff. At run time it loads ALSA (LGPL-2.1) and libopus (BSD-3-Clause) from your system, so neither is part of the binary.

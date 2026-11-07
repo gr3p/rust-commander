@@ -43,6 +43,14 @@ pub fn set_current(p: &Palette) {
     if let Ok(mut slot) = CURRENT.write() {
         *slot = Some(p.clone());
     }
+    VERSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+static VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Changes whenever the palette is replaced, so drawing code that caches colors knows to read them again.
+pub fn version() -> u64 {
+    VERSION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 // A theme bundled with the binary, so several themes work with no Omarchy install.
@@ -1052,6 +1060,175 @@ button.menu-row label.menu-key {{
   color: {dim};
   margin-left: 24px;
 }}
+/* Music player in the quick view pane. */
+.audio-player {{
+  padding: 14px 18px;
+}}
+.audio-note {{
+  font-size: 110px;
+  color: {muted};
+}}
+.audio-title {{
+  font-size: {title_px}px;
+  font-weight: bold;
+  color: {bright};
+}}
+/* The visualizer sits behind the text, so the text keeps a halo of the background color. */
+.audio-player label {{
+  text-shadow: 0 0 3px {bg}, 0 0 7px {bg};
+}}
+.audio-artist,
+.audio-album {{
+  color: {fg};
+}}
+.audio-detail,
+.audio-time,
+.audio-hint {{
+  color: {dim};
+}}
+/* In the big player the small print sits on the visualizer, so it is a little clearer than the dim color. */
+.audio-player .audio-detail,
+.audio-player .audio-time,
+.audio-player .audio-hint {{
+  color: {soft};
+}}
+.audio-message {{
+  color: {red};
+}}
+.audio-time {{
+  font-feature-settings: "tnum";
+}}
+.audio-player scale trough,
+.audio-mini scale trough {{
+  background: {muted};
+  min-height: 4px;
+  border: none;
+  box-shadow: none;
+  outline: none;
+  border-radius: 2px;
+}}
+.audio-player scale highlight,
+.audio-mini scale highlight {{
+  background: {accent};
+  min-height: 4px;
+  border: none;
+  box-shadow: none;
+  outline: none;
+  border-radius: 2px;
+}}
+.audio-player scale slider,
+.audio-mini scale slider {{
+  background: {accent};
+  min-width: 12px;
+  min-height: 12px;
+  border-radius: 6px;
+  border: none;
+  box-shadow: none;
+  margin: -4px;
+}}
+.audio-player scale:disabled slider,
+.audio-mini scale:disabled slider {{
+  background: {muted};
+}}
+/* The player's buttons are drawn icons that take the text color of the button. */
+button.media-icon,
+menubutton.media-icon > button {{
+  background: transparent;
+  color: {dim};
+  border: none;
+  box-shadow: none;
+  border-radius: 999px;
+  padding: 4px;
+  min-height: 0;
+  min-width: 0;
+}}
+button.media-icon:hover,
+menubutton.media-icon > button:hover,
+menubutton.media-icon > button:checked {{
+  background: transparent;
+  color: {bright};
+}}
+button.media-icon.on {{
+  color: {accent};
+}}
+button.media-icon:disabled {{
+  color: {muted};
+}}
+button.media-icon.media-step {{
+  color: {fg};
+}}
+button.media-icon.media-step:hover {{
+  color: {bright};
+}}
+button.media-icon.media-step:disabled {{
+  color: {muted};
+}}
+button.media-icon.media-play {{
+  background: {accent};
+  color: {bg};
+  padding: 8px;
+}}
+button.media-icon.media-play:hover {{
+  background: {bright};
+  color: {bg};
+}}
+button.media-icon.media-play:disabled {{
+  background: {muted};
+  color: {bg};
+}}
+/* The small player has a smaller play circle than the big one. */
+.audio-mini button.media-icon {{
+  padding: 3px;
+}}
+.audio-mini button.media-icon.media-play {{
+  padding: 5px;
+}}
+button.media-icon.media-quiet,
+menubutton.media-icon.media-quiet {{
+  opacity: 0.65;
+}}
+button.media-icon.media-quiet:hover,
+menubutton.media-icon.media-quiet:hover {{
+  opacity: 1;
+}}
+/* The small player under a file list. */
+.audio-mini {{
+  padding: 5px 10px;
+  background: {sel};
+  border-top: 1px solid {muted};
+}}
+/* The big player has an outline that is only drawn while it has the keyboard, so nothing moves. */
+.audio-big {{
+  border: 2px solid transparent;
+}}
+.audio-big.focused {{
+  border-color: {accent};
+}}
+.audio-mini.focused {{
+  box-shadow: inset 0 0 0 2px {accent};
+}}
+.audio-mini-art {{
+  background: {muted};
+  border-radius: 4px;
+}}
+.audio-mini-note {{
+  font-size: 24px;
+  color: {dim};
+}}
+.audio-mini-title {{
+  font-weight: bold;
+  color: {bright};
+}}
+.audio-mini-artist {{
+  color: {soft};
+}}
+.audio-mini .audio-time {{
+  color: {dim};
+}}
+.audio-pop-title {{
+  color: {dim};
+  font-weight: bold;
+}}
 @define-color accent_color {accent};
 @define-color accent_bg_color {accent};
 @define-color accent_fg_color {bg};
@@ -1084,6 +1261,9 @@ entry:focus-within {{
         rsel = p.row_selected,
         rhov = p.row_hover,
         dim = p.dim,
+        soft = mix(&p.dim, &p.foreground, 0.4),
+        red = p.red,
+        title_px = (f64::from(s.font_px) * 1.5).round() as u32,
         radius = s.radius,
         icon_gap = s.space(6),
         cell_pad = format!("0 {}px", s.space(6)),

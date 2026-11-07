@@ -24,9 +24,12 @@ static SIZING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 use super::row::{self, EntryObject};
 use super::shell::{self, Shell};
 
+mod audio;
+mod audio_smoke;
 mod commands;
 mod disk;
 mod mount;
+mod music;
 mod jobs;
 mod props;
 mod queue;
@@ -179,9 +182,11 @@ struct SettingsUi {
     icon_pack: gtk::DropDown,
     icon_pack_ids: Rc<RefCell<Vec<String>>>,
     icon_pack_guard: Rc<Cell<bool>>,
+    music: music::MusicUi,
 }
 
 pub struct App {
+    audio: audio::AudioState,
     state: AppState,
     shell: Shell,
     cfg: Config,
@@ -348,6 +353,7 @@ impl SimpleComponent for App {
             gtk::glib::Propagation::Proceed
         });
         let mut model = App {
+            audio: audio::AudioState::new(),
             state,
             shell,
             cfg,
@@ -443,6 +449,10 @@ impl SimpleComponent for App {
         self.on_msg(msg, &sender);
         self.arm_watches(&sender);
         self.kick_preview(&sender);
+        // Finding the file under the cursor sorts the folder, so an idle poll leaves it be.
+        if !idle_poll || self.dirty.iter().any(|pane| *pane) {
+            self.reconcile_audio(&sender);
+        }
         if !(idle_poll && self.job.is_none() && !self.dirty.iter().any(|pane| *pane)) {
             self.sync();
         }
@@ -479,9 +489,13 @@ impl App {
                 self.set_sort(key);
             }
             Msg::FilterChanged(pane, text) => {
-                self.state.pane_mut(PaneId::from_index(pane)).filter = text;
-                self.state.tab_mut(PaneId::from_index(pane)).cursor = 0;
-                self.touch(PaneId::from_index(pane));
+                let id = PaneId::from_index(pane);
+                // A filter that the program itself cleared comes back here as the same text. The cursor stays.
+                if self.state.pane(id).filter != text {
+                    self.state.tab_mut(id).cursor = 0;
+                }
+                self.state.pane_mut(id).filter = text;
+                self.touch(id);
             }
             Msg::PathGo(pane, text) => self.go_typed_path(pane, &text, sender),
             Msg::CopyShownPath(pane) => self.copy_shown_path(pane),
@@ -512,7 +526,25 @@ impl App {
                 self.poll_job(sender);
                 self.poll_archive_list();
                 self.poll_queue(sender);
+                self.tick_audio();
             }
+            Msg::AudioEvent(event) => self.on_audio_event(event, sender),
+            Msg::AudioCover { generation, image, key } => self.on_audio_cover(generation, image, key),
+            Msg::AudioSeek(fraction) => self.audio_seek_to(fraction),
+            Msg::AudioVolume(volume) => self.audio_set_volume(volume as f32),
+            Msg::AudioToggle => self.audio_toggle(sender),
+            Msg::AudioMute => self.audio_toggle_mute(),
+            Msg::AudioPrev => self.audio_prev(sender),
+            Msg::AudioNext => self.audio_next(sender),
+            Msg::AudioShuffle => self.audio_toggle_shuffle(),
+            Msg::AudioRepeat => self.audio_cycle_repeat(),
+            Msg::AudioMinimize => self.audio_minimize(sender),
+            Msg::AudioExpand => self.audio_expand(sender),
+            Msg::AudioClose => self.audio_close(),
+            Msg::AudioVisualOn(on) => self.audio_set_visual_on(on),
+            Msg::AudioVisualToggle => self.audio_set_visual_on(!self.cfg.player_visual_on),
+            Msg::AudioVisualStyle(style) => self.audio_set_visual_style(style),
+            Msg::AudioRepeatSet(repeat) => self.audio_set_repeat(repeat),
             Msg::Enqueue(text) => self.enqueue(&text, sender),
             Msg::QueuePause => self.toggle_queue_pause(),
             Msg::QueueRemove => self.remove_queued(),
@@ -645,6 +677,7 @@ impl App {
                 if self.hot.is_some() {
                     return;
                 }
+                self.audio_unfocus();
                 // A click in the quick editor must not make its pane active and hide the editor.
                 if self.quick_edit.as_ref().is_some_and(|edit| edit.pane == pane) {
                     self.shell.active.set(self.state.active.index());
@@ -770,6 +803,9 @@ impl App {
         if ctrl && alt {
             return;
         }
+        if self.audio_focused() && self.audio_focus_key(key, mods, sender) {
+            return;
+        }
         if ctrl {
             if let Some(slot) = drive_slot(key) {
                 self.pick_drive(slot, sender);
@@ -809,6 +845,10 @@ impl App {
                     let button = self.shell.mount_button.clone();
                     shell::blink_then(button.upcast_ref(), move || tx.emit(Msg::Run(rust_commander::commands::Act::Mount)));
                 }
+                Key::m | Key::M => self.audio_jump(sender),
+                Key::Return | Key::KP_Enter => self.audio_open_external(),
+                Key::p | Key::P if shift => self.audio_add(false, sender),
+                Key::p | Key::P => self.audio_send(false, sender),
                 Key::l | Key::L => self.focus_path(),
                 Key::y | Key::Y => self.toggle_syntax(),
                 Key::t | Key::T => self.open_new_tab(sender),
@@ -877,7 +917,11 @@ impl App {
             Key::F8 | Key::Delete => self.on_fkey(8, shift, sender),
             Key::F9 if shift => self.ask_checksum(sender),
             Key::F9 => self.toggle_panel_terminal(sender),
-            Key::ISO_Left_Tab | Key::Tab if self.shell.editing.get() || self.state.quick_view => {}
+            Key::ISO_Left_Tab | Key::Tab if self.shell.editing.get() => {}
+            Key::ISO_Left_Tab | Key::Tab if self.audio_alive() && !self.state.panel_terminal => {
+                self.audio_tab(key == Key::ISO_Left_Tab || shift);
+            }
+            Key::ISO_Left_Tab | Key::Tab if self.state.quick_view => {}
             Key::ISO_Left_Tab | Key::Tab if self.state.panel_terminal => self.focus_across_shell(),
             Key::ISO_Left_Tab | Key::Tab => {
                 self.state.active = self.state.active.other();
@@ -890,6 +934,10 @@ impl App {
                 self.paint_mark(self.state.active, index);
                 self.focus_list();
             }
+            Key::AudioPlay | Key::AudioPause if self.audio_alive() => self.audio_toggle(sender),
+            Key::AudioStop if self.audio_alive() => self.audio_stop(),
+            Key::AudioNext if self.audio_alive() => self.audio_next(sender),
+            Key::AudioPrev if self.audio_alive() => self.audio_prev(sender),
             Key::space | Key::KP_Space => {
                 let index = self.state.tab(self.state.active).cursor;
                 self.state.toggle_mark_stay();
@@ -1166,10 +1214,16 @@ impl App {
             self.start_verify(sender);
             return;
         }
+        // A song plays in the built-in player. Ctrl+Enter is the way to the external one.
+        if self.audio_enter(sender) {
+            return;
+        }
         if let Some((id, path, token)) = self.state.enter() {
             let tab = self.state.pane(id).active;
             self.spawn_load(sender, id, tab, path, token);
         } else {
+            // The default player takes over, so the built-in one steps aside.
+            self.audio_pause_for_external();
             self.open_external(true);
         }
     }
@@ -1481,10 +1535,11 @@ impl App {
             };
             let ui = &self.shell.panes[pane];
             row::set_loading(&ui.list, self.loads.iter().any(|(live, _)| *live == self.state.tab(id).token));
-            let class = if active { "pane-active" } else { "pane" };
+            // While the small player has the keys, no list looks like the one they go to.
+            let class = if active && !self.audio_focused() { "pane-active" } else { "pane" };
             if !ui.frame.has_css_class(class) {
                 ui.frame.set_css_classes(&[class]);
-                if active && focused_before {
+                if class == "pane-active" && focused_before {
                     shell::blink_frame(&ui.frame, pane, true);
                 }
             }
@@ -1513,6 +1568,7 @@ impl App {
                 if let Some(rev) = view::show_slot(ui, &self.preview, self.preview_shown[pane], self.quick_fit, syntax, &name) {
                     self.preview_shown[pane] = rev;
                 }
+                self.paint_audio();
             }
             let labels = tab_labels(&tab_titles, tab_active);
             if tabs_current(&ui.tabs) != labels {
@@ -1577,6 +1633,16 @@ impl App {
         self.paint_mode_bar();
         self.mark_drives();
         SYNCING.store(false, Ordering::Relaxed);
+    }
+
+    // The music player on real files, through the real engine and ALSA's null device.
+    fn smoke_music(&mut self, errors: &mut Vec<String>, sender: &ComponentSender<Self>) {
+        if !rust_commander::audio::alsa_available() {
+            println!("SMOKE_MUSIC skipped: no ALSA library");
+            return;
+        }
+        self.smoke_player(errors, sender);
+        println!("SMOKE_MUSIC ran");
     }
 
     fn run_smoke(&mut self, sender: &ComponentSender<Self>) {
@@ -1821,6 +1887,7 @@ impl App {
         if self.shell.panes[1].stack.visible_child_name().as_deref() != Some("list") {
             errors.push("quick view stayed".into());
         }
+        self.smoke_music(&mut errors, sender);
 
         self.toggle_settings(sender);
         let shown = self.settings.as_ref().map(|ui| ui.columns.text().to_string());
@@ -2480,7 +2547,35 @@ fn smoke_dirs() -> (PathBuf, PathBuf) {
     let _ = std::fs::write(left.join("note.txt"), "hello rust-commander\n");
     let _ = std::fs::write(left.join("sub").join("b.txt"), "nested\n");
     let _ = std::fs::write(left.join("move-me.txt"), "move\n");
+    let _ = std::fs::write(left.join("tone.wav"), tone_wav(1));
+    let _ = std::fs::write(left.join("tone2.wav"), tone_wav(20));
+    let _ = std::fs::write(left.join("tone3.wav"), tone_wav(20));
+    let _ = std::fs::write(left.join("sub").join("other.wav"), tone_wav(20));
+    let _ = std::fs::write(left.join("sub").join("other2.wav"), tone_wav(20));
     (left, right)
+}
+
+// Tenths of a second of 440 Hz as a mono 8 kHz WAV, for the music smoke test.
+fn tone_wav(tenths: u32) -> Vec<u8> {
+    let rate = 8000u32;
+    let samples: Vec<u8> = (0..rate / 10 * tenths)
+        .flat_map(|i| (((i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 8000.0) as i16).to_le_bytes())
+        .collect();
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + samples.len() as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&rate.to_le_bytes());
+    wav.extend_from_slice(&(rate * 2).to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&samples);
+    wav
 }
 
 #[cfg(test)]

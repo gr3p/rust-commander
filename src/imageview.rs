@@ -75,6 +75,22 @@ pub fn decode(path: &Path, max_edge: u32) -> Result<Rgba, String> {
     })
 }
 
+/// Cover art and other pictures that are already in memory.
+pub fn decode_bytes(bytes: &[u8], max_edge: u32) -> Result<Rgba, String> {
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err("Image too large".into());
+    }
+    let mut reader = ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|err| err.to_string())?;
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(MAX_ALLOC);
+    reader.limits(limits);
+    let img = downscale(reader.decode().map_err(|err| err.to_string())?, max_edge);
+    let rgba = img.to_rgba8();
+    Ok(Rgba { width: rgba.width(), height: rgba.height(), pixels: rgba.into_raw() })
+}
+
 pub fn render_svg(svg: &str, edge: u32) -> Result<Rgba, String> {
     let tree = resvg::usvg::Tree::from_str(svg, &resvg::usvg::Options::default()).map_err(|err| err.to_string())?;
     let mut pixmap = resvg::tiny_skia::Pixmap::new(edge, edge).ok_or_else(|| "Bad icon size".to_string())?;
@@ -160,4 +176,34 @@ fn fit_size(w: u32, h: u32, max_edge: u32) -> (u32, u32) {
     let nw = (w as u64 * max_edge as u64 / long as u64).max(1) as u32;
     let nh = (h as u64 * max_edge as u64 / long as u64).max(1) as u32;
     (nw, nh)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cover() -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/audio/tagged.flac");
+        let source = crate::audio::FileSource::open(&path).unwrap();
+        source.info().cover.as_ref().unwrap().data.clone()
+    }
+
+    #[test]
+    fn cover_bytes_decode_and_shrink() {
+        let bytes = cover();
+        let full = decode_bytes(&bytes, 2048).unwrap();
+        assert_eq!((full.width, full.height), (64, 64));
+        assert_eq!(full.pixels.len(), 64 * 64 * 4);
+        let small = decode_bytes(&bytes, 16).unwrap();
+        assert_eq!((small.width, small.height), (16, 16));
+    }
+
+    #[test]
+    fn bad_cover_bytes_are_an_error() {
+        assert!(decode_bytes(b"", 64).is_err());
+        assert!(decode_bytes(b"not an image at all", 64).is_err());
+        let mut cut = cover();
+        cut.truncate(40);
+        assert!(decode_bytes(&cut, 64).is_err());
+    }
 }

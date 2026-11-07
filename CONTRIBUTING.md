@@ -25,3 +25,10 @@ Try copy, move and delete in a scratch directory, for example `~/rust-commander-
 5. F8 moves a file to the trash. Restore it from the trash if you want to see that it is not really gone.
 6. F3 shows a text file, or an image in its own window. Ctrl+Q previews in the other panel. Left and right change the image in that folder.
 7. Close and start again. The window comes back.
+
+
+## Music player tests
+
+The audio tests (`cargo test --lib audio`) need no sound card. They play through a recording sink, and through ALSA's `null` device where the library exists. Tests that need libopus or ALSA skip themselves when the library is missing.
+
+The test files live in `tests/fixtures/audio` and are committed, so ffmpeg is only needed to change them: `scripts/make-audio-fixtures.sh` rebuilds all of them. The GUI smoke test (`scripts/gui-smoke.sh`) also plays files through the whole app, on the `null` device: it starts the idle quick view with Enter, checks that the cursor does not steer the song and that Space marks again when the file panel has the keys, steps through three tracks with next and previous, sends and adds marked songs as a playlist, minimizes the player to the small bar, walks Tab and Ctrl+M through it, plays songs in it with Enter and Ctrl+Q, and expands it again. The playlist, the visualizer's analysis (`audio/fft.rs`, `audio/analyzer.rs`) and the folder cover search (`audio/cover.rs`) are plain Rust with unit tests, so they run without a window.
