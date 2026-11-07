@@ -1,24 +1,24 @@
 Architectures: amd64
 Codename: resolute
 Components: main
-Date: Sat, 07 Nov 2026 10:25:16 +0000
+Date: Sat, 07 Nov 2026 11:49:53 +0000
 Description: Rust Commander
 Label: Rust Commander
 Origin: Rust Commander
 Suite: resolute
 MD5Sum:
- 3c4d68ddd506843fcc7239af423730e8             1494 Release
- c6bc342aba930518081eddbf39506720             1018 main/binary-amd64/Packages
- a27bccadb358847ee51f851518dac48d              666 main/binary-amd64/Packages.gz
+ 8ae603bdfce2c442291e1475c607f673             1494 Release
+ fb453a5947146f647d5648884ad76a5c             1018 main/binary-amd64/Packages
+ b8049868d33f156917de0782c6431447              666 main/binary-amd64/Packages.gz
 SHA1:
- a7095db8d69bbe2a412428c75dd879f9127e46a3             1494 Release
- 7d171370c3227d81cd6ca7b50dbeae740268aeaf             1018 main/binary-amd64/Packages
- 49fac56ee55499422296fd74f57d216187d5667c              666 main/binary-amd64/Packages.gz
+ 7fc9ec2f367fdcd7d5ca5b517df5f4a2c7a8b158             1494 Release
+ 2d26e35ac1236289a75e3894dc7c84f4fc681ab3             1018 main/binary-amd64/Packages
+ 4d973c40214a982ade35e57c9cb3670408d8ee9d              666 main/binary-amd64/Packages.gz
 SHA256:
- ada5f47124021da0a4ebc86b9e06f7538abdcc359ecc5d4e03ff35cc580aabfa             1494 Release
- 3d815750a36be5ce9861fe1f2e79c75e84fad5ab4609e2ff5489f7b337ca8a88             1018 main/binary-amd64/Packages
- a21fb40ea129652b0c99695be596173a9c35ebf5ee13a04fa2da8698b01858ce              666 main/binary-amd64/Packages.gz
+ ac42beb2b94d759e89b8002cf6c3933b71e50e1b2f00c699980771ec5485ee9f             1494 Release
+ 866ccb5ec97496d50490b75888bfb95bbe92c2625fcb1f1104443cae6d22b3dd             1018 main/binary-amd64/Packages
+ 079bfd8869963fc11900b9df3dca0b2357266ad2552a7bfc1e02928067145dde              666 main/binary-amd64/Packages.gz
 SHA512:
- 339bd9b6221f1f39385f7d3de65beefef411603c03bfabcb2e15ec9acfdeb02e13a76a4f9fde610690f9ec41e2192be922983030d702c9d0ecfb61819577d455             1494 Release
- 9f55de4a64be43dd4d23ea4acf9a144a1e32697ab6e9899d29224985171abcea89131e63bb00bf002af775a07def72064a40ecc152475f0be1434d6442d55ba8             1018 main/binary-amd64/Packages
- cc034f40b4b2acf6b5eab18342f675780f016998d2878665228d32a24fa26cc4ca18f775135ae3e11527ea4b8956a69ac190bca36491045db48555731b0132b1              666 main/binary-amd64/Packages.gz
+ f6669d18cb980414436b80eb5b4485fbacd2532fdec6f33568129385e990df9927a71091bbe89ac298af87600ea15a27f8b5b07f8c0a383844e95c7a2b6ae540             1494 Release
+ 7763db2c08ce06b559a30b46c17302c7bc70c91bec116f03a171783a5e07707e7c86a0638489fd85d852a94cca7ba6968cd381033b8147a469f88cab9962c01d             1018 main/binary-amd64/Packages
+ 87b052175a8b3370708c562676f057ec735167cb5b81bd49ced6fb542369ea02e89c090b50a0420dd7214cb781cc588acfdef13bd825cd6f7cd26721e62d63ee              666 main/binary-amd64/Packages.gz
