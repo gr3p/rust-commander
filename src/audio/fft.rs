@@ -21,10 +21,6 @@ impl Fft {
         Self { n, cos, sin, rev }
     }
 
-    pub fn size(&self) -> usize {
-        self.n
-    }
-
     /// In place. `re` and `im` hold `n` values each.
     pub fn transform(&self, re: &mut [f32], im: &mut [f32]) {
         assert!(re.len() == self.n && im.len() == self.n, "wrong buffer size");
@@ -112,7 +108,7 @@ mod tests {
         fft.transform(&mut re, &mut im);
         assert!((re[0] - 16.0).abs() < 1e-4);
         assert!(re[1..].iter().chain(&im).all(|v| v.abs() < 1e-4));
-        assert_eq!(fft.size(), 16);
+        assert_eq!(fft.n, 16);
     }
 
     #[test]

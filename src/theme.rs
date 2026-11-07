@@ -43,6 +43,14 @@ pub fn set_current(p: &Palette) {
     if let Ok(mut slot) = CURRENT.write() {
         *slot = Some(p.clone());
     }
+    VERSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+static VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Changes whenever the palette is replaced, so drawing code that caches colors knows to read them again.
+pub fn version() -> u64 {
+    VERSION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 // A theme bundled with the binary, so several themes work with no Omarchy install.
@@ -1065,6 +1073,10 @@ button.menu-row label.menu-key {{
   font-weight: bold;
   color: {bright};
 }}
+/* The visualizer sits behind the text, so the text keeps a halo of the background color. */
+.audio-player label {{
+  text-shadow: 0 0 3px {bg}, 0 0 7px {bg};
+}}
 .audio-artist,
 .audio-album {{
   color: {fg};
@@ -1080,16 +1092,19 @@ button.menu-row label.menu-key {{
 .audio-time {{
   font-feature-settings: "tnum";
 }}
-.audio-player scale trough {{
+.audio-player scale trough,
+.audio-mini scale trough {{
   background: {muted};
   min-height: 4px;
   border-radius: 2px;
 }}
-.audio-player scale highlight {{
+.audio-player scale highlight,
+.audio-mini scale highlight {{
   background: {accent};
   border-radius: 2px;
 }}
-.audio-player scale slider {{
+.audio-player scale slider,
+.audio-mini scale slider {{
   background: {accent};
   min-width: 12px;
   min-height: 12px;
@@ -1098,23 +1113,94 @@ button.menu-row label.menu-key {{
   box-shadow: none;
   margin: -4px;
 }}
-.audio-player scale:disabled slider {{
+.audio-player scale:disabled slider,
+.audio-mini scale:disabled slider {{
   background: {muted};
 }}
-button.audio-button {{
-  background: {sel};
-  color: {fg};
+/* The player's buttons are drawn icons that take the text color of the button. */
+button.media-icon,
+menubutton.media-icon > button {{
+  background: transparent;
+  color: {dim};
   border: none;
   box-shadow: none;
-  padding: 4px 14px;
+  border-radius: 999px;
+  padding: 4px;
   min-height: 0;
   min-width: 0;
 }}
-button.audio-button:hover {{
-  background: {rhov};
+button.media-icon:hover,
+menubutton.media-icon > button:hover,
+menubutton.media-icon > button:checked {{
+  background: transparent;
+  color: {bright};
 }}
-button.audio-button:disabled {{
+button.media-icon.on {{
+  color: {accent};
+}}
+button.media-icon:disabled {{
+  color: {muted};
+}}
+button.media-icon.media-step {{
+  color: {fg};
+}}
+button.media-icon.media-step:hover {{
+  color: {bright};
+}}
+button.media-icon.media-step:disabled {{
+  color: {muted};
+}}
+button.media-icon.media-play {{
+  background: {accent};
+  color: {bg};
+  padding: 8px;
+}}
+button.media-icon.media-play:hover {{
+  background: {bright};
+  color: {bg};
+}}
+button.media-icon.media-play:disabled {{
+  background: {muted};
+  color: {bg};
+}}
+button.media-icon.media-quiet,
+menubutton.media-icon.media-quiet {{
+  opacity: 0.65;
+}}
+button.media-icon.media-quiet:hover,
+menubutton.media-icon.media-quiet:hover {{
+  opacity: 1;
+}}
+/* The small player under a file list. */
+.audio-mini {{
+  padding: 6px 10px;
+  background: {sel};
+  border-top: 1px solid {muted};
+}}
+.audio-mini.focused {{
+  box-shadow: inset 0 0 0 2px {accent};
+}}
+.audio-mini-art {{
+  background: {muted};
+  border-radius: 4px;
+}}
+.audio-mini-note {{
+  font-size: 24px;
   color: {dim};
+}}
+.audio-mini-title {{
+  font-weight: bold;
+  color: {bright};
+}}
+.audio-mini-artist {{
+  color: {dim};
+}}
+.audio-mini .audio-time {{
+  color: {dim};
+}}
+.audio-pop-title {{
+  color: {dim};
+  font-weight: bold;
 }}
 @define-color accent_color {accent};
 @define-color accent_bg_color {accent};

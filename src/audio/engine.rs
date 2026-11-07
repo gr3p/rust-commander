@@ -215,15 +215,14 @@ impl Player {
         State::from_u8(self.shared.state.load(Ordering::Relaxed))
     }
 
-    /// The newest `want` samples that have reached the speakers, mixed to mono and taken before the
-    /// volume, so the picture does not shrink with it. Returns the sample rate, or 0 when nothing
-    /// plays. Fewer samples than asked for come back at the start of a track.
+    /// A handle for reading the scope from elsewhere, such as the visualizer's drawing code.
+    pub fn scope_handle(&self) -> Scope {
+        Scope { shared: Arc::clone(&self.shared), tap: Arc::clone(&self.tap) }
+    }
+
+    /// See [`Scope::read`].
     pub fn scope(&self, want: usize, out: &mut Vec<f32>) -> u32 {
-        if self.state() != State::Playing && self.state() != State::Paused {
-            out.clear();
-            return 0;
-        }
-        self.tap.window(self.shared.heard_frames.load(Ordering::Relaxed), want, out)
+        self.scope_handle().read(want, out)
     }
 
     pub fn generation(&self) -> u64 {
@@ -239,6 +238,32 @@ impl Player {
             NO_DURATION => None,
             ms => Some(Duration::from_millis(ms)),
         }
+    }
+}
+
+/// Reads the newest sound for a visualizer. Cheap to clone and to call.
+#[derive(Clone)]
+pub struct Scope {
+    shared: Arc<Shared>,
+    tap: Arc<Tap>,
+}
+
+impl Scope {
+    /// The newest `want` samples that have reached the speakers, mixed to mono and taken before
+    /// the volume, so the picture does not shrink with it. Returns the sample rate, or 0 when
+    /// nothing plays. Fewer samples than asked for come back at the start of a track.
+    pub fn read(&self, want: usize, out: &mut Vec<f32>) -> u32 {
+        let state = State::from_u8(self.shared.state.load(Ordering::Relaxed));
+        if state != State::Playing && state != State::Paused {
+            out.clear();
+            return 0;
+        }
+        self.tap.window(self.shared.heard_frames.load(Ordering::Relaxed), want, out)
+    }
+
+    /// Whether sound is on its way to the speakers right now. A pause holds the picture still.
+    pub fn playing(&self) -> bool {
+        State::from_u8(self.shared.state.load(Ordering::Relaxed)) == State::Playing
     }
 }
 

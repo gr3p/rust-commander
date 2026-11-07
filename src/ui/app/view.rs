@@ -761,7 +761,7 @@ impl App {
         };
         let charset = self.charset;
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
-        if rust_commander::audio::can_try(name) {
+        if rust_commander::audio::can_try(name) && !self.audio_is_mini() {
             // The player fills the pane. It starts and stops with the cursor, see reconcile_audio.
             self.preview.set_body(PreviewBody::Audio);
             self.paint_preview();

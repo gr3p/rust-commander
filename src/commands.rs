@@ -4,6 +4,10 @@ use crate::listing;
 // Higher is more likely. Several marked files outrank the file type.
 const HINTS: &[Act] = &[
     Act::AudioToggle,
+    Act::AudioNext,
+    Act::AudioPrev,
+    Act::AudioMinimize,
+    Act::AudioJump,
     Act::Copy,
     Act::Move,
     Act::Pack,
@@ -127,6 +131,13 @@ pub enum Act {
     AudioSeek,
     AudioVolume,
     AudioMute,
+    AudioNext,
+    AudioPrev,
+    AudioShuffle,
+    AudioRepeat,
+    AudioMinimize,
+    AudioJump,
+    AudioExternal,
     Drive,
     DiskInfo,
     Mount,
@@ -134,7 +145,7 @@ pub enum Act {
 }
 
 impl Act {
-    pub const ALL: [Act; 80] = [
+    pub const ALL: [Act; 87] = [
         Act::Refresh,
         Act::View,
         Act::Edit,
@@ -211,6 +222,13 @@ impl Act {
         Act::AudioSeek,
         Act::AudioVolume,
         Act::AudioMute,
+        Act::AudioNext,
+        Act::AudioPrev,
+        Act::AudioShuffle,
+        Act::AudioRepeat,
+        Act::AudioMinimize,
+        Act::AudioJump,
+        Act::AudioExternal,
         Act::Drive,
         Act::DiskInfo,
         Act::Mount,
@@ -232,6 +250,8 @@ pub struct Cue {
     pub quick_view: bool,
     /// The quick view shows the music player.
     pub audio: bool,
+    /// Music plays, in the quick view or in the small player.
+    pub player: bool,
     pub editing: bool,
     // The active panel stands at the root of a drive, as right after picking one.
     pub drive: bool,
@@ -253,6 +273,7 @@ impl Cue {
             image_view: false,
             quick_view: false,
             audio: false,
+            player: false,
             editing: false,
             drive: false,
             testable: false,
@@ -363,6 +384,9 @@ pub fn applies(act: Act, cue: &Cue) -> bool {
         Act::ImageFit | Act::ImageStep => cue.image_view,
         Act::CopyImage => cue.image_view,
         Act::AudioToggle | Act::AudioSeek | Act::AudioVolume | Act::AudioMute => cue.audio,
+        Act::AudioNext | Act::AudioPrev | Act::AudioShuffle | Act::AudioRepeat | Act::AudioMinimize => cue.audio,
+        Act::AudioJump => cue.player && !cue.audio,
+        Act::AudioExternal => cue.audio || cue.player,
         Act::ListerText | Act::ListerBinary | Act::ListerHex => cue.lister,
         Act::ListerAnsi | Act::ListerAscii | Act::ListerJson => cue.lister || cue.quick_view,
         _ => true,
@@ -373,7 +397,11 @@ fn score(act: Act, cue: &Cue) -> i32 {
     let multi = cue.marks >= 2;
     let marked = cue.marks >= 1;
     match act {
+        Act::AudioJump if cue.player && !cue.audio => 121,
         Act::AudioToggle if cue.audio => 120,
+        Act::AudioNext if cue.audio => 119,
+        Act::AudioPrev if cue.audio => 118,
+        Act::AudioMinimize if cue.audio => 117,
         Act::Copy if multi => 100,
         Act::Move if multi => 90,
         Act::Pack if multi => 80,
@@ -458,6 +486,13 @@ const CATALOG: &[Item] = &[
     Item { act: Act::AudioSeek, keys: "Left/Right", label: "Seek 5 s, Shift 30 s", group: Group::View },
     Item { act: Act::AudioVolume, keys: "+/-", label: "Volume", group: Group::View },
     Item { act: Act::AudioMute, keys: "M", label: "Mute", group: Group::View },
+    Item { act: Act::AudioNext, keys: "N", label: "Next track", group: Group::View },
+    Item { act: Act::AudioPrev, keys: "P", label: "Previous track", group: Group::View },
+    Item { act: Act::AudioShuffle, keys: "S", label: "Shuffle", group: Group::View },
+    Item { act: Act::AudioRepeat, keys: "R", label: "Repeat: off, all, one", group: Group::View },
+    Item { act: Act::AudioMinimize, keys: "Ctrl+M", label: "Minimize player", group: Group::View },
+    Item { act: Act::AudioJump, keys: "Ctrl+M", label: "Jump to player", group: Group::View },
+    Item { act: Act::AudioExternal, keys: "Ctrl+Enter", label: "Open In External Player", group: Group::View },
     Item { act: Act::CopyDir, keys: "Alt+Shift+C", label: "Copy dir path", group: Group::Clipboard },
     Item { act: Act::Filter, keys: "Ctrl+S", label: "Filter", group: Group::View },
     Item { act: Act::Search, keys: "Ctrl+Shift+S", label: "Search", group: Group::View },
@@ -569,6 +604,38 @@ mod tests {
         assert!(!rank(&cue(|cue| cue.file = true)).contains(&Act::AudioToggle));
         for act in [Act::AudioToggle, Act::AudioSeek, Act::AudioVolume, Act::AudioMute] {
             assert!(applies(act, &cue(|cue| cue.audio = true)), "{act:?}");
+            assert!(!applies(act, &cue(|cue| cue.file = true)), "{act:?}");
+        }
+    }
+
+    #[test]
+    fn the_player_offers_next_and_previous_and_the_small_one_offers_a_jump() {
+        let big = cue(|cue| {
+            cue.audio = true;
+            cue.player = true;
+            cue.file = true;
+            cue.quick_view = true;
+        });
+        let ranked = rank(&big);
+        assert_eq!(&ranked[..4], &[Act::AudioToggle, Act::AudioNext, Act::AudioPrev, Act::AudioMinimize]);
+        assert!(!ranked.contains(&Act::AudioJump));
+        for act in [Act::AudioNext, Act::AudioPrev, Act::AudioShuffle, Act::AudioRepeat, Act::AudioMinimize, Act::AudioExternal] {
+            assert!(applies(act, &big), "{act:?}");
+        }
+        // With the player folded into a bar, the way back to it comes first.
+        let small = cue(|cue| {
+            cue.player = true;
+            cue.file = true;
+        });
+        let ranked = rank(&small);
+        assert_eq!(ranked[0], Act::AudioJump);
+        assert!(!ranked.contains(&Act::AudioNext));
+        assert!(applies(Act::AudioExternal, &small));
+        assert!(!applies(Act::AudioMinimize, &small));
+        // Both of them ask for Ctrl+M, so only one shows at a time.
+        assert!(!applies(Act::AudioJump, &big));
+        // Nothing plays: none of it is on offer.
+        for act in [Act::AudioNext, Act::AudioJump, Act::AudioMinimize, Act::AudioExternal] {
             assert!(!applies(act, &cue(|cue| cue.file = true)), "{act:?}");
         }
     }

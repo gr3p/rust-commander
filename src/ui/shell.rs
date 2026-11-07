@@ -17,6 +17,7 @@ use rust_commander::listing::SortKey;
 
 use super::iconpack;
 
+use super::mini::MiniPlayer;
 use super::player::PlayerView;
 use super::row::{self, EntryObject};
 
@@ -42,6 +43,7 @@ pub struct PaneUi {
     pub picture_scroll: gtk::ScrolledWindow,
     pub preview_kind: gtk::Stack,
     pub player: PlayerView,
+    pub mini: MiniPlayer,
     pub preview_wait: gtk::DrawingArea,
     pub terminal_slot: gtk::Box,
 }
@@ -1283,6 +1285,7 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     let player = PlayerView::new(sender);
     preview_kind.add_named(&player.root, Some("player"));
     preview_kind.set_vexpand(true);
+    let mini = MiniPlayer::new(sender);
     let preview_wait = row::dot_spin();
     let preview_overlay = gtk::Overlay::new();
     preview_overlay.set_child(Some(&preview_kind));
@@ -1300,6 +1303,7 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     let frame_hit = frame.clone();
     let preview_root: gtk::Widget = preview_kind.clone().upcast();
     let terminal_root: gtk::Widget = terminal_slot.clone().upcast();
+    let mini_root: gtk::Widget = mini.root.clone().upcast();
     let picture_focus = picture.clone();
     let preview_page = preview_kind.clone();
     watch.connect_event(move |_, event| {
@@ -1318,6 +1322,10 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
         };
         // A click in the shell may select text. It must not activate that pane, or the shell moves.
         if hit(&terminal_root) {
+            return gtk::glib::Propagation::Proceed;
+        }
+        // The mini player is not a file pane either. Its buttons must not move the active pane.
+        if hit(&mini_root) {
             return gtk::glib::Propagation::Proceed;
         }
         // The preview is not a file pane. A click there must not hide it.
@@ -1352,6 +1360,7 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     column.append(&path_row);
     column.append(&filter);
     column.append(&stack);
+    column.append(&mini.root);
     frame.set_child(Some(&column));
     frame.add_css_class("pane");
     PaneUi {
@@ -1369,6 +1378,7 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
         picture_scroll,
         preview_kind,
         player,
+        mini,
         preview_wait,
         terminal_slot,
     }

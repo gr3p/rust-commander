@@ -17,7 +17,7 @@ mod style;
 pub use alsa::available as alsa_available;
 pub use analyzer::{Analyzer, Frame, WINDOW};
 pub use cover::folder_cover;
-pub use engine::{DEFAULT_VOLUME, Event, Player, State};
+pub use engine::{DEFAULT_VOLUME, Event, Player, Scope, State};
 pub use opus::available as opus_available;
 pub use playlist::{Playlist, Repeat};
 pub use sink::{Sink, SinkFactory, system_sink};
