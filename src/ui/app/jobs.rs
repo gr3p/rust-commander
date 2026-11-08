@@ -220,7 +220,7 @@ impl App {
                 return;
             }
             self.pending = None;
-            if !test_dialog && !matches!(work, Work::Verify | Work::Transfer | Work::Delete) {
+            if !test_dialog && !matches!(work, Work::Verify | Work::Transfer) {
                 let title = match work {
                     Work::Unpack if err.starts_with("Archive is damaged") => "Damaged archive",
                     Work::Unpack if err.starts_with("Skipped ") => "Unpack",
@@ -230,7 +230,8 @@ impl App {
                     Work::Shred => "Secure delete failed",
                     Work::Test => "Test failed",
                     Work::Encode => "Encode failed",
-                    Work::Verify | Work::Transfer | Work::Delete => "Failed",
+                    Work::Delete => "Delete failed",
+                    Work::Verify | Work::Transfer => "Failed",
                 };
                 self.show_error(title, err);
             }

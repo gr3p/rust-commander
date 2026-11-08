@@ -441,7 +441,7 @@ fn confirm(button: &gtk::Button, busy: &Rc<Cell<bool>>, emit: impl Fn() + 'stati
         return;
     }
     super::shell::blink_drive(button);
-    gtk::glib::timeout_add_local_once(super::shell::BLINK_LEN, emit);
+    gtk::glib::timeout_add_local_once(super::shell::blink_len(), emit);
 }
 
 fn shortcut_hint() -> gtk::Label {

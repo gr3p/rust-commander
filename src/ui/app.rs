@@ -303,6 +303,8 @@ impl SimpleComponent for App {
         let cfg = config::load();
         let shell = shell::build(&root, sender.input_sender(), &cfg.icon_pack);
         shell::set_flash_enabled(cfg.flash_feedback);
+        shell::set_blink_speed(cfg.blink_speed);
+        shell::set_blink_count(cfg.blink_count);
         shell.mode_bar.set_visible(cfg.command_bar);
         let (left, right) = if smoke {
             smoke_dirs()
@@ -652,6 +654,8 @@ impl App {
             Msg::CursorTextColor(color) => self.set_cursor_text_color(color),
             Msg::MarkColor(color) => self.set_mark_color(color),
             Msg::BlinkColor(color) => self.set_blink_color(color),
+            Msg::BlinkSpeed(speed) => self.set_blink_speed(speed),
+            Msg::BlinkCount(count) => self.set_blink_count(count),
             Msg::CursorAlpha(alpha) => self.set_cursor_alpha(alpha),
             Msg::ToggleCursorFrame => self.toggle_cursor_frame(),
             Msg::CloseSettings => self.close_settings(),

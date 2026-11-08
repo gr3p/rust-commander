@@ -67,6 +67,12 @@ pub struct Config {
     pub mark_color: String,
     #[serde(default)]
     pub blink_color: String,
+    /// How fast a blink pulses. 50 is the original speed.
+    #[serde(default = "default_blink_speed")]
+    pub blink_speed: u8,
+    /// How many times the ring flashes. 3 is the original.
+    #[serde(default = "default_blink_count")]
+    pub blink_count: u8,
     #[serde(default = "default_cursor_alpha")]
     pub cursor_alpha: u8,
     #[serde(default)]
@@ -116,6 +122,14 @@ fn default_cursor_alpha() -> u8 {
     70
 }
 
+fn default_blink_speed() -> u8 {
+    50
+}
+
+fn default_blink_count() -> u8 {
+    3
+}
+
 fn default_visual() -> String {
     crate::audio::VisualStyle::default().name().into()
 }
@@ -155,6 +169,8 @@ impl Default for Config {
             cursor_text_color: String::new(),
             mark_color: String::new(),
             blink_color: String::new(),
+            blink_speed: default_blink_speed(),
+            blink_count: default_blink_count(),
             cursor_alpha: default_cursor_alpha(),
             cursor_frame: false,
             player_visual: default_visual(),
@@ -298,6 +314,19 @@ pub fn save_to(path: &Path, cfg: &Config) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blink_speed_defaults_to_today() {
+        assert_eq!(Config::default().blink_speed, 50);
+        let old: Config = toml::from_str("").unwrap();
+        assert_eq!(old.blink_speed, 50);
+        let set: Config = toml::from_str("blink_speed = 80").unwrap();
+        assert_eq!(set.blink_speed, 80);
+        assert_eq!(Config::default().blink_count, 3);
+        assert_eq!(old.blink_count, 3);
+        let count: Config = toml::from_str("blink_count = 5").unwrap();
+        assert_eq!(count.blink_count, 5);
+    }
 
     #[test]
     fn confirmation_flash_defaults_to_enabled() {

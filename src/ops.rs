@@ -1108,6 +1108,16 @@ fn at(path: &Path, err: io::Error) -> io::Error {
     io::Error::new(err.kind(), format!("{}: {err}", path.display()))
 }
 
+// Permission denied on SMB often means the server, not the mode drawn in the panel.
+fn refuse(path: &Path, err: io::Error) -> io::Error {
+    let why = crate::props::delete_why(path, &err);
+    let err = at(path, err);
+    match why {
+        Some(why) => io::Error::new(err.kind(), format!("{why}\n{err}")),
+        None => err,
+    }
+}
+
 struct Sweep<'a> {
     cancel: &'a AtomicBool,
     progress: &'a mut dyn FnMut(&Progress),
@@ -1141,15 +1151,15 @@ impl Sweep<'_> {
     fn count(&mut self, path: &Path, dev: u64) -> io::Result<()> {
         use std::os::unix::fs::MetadataExt;
         self.stopped()?;
-        let meta = fs::symlink_metadata(path).map_err(|err| at(path, err))?;
+        let meta = fs::symlink_metadata(path).map_err(|err| refuse(path, err))?;
         self.total += 1;
         self.report(path, false);
         if meta.is_dir() {
             if meta.dev() != dev {
                 return Err(io::Error::other(format!("{} is another disk", path.display())));
             }
-            for entry in fs::read_dir(path).map_err(|err| at(path, err))? {
-                let child = entry.map_err(|err| at(path, err))?.path();
+            for entry in fs::read_dir(path).map_err(|err| refuse(path, err))? {
+                let child = entry.map_err(|err| refuse(path, err))?.path();
                 self.count(&child, dev)?;
             }
         }
@@ -1159,18 +1169,18 @@ impl Sweep<'_> {
     fn remove(&mut self, path: &Path, dev: u64) -> io::Result<()> {
         use std::os::unix::fs::MetadataExt;
         self.stopped()?;
-        let meta = fs::symlink_metadata(path).map_err(|err| at(path, err))?;
+        let meta = fs::symlink_metadata(path).map_err(|err| refuse(path, err))?;
         if meta.is_dir() {
             if meta.dev() != dev {
                 return Err(io::Error::other(format!("{} is another disk", path.display())));
             }
-            for entry in fs::read_dir(path).map_err(|err| at(path, err))? {
-                let child = entry.map_err(|err| at(path, err))?.path();
+            for entry in fs::read_dir(path).map_err(|err| refuse(path, err))? {
+                let child = entry.map_err(|err| refuse(path, err))?.path();
                 self.remove(&child, dev)?;
             }
-            fs::remove_dir(path).map_err(|err| at(path, err))?;
+            fs::remove_dir(path).map_err(|err| refuse(path, err))?;
         } else {
-            fs::remove_file(path).map_err(|err| at(path, err))?;
+            fs::remove_file(path).map_err(|err| refuse(path, err))?;
         }
         self.done += 1;
         self.report(path, false);

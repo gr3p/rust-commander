@@ -666,53 +666,42 @@ pub fn blink_color(p: &Palette) -> String {
     mix(&p.accent, "#000000", 0.42)
 }
 
-fn blink_ink<'a>(fill: &str, p: &'a Palette) -> &'a str {
-    if rgb(fill).is_some_and(|(r, g, b)| u32::from(r) + u32::from(g) + u32::from(b) > 382) { &p.background } else { &p.foreground }
-}
-
-// Fill of every blink. `color` is the user's override; empty means the theme's own.
+// The pane ring, on every blink. `color` is the user's override; empty means the theme's own.
 pub fn blink(p: &Palette, color: &str) -> String {
     let owned = hex_color(color).map(str::to_string).unwrap_or_else(|| blink_color(p));
-    let ink = blink_ink(&owned, p);
     format!(
         r#"
-.pane-blink {{
-  border-color: {fill};
-  box-shadow: inset 0 0 0 1px {fill};
-}}
-button.flash {{
-  background: {fill};
-  color: {ink};
-}}
-button.flash label {{
-  color: {ink};
-}}
+.pane-blink,
+.flash,
+button.flash,
 button.flash:hover,
 button.flash:focus,
 button.flash:focus-visible,
 button.flash:active,
 button.fkey.flash,
+button.drive.flash,
+button.drive.current.flash,
 button.menu-row.flash,
 button.hot.flash,
+button.hot.flash:focus,
+button.command.flash,
+button.media-icon.flash,
 .settings-row.flash,
+.audio-mini.flash,
+.audio-mini.focused.flash,
 listview.search-results > row.flash,
 listview.search-results > row.flash:selected,
 box.flash,
 label.flash,
 tab.flash,
 tab.flash:hover,
-.flash,
+dropdown.flash > button,
 colorbutton.flash > button {{
-  background: {fill};
-  color: {ink};
-}}
-.flash label,
-button.menu-row.flash label {{
-  color: {ink};
+  border-color: {fill};
+  box-shadow: inset 0 0 0 1px {fill};
 }}
 "#,
         fill = owned,
-        ink = ink,
     )
 }
 

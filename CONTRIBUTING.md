@@ -4,13 +4,13 @@ Report bugs and ideas on the [issue tracker](https://github.com/gr3p/rust-comman
 
 ## Version number
 
-The version in `Cargo.toml` is the release version, for example `0.2.1`. `build.rs` and the release workflow read that string. Raise it in `Cargo.toml` and `Cargo.lock` before a release. The next push to master publishes that number.
-
-Enable the hook once per clone so a commit keeps the `rust-commander` entry in `Cargo.lock` on the same number:
+The version is major.minor from `Cargo.toml` and the commit count as patch, for example `0.2.108`. The release workflow and `build.rs` compute it the same way. Enable the hook once per clone so every commit also writes it into `Cargo.toml` and `Cargo.lock`, and `cargo build` prints the real number:
 
 ```bash
 git config core.hooksPath .githooks
 ```
+
+To start a new minor version, change major.minor in `Cargo.toml`; the hook keeps the patch.
 
 ## Testing a change
 

@@ -101,6 +101,8 @@ pub enum Msg {
     CursorTextColor(String),
     MarkColor(String),
     BlinkColor(String),
+    BlinkSpeed(u8),
+    BlinkCount(u8),
     CursorAlpha(u8),
     ToggleCursorFrame,
     CloseSettings,

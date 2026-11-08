@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::time::Duration;
 
 use relm4::gtk;
@@ -23,10 +23,11 @@ use super::row::{self, EntryObject};
 
 static FLASH_ENABLED: AtomicBool = AtomicBool::new(true);
 static PANE_BLINK: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
-/// Classic Mac menu flash: invert every 3 ticks (80 ms), three times.
-const BLINK_STEP: Duration = Duration::from_millis(80);
-const BLINK_PHASES: u8 = 6;
-pub const BLINK_LEN: Duration = Duration::from_millis(300);
+/// Tick and wait at speed 50 with 3 flashes: 80 ms per phase, action after 300 ms.
+static BLINK_SPEED: AtomicU8 = AtomicU8::new(50);
+static BLINK_COUNT: AtomicU8 = AtomicU8::new(3);
+static BLINK_STEP_MS: AtomicU64 = AtomicU64::new(80);
+static BLINK_LEN_MS: AtomicU64 = AtomicU64::new(300);
 
 thread_local! {
     static F12_HELD: Cell<bool> = const { Cell::new(false) };
@@ -724,7 +725,7 @@ pub fn on_click(button: &gtk::Button, action: impl Fn() + 'static) {
         }
         blink_button(button);
         let (action, pending, button) = (Rc::clone(&action), Rc::clone(&pending), button.downgrade());
-        gtk::glib::timeout_add_local_once(BLINK_LEN, move || {
+        gtk::glib::timeout_add_local_once(blink_len(), move || {
             pending.set(false);
             if button.upgrade().is_some_and(|button| button.is_mapped()) {
                 action();
@@ -744,7 +745,7 @@ pub fn blink_then(widget: &gtk::Widget, action: impl FnOnce() + 'static) {
         return;
     }
     blink_widget(widget);
-    gtk::glib::timeout_add_local_once(BLINK_LEN, action);
+    gtk::glib::timeout_add_local_once(blink_len(), action);
 }
 
 /// A notebook tab is a gizmo around the label. Flashing the label only covers the text.
@@ -760,10 +761,12 @@ pub fn blink_widget(widget: &gtk::Widget) {
     let widget = widget.clone();
     widget.add_css_class("flash");
     let step = Cell::new(0u8);
-    gtk::glib::timeout_add_local(BLINK_STEP, move || {
+    let pace = blink_step();
+    let phases = blink_phases();
+    gtk::glib::timeout_add_local(pace, move || {
         let n = step.get() + 1;
         step.set(n);
-        if n >= BLINK_PHASES {
+        if n >= phases {
             widget.remove_css_class("flash");
             return gtk::glib::ControlFlow::Break;
         }
@@ -784,13 +787,15 @@ pub fn blink_frame(frame: &gtk::Frame, pane: usize, only_while_active: bool) {
     let frame = frame.clone();
     frame.add_css_class("pane-blink");
     let step = Cell::new(0u8);
-    gtk::glib::timeout_add_local(BLINK_STEP, move || {
+    let pace = blink_step();
+    let phases = blink_phases();
+    gtk::glib::timeout_add_local(pace, move || {
         if PANE_BLINK[pane].load(Ordering::Relaxed) != token {
             return gtk::glib::ControlFlow::Break;
         }
         let n = step.get() + 1;
         step.set(n);
-        if n >= BLINK_PHASES {
+        if n >= phases {
             frame.remove_css_class("pane-blink");
             return gtk::glib::ControlFlow::Break;
         }
@@ -807,6 +812,37 @@ pub fn blink_frame(frame: &gtk::Frame, pane: usize, only_while_active: bool) {
 
 pub fn set_flash_enabled(enabled: bool) {
     FLASH_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+/// `speed` 50 is the original pace. Higher is faster. The running blink keeps the pace it started with.
+pub fn set_blink_speed(speed: u8) {
+    BLINK_SPEED.store(speed.clamp(10, 100), Ordering::Relaxed);
+    apply_blink_pace();
+}
+
+/// How many times the ring comes on. 3 is the original. The running blink keeps the count it started with.
+pub fn set_blink_count(count: u8) {
+    BLINK_COUNT.store(count.clamp(1, 8), Ordering::Relaxed);
+    apply_blink_pace();
+}
+
+fn apply_blink_pace() {
+    let speed = u64::from(BLINK_SPEED.load(Ordering::Relaxed));
+    let count = u64::from(BLINK_COUNT.load(Ordering::Relaxed));
+    BLINK_STEP_MS.store(4_000 / speed, Ordering::Relaxed);
+    BLINK_LEN_MS.store(5_000 * count / speed, Ordering::Relaxed);
+}
+
+fn blink_step() -> Duration {
+    Duration::from_millis(BLINK_STEP_MS.load(Ordering::Relaxed))
+}
+
+fn blink_phases() -> u8 {
+    BLINK_COUNT.load(Ordering::Relaxed).saturating_mul(2)
+}
+
+pub fn blink_len() -> Duration {
+    Duration::from_millis(BLINK_LEN_MS.load(Ordering::Relaxed))
 }
 
 pub(crate) const LOGO_PNG: &[u8] = include_bytes!("../../img/rust-commander.png");

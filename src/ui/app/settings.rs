@@ -334,6 +334,38 @@ impl App {
         let (mark_row, mark_color) = color_picker("Mark color (Space)", &palette.mark, &self.cfg.mark_color, Msg::MarkColor, tx.clone());
         let blink_theme = theme::blink_color(&palette);
         let (blink_row, blink_color) = color_picker("Blink color", &blink_theme, &self.cfg.blink_color, Msg::BlinkColor, tx.clone());
+        let blink_speed_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        blink_speed_row.add_css_class("settings-row");
+        let blink_speed_name = gtk::Label::new(Some("Blink speed"));
+        blink_speed_name.set_xalign(0.0);
+        blink_speed_name.set_tooltip_text(Some("50 is the original speed. Higher is faster."));
+        let blink_speed = gtk::Scale::with_range(gtk::Orientation::Horizontal, 10.0, 100.0, 1.0);
+        blink_speed.set_value(f64::from(self.cfg.blink_speed.clamp(10, 100)));
+        blink_speed.set_digits(0);
+        blink_speed.set_hexpand(true);
+        blink_speed.set_draw_value(true);
+        blink_speed.set_value_pos(gtk::PositionType::Right);
+        blink_speed.set_tooltip_text(Some("50 is the original speed. Higher is faster."));
+        let tx_blink_speed = tx.clone();
+        blink_speed.connect_value_changed(move |scale| tx_blink_speed.emit(Msg::BlinkSpeed(scale.value().round() as u8)));
+        blink_speed_row.append(&blink_speed_name);
+        blink_speed_row.append(&blink_speed);
+        let blink_count_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        blink_count_row.add_css_class("settings-row");
+        let blink_count_name = gtk::Label::new(Some("Blinks"));
+        blink_count_name.set_xalign(0.0);
+        blink_count_name.set_tooltip_text(Some("3 is the original."));
+        let blink_count = gtk::Scale::with_range(gtk::Orientation::Horizontal, 1.0, 8.0, 1.0);
+        blink_count.set_value(f64::from(self.cfg.blink_count.clamp(1, 8)));
+        blink_count.set_digits(0);
+        blink_count.set_hexpand(true);
+        blink_count.set_draw_value(true);
+        blink_count.set_value_pos(gtk::PositionType::Right);
+        blink_count.set_tooltip_text(Some("3 is the original."));
+        let tx_blink_count = tx.clone();
+        blink_count.connect_value_changed(move |scale| tx_blink_count.emit(Msg::BlinkCount(scale.value().round() as u8)));
+        blink_count_row.append(&blink_count_name);
+        blink_count_row.append(&blink_count);
         let (cursor_text_row, cursor_text_color) =
             color_picker("Cursor text color", &palette.cursor_text, &self.cfg.cursor_text_color, Msg::CursorTextColor, tx.clone());
         let cursor_alpha_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -356,6 +388,8 @@ impl App {
         look.append(&cursor_text_row);
         look.append(&mark_row);
         look.append(&blink_row);
+        look.append(&blink_speed_row);
+        look.append(&blink_count_row);
         look.append(&section("Style"));
         look.append(&icon_row);
         look.append(&image_row);
@@ -779,6 +813,26 @@ impl App {
         }
         self.cfg.blink_color = color;
         self.colors_changed();
+    }
+
+    pub(in crate::ui::app) fn set_blink_speed(&mut self, speed: u8) {
+        let speed = speed.clamp(10, 100);
+        if self.cfg.blink_speed == speed {
+            return;
+        }
+        self.cfg.blink_speed = speed;
+        let _ = config::save(&self.cfg);
+        crate::ui::shell::set_blink_speed(speed);
+    }
+
+    pub(in crate::ui::app) fn set_blink_count(&mut self, count: u8) {
+        let count = count.clamp(1, 8);
+        if self.cfg.blink_count == count {
+            return;
+        }
+        self.cfg.blink_count = count;
+        let _ = config::save(&self.cfg);
+        crate::ui::shell::set_blink_count(count);
     }
 
     fn colors_changed(&self) {
