@@ -21,12 +21,17 @@ pub use engine::{DEFAULT_VOLUME, Event, Player, Scope, State};
 pub use opus::available as opus_available;
 pub use playlist::{Playlist, Repeat};
 pub use sink::{Sink, SinkFactory, system_sink};
-pub use source::{Cover, FileSource, OpenError, TrackInfo};
+pub use source::{has_picture, Cover, FileSource, OpenError, TrackInfo};
 pub use style::VisualStyle;
 
-/// Formats the player may be asked to open. Others go to the default application.
+/// A music file. The quick view shows the player for these before anything plays.
 pub fn can_try(name: &str) -> bool {
     crate::listing::is_audio(name)
+}
+
+/// Sound the player can take. An mp4 is included; a film still opens outside on Enter.
+pub fn can_play(name: &str) -> bool {
+    can_try(name) || crate::listing::extension(name).eq_ignore_ascii_case("mp4")
 }
 
 /// 3:07, or 1:02:03 for an hour or more.
@@ -93,5 +98,9 @@ mod tests {
         assert!(super::can_try("Song.MP3"));
         assert!(super::can_try("a.opus"));
         assert!(!super::can_try("a.txt"));
+        assert!(!super::can_try("film.mp4"));
+        assert!(super::can_play("film.MP4"));
+        assert!(super::can_play("song.m4a"));
+        assert!(!super::can_play("clip.mkv"));
     }
 }

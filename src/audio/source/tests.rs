@@ -396,3 +396,41 @@ fn damaged_files_never_panic_or_hang() {
     }
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn an_audio_mp4_plays_and_is_not_a_film() {
+    let dir = scratch("mp4");
+    let path = dir.join("chirp.mp4");
+    std::fs::copy(fixture("chirp.m4a"), &path).unwrap();
+    assert!(!has_picture(&path));
+    assert!(!has_picture(&fixture("tagged.m4a")));
+    let mut source = FileSource::open(&path).unwrap();
+    assert_eq!(source.info().codec, "AAC");
+    let peak = read_all(&mut source).iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    assert!(peak > 0.3, "peak {peak}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_film_is_a_picture_and_its_sound_still_plays() {
+    let dir = scratch("film");
+    let path = dir.join("film.mp4");
+    let made = std::process::Command::new("ffmpeg")
+        .args([
+            "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=32x32:rate=10:duration=1", "-f", "lavfi", "-i",
+            "sine=frequency=440:sample_rate=44100:duration=1", "-map", "0:v", "-map", "1:a", "-c:v", "mpeg4", "-c:a", "aac", "-shortest",
+        ])
+        .arg(&path)
+        .status();
+    if !made.is_ok_and(|status| status.success()) {
+        eprintln!("skipped film: ffmpeg could not make one");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    assert!(has_picture(&path));
+    let mut source = FileSource::open(&path).unwrap();
+    assert_eq!(source.info().codec, "AAC");
+    let peak = read_all(&mut source).iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    assert!(peak > 0.05, "peak {peak}");
+    let _ = std::fs::remove_dir_all(dir);
+}

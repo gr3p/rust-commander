@@ -139,7 +139,7 @@ impl App {
 
     /// The cursor is on a file the player may open.
     pub(in crate::ui::app) fn cursor_is_audio(&self) -> bool {
-        self.state.cursor_entry(self.state.active).is_some_and(|entry| !entry.is_dir() && audio::can_try(&entry.name))
+        self.state.cursor_entry(self.state.active).is_some_and(|entry| !entry.is_dir() && audio::can_play(&entry.name))
     }
 
     pub(in crate::ui::app) fn audio_is_mini(&self) -> bool {
@@ -163,7 +163,7 @@ impl App {
             .visible(id)
             .into_iter()
             .filter_map(|at| tab.entries.get(at))
-            .filter(|entry| !entry.is_dir() && audio::can_try(&entry.name))
+            .filter(|entry| !entry.is_dir() && audio::can_play(&entry.name))
             .map(|entry| listing::entry_path(&tab.path, entry))
             .collect()
     }
@@ -390,7 +390,7 @@ impl App {
                 .visible(id)
                 .into_iter()
                 .filter_map(|at| tab.entries.get(at))
-                .filter(|entry| !entry.is_dir() && audio::can_try(&entry.name))
+                .filter(|entry| !entry.is_dir() && audio::can_play(&entry.name))
                 .map(|entry| listing::entry_path(&tab.path, entry))
                 .filter(|path| tab.marked.contains(path))
                 .collect();
@@ -398,7 +398,7 @@ impl App {
                 return marked;
             }
         }
-        self.file_under_cursor().filter(|path| path.file_name().and_then(|name| name.to_str()).is_some_and(audio::can_try)).into_iter().collect()
+        self.file_under_cursor().filter(|path| path.file_name().and_then(|name| name.to_str()).is_some_and(audio::can_play)).into_iter().collect()
     }
 
     /// Send and replace music in player: these songs become the playlist, and the first one plays.
@@ -454,9 +454,19 @@ impl App {
         }
     }
 
-    /// Enter on a song plays it in the open player. Ctrl+Enter is the way to the external one.
+    /// Enter on a song plays it. A film opens in the external program instead; its sound is Ctrl+Q.
     pub(in crate::ui::app) fn audio_enter(&mut self, sender: &ComponentSender<Self>) -> bool {
+        if self.cursor_is_film() {
+            return false;
+        }
         self.audio_play_here(true, sender)
+    }
+
+    /// An mp4 that contains a picture. Probed only on Enter, and only for that extension.
+    fn cursor_is_film(&self) -> bool {
+        let Some(path) = self.file_under_cursor() else { return false };
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else { return false };
+        listing::extension(name).eq_ignore_ascii_case("mp4") && audio::has_picture(&path)
     }
 
     /// The same track again from its start.

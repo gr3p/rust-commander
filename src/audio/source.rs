@@ -505,8 +505,25 @@ fn is_lossless(params: &CodecParameters) -> bool {
     name.starts_with("pcm")
 }
 
+/// A film track in an mp4 carries no audio codec, so it is skipped for the sound.
+fn playable(params: &CodecParameters) -> bool {
+    if params.codec == CODEC_TYPE_NULL {
+        return false;
+    }
+    // Opus is decoded by libopus, which is not in Symphonia's codec list.
+    params.codec == CODEC_TYPE_OPUS || symphonia::default::get_codecs().get_codec(params.codec).is_some()
+}
+
 fn pick_track(tracks: &[Track]) -> Option<&Track> {
-    tracks.iter().find(|track| track.codec_params.codec != CODEC_TYPE_NULL)
+    tracks.iter().find(|track| playable(&track.codec_params))
+}
+
+/// True when a track is not playable audio. A cover tag is not a track. Unreadable counts, so Enter stays external.
+pub fn has_picture(path: &Path) -> bool {
+    let Ok(opened) = probe(path, true) else {
+        return true;
+    };
+    opened.format.tracks().iter().any(|track| !playable(&track.codec_params))
 }
 
 fn duration_of(params: &CodecParameters, time_base: Option<TimeBase>) -> Option<Duration> {

@@ -132,7 +132,7 @@ fn watch_menu(item: &relm4::gtk::ListItem, pane: usize, sender: &relm4::Sender<c
         let archive = file && rust_commander::archive::is_testable(Path::new(&name));
         let image = file && rust_commander::imageview::is_image(&name);
         // A song, or a marked row: the marks may hold songs, and the player items act on them.
-        let music = file && (rust_commander::audio::can_try(&name) || obj.marked());
+        let music = file && (rust_commander::audio::can_play(&name) || obj.marked());
         let items = rust_commander::commands::row_menu(parent, dir, archive, image, music);
         let tx = tx.clone();
         crate::ui::shell::popup_rows(&widget, &items, move |act| {
