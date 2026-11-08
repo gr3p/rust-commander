@@ -138,5 +138,8 @@ pub enum Msg {
     AudioVisualOn(bool),
     AudioVisualToggle,
     AudioVisualStyle(rust_commander::audio::VisualStyle),
+    AudioVisualStrength(u8),
+    AudioVisualSmooth(u8),
+    AudioVisualDensity(u8),
     AudioRepeatSet(rust_commander::audio::Repeat),
 }

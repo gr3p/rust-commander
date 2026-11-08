@@ -33,6 +33,12 @@ pub struct Look {
     pub repeat: Repeat,
     pub visual_on: bool,
     pub visual: VisualStyle,
+    /// How hard the sound moves the picture, 0 to 100. 50 is the original.
+    pub strength: u8,
+    /// How slowly the picture falls back, 0 to 100. 50 is the original.
+    pub smooth: u8,
+    /// How visible the picture is behind the text, 0 to 100. 50 is the original.
+    pub density: u8,
 }
 
 fn click(button: &IconButton, sender: &relm4::Sender<Msg>, make: fn() -> Msg) {
@@ -236,6 +242,9 @@ pub struct PlayerView {
     hint: gtk::Label,
     visual_check: gtk::CheckButton,
     style_checks: Vec<(VisualStyle, gtk::CheckButton)>,
+    strength: gtk::Scale,
+    smooth: gtk::Scale,
+    density: gtk::Scale,
     // Set while the view itself changes a control, so that does not come back as a click.
     painting: Rc<Cell<bool>>,
     visual_on: Rc<Cell<bool>>,
@@ -250,7 +259,7 @@ impl PlayerView {
         let visual_on = Rc::new(Cell::new(true));
 
         // The small buttons in the corner: the visualizer switch, its settings, and fold-away.
-        let (popover, visual_check, style_checks) = settings_popover(sender, &painting);
+        let (popover, visual_check, style_checks, strength, smooth, density) = settings_popover(sender, &painting);
         let bars = IconButton::new(Icon::Bars, 16, "media-quiet");
         bars.set_tooltip("Show or hide the visualizer");
         let (tx, state) = (sender.clone(), Rc::clone(&visual_on));
@@ -345,6 +354,9 @@ impl PlayerView {
             hint,
             visual_check,
             style_checks,
+            strength,
+            smooth,
+            density,
             painting,
             visual_on,
             shown: RefCell::new(Look { volume: -1.0, ..Look::default() }),
@@ -404,6 +416,13 @@ impl PlayerView {
         self.visual_on.set(look.visual_on);
         self.visual.set_on(look.visual_on);
         self.visual.set_style(look.visual);
+        self.visual.set_tune(look.strength, look.smooth, look.density);
+        show_knob(&self.strength, look.strength);
+        show_knob(&self.smooth, look.smooth);
+        show_knob(&self.density, look.density);
+        for scale in [&self.strength, &self.smooth, &self.density] {
+            scale.set_sensitive(look.visual_on);
+        }
         self.bars.set_on(look.visual_on);
         if self.visual_check.is_active() != look.visual_on {
             self.visual_check.set_active(look.visual_on);
@@ -419,8 +438,40 @@ impl PlayerView {
     }
 }
 
-/// The little menu behind the cogwheel: the visualizer on or off, and which one.
-fn settings_popover(sender: &relm4::Sender<Msg>, painting: &Rc<Cell<bool>>) -> (gtk::Popover, gtk::CheckButton, Vec<(VisualStyle, gtk::CheckButton)>) {
+fn show_knob(scale: &gtk::Scale, value: u8) {
+    let value = f64::from(value.min(100));
+    if (scale.value() - value).abs() > 0.5 {
+        scale.set_value(value);
+    }
+}
+
+fn tune_scale(title: &str, tip: &str, painting: &Rc<Cell<bool>>, tx: relm4::Sender<Msg>, msg: fn(u8) -> Msg) -> (gtk::Box, gtk::Scale) {
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let name = gtk::Label::new(Some(title));
+    name.set_xalign(0.0);
+    name.set_tooltip_text(Some(tip));
+    let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
+    scale.set_value(50.0);
+    scale.set_draw_value(false);
+    scale.set_hexpand(true);
+    scale.set_width_request(168);
+    scale.set_tooltip_text(Some(tip));
+    let flag = Rc::clone(painting);
+    scale.connect_value_changed(move |scale| {
+        if !flag.get() {
+            tx.emit(msg(scale.value().round().clamp(0.0, 100.0) as u8));
+        }
+    });
+    row.append(&name);
+    row.append(&scale);
+    (row, scale)
+}
+
+/// The little menu behind the cogwheel: the visualizer on or off, which one, and how it moves.
+fn settings_popover(
+    sender: &relm4::Sender<Msg>,
+    painting: &Rc<Cell<bool>>,
+) -> (gtk::Popover, gtk::CheckButton, Vec<(VisualStyle, gtk::CheckButton)>, gtk::Scale, gtk::Scale, gtk::Scale) {
     let popover = gtk::Popover::new();
     popover.add_css_class("audio-pop");
     let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
@@ -455,6 +506,13 @@ fn settings_popover(sender: &relm4::Sender<Msg>, painting: &Rc<Cell<bool>>) -> (
         column.append(&check);
         checks.push((style, check));
     }
+    column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    let (strength_row, strength) = tune_scale("Strength", "How hard the sound moves the picture", painting, sender.clone(), Msg::AudioVisualStrength);
+    let (smooth_row, smooth) = tune_scale("Smooth", "How slowly the picture falls back", painting, sender.clone(), Msg::AudioVisualSmooth);
+    let (density_row, density) = tune_scale("Density", "How visible the picture is behind the text", painting, sender.clone(), Msg::AudioVisualDensity);
+    column.append(&strength_row);
+    column.append(&smooth_row);
+    column.append(&density_row);
     popover.set_child(Some(&column));
-    (popover, on, checks)
+    (popover, on, checks, strength, smooth, density)
 }

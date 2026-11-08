@@ -37,6 +37,8 @@ pub struct Analyzer {
     bass: f32,
     // Scales the wave toward the full height whatever the loudness.
     wave_gain: f32,
+    // 1 is the built-in fall. Lower hangs, higher snaps.
+    fall_scale: f32,
 }
 
 impl Default for Analyzer {
@@ -61,7 +63,13 @@ impl Analyzer {
             wave: Vec::new(),
             bass: 0.0,
             wave_gain: 1.0,
+            fall_scale: 1.0,
         }
+    }
+
+    /// How fast the bars and their caps fall. 1 is the built-in speed.
+    pub fn set_fall(&mut self, scale: f32) {
+        self.fall_scale = scale.clamp(0.2, 1.8);
     }
 
     /// Forgets the bars, for a new track.
@@ -85,6 +93,8 @@ impl Analyzer {
         }
         let dt = dt.clamp(0.0, 0.25);
         let rate = rate.max(8_000) as f32;
+        let release = RELEASE_PER_SECOND * self.fall_scale;
+        let gravity = GRAVITY * self.fall_scale;
 
         // The newest WINDOW samples, with silence in front if there are fewer.
         let have = samples.len().min(WINDOW);
@@ -120,13 +130,13 @@ impl Analyzer {
             let value = ((db - FLOOR_DB) / (CEIL_DB - FLOOR_DB)).clamp(0.0, 1.0);
 
             let level = &mut self.levels[band];
-            *level = if value > *level { value } else { value.max(*level - RELEASE_PER_SECOND * dt) };
+            *level = if value > *level { value } else { value.max(*level - release * dt) };
             let (cap, fall) = (&mut self.peaks[band], &mut self.fall[band]);
             if *level >= *cap {
                 *cap = *level;
                 *fall = 0.0;
             } else {
-                *fall += GRAVITY * dt;
+                *fall += gravity * dt;
                 *cap = (*cap - *fall * dt).max(*level);
             }
         }
@@ -238,6 +248,28 @@ mod tests {
         }
         // It takes a moment, not one frame: well over a tenth of a second.
         assert!(steps > 6, "fell in {steps} frames");
+    }
+
+    #[test]
+    fn a_faster_fall_reaches_silence_sooner() {
+        let tone = sine(440.0, 44_100, 0.8, 4096);
+        let band = band_of(440.0, 44_100, 32);
+        let silence = vec![0.0; 4096];
+        let steps = |scale: f32| {
+            let mut a = Analyzer::new();
+            a.set_fall(scale);
+            a.update(&tone, 44_100, 0.016, 32, 16);
+            let mut n = 0;
+            loop {
+                let level = a.update(&silence, 44_100, 0.016, 32, 16).levels[band];
+                n += 1;
+                if level == 0.0 || n > 400 {
+                    break;
+                }
+            }
+            n
+        };
+        assert!(steps(1.8) < steps(1.0));
     }
 
     #[test]

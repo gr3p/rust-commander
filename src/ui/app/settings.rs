@@ -387,10 +387,11 @@ impl App {
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let keys_win = win.clone();
-        keys.connect_key_pressed(move |_, key, _, _| {
+        keys.connect_key_pressed(move |_, key, _, mods| {
             let on_control = focused_control(&keys_win);
             match key {
                 Key::F1 => tx.emit(Msg::ShowCommands),
+                Key::F12 if crate::ui::shell::claim_f12(key, mods) => return gtk::glib::Propagation::Stop,
                 Key::Escape | Key::F12 => tx.emit(Msg::CloseSettings),
                 Key::Return | Key::KP_Enter | Key::space | Key::KP_Space if !on_control => tx.emit(Msg::ToggleAutoColumns),
                 Key::h | Key::H if !on_control => tx.emit(Msg::ToggleHidden),
@@ -400,6 +401,7 @@ impl App {
             }
             gtk::glib::Propagation::Stop
         });
+        keys.connect_key_released(|_, key, _, _| crate::ui::shell::release_f12(key));
         win.add_controller(keys);
         win.present();
         win.grab_focus();

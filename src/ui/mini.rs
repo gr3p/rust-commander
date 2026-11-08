@@ -112,11 +112,12 @@ impl MiniPlayer {
         }
     }
 
-    /// The keyboard drives the player: its bar is outlined in the accent color.
+    /// The keyboard drives the player: its bar is outlined in the accent color, and it blinks when it gets the keys.
     pub fn set_focused(&self, focused: bool) {
         if self.root.has_css_class("focused") != focused {
             if focused {
                 self.root.add_css_class("focused");
+                super::shell::blink_widget(self.root.upcast_ref());
             } else {
                 self.root.remove_css_class("focused");
             }

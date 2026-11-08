@@ -320,13 +320,13 @@ impl App {
         }
     }
 
-    /// Which player a song goes to: the one that is open. With none open, the big one if the quick view
-    /// is on, and otherwise the small one.
+    /// Which player a song goes to: the one that is open. With none open, the big one, which lives in the
+    /// quick view. An editor or a shell in the other panel leaves no room for it, so the small one starts then.
     fn audio_target_mode(&self) -> Mode {
         match self.audio_mode() {
             Some(mode) => mode,
-            None if self.state.quick_view && !self.shell.editing.get() && !self.state.panel_terminal => Mode::Full,
-            None => Mode::Mini,
+            None if self.shell.editing.get() || self.state.panel_terminal => Mode::Mini,
+            None => Mode::Full,
         }
     }
 
@@ -342,8 +342,13 @@ impl App {
         self.begin_track(Some(track));
         self.audio.skipping = false;
         if mode == Mode::Full {
-            // The pane shows the player whatever the cursor is on.
-            self.note_preview_target();
+            if self.state.quick_view {
+                // The pane shows the player whatever the cursor is on.
+                self.note_preview_target();
+            } else {
+                // The big player fills the quick view pane, so it opens with the player.
+                self.toggle_quick_view(sender);
+            }
         }
         self.start_audio_now(sender);
     }
@@ -544,7 +549,7 @@ impl App {
     }
 
     fn audio_look(&self) -> Look {
-        let Some(path) = &self.audio.target else { return Look::default() };
+        let Some(path) = &self.audio.target else { return self.tuned(Look::default()) };
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let stem = path.file_stem().and_then(|n| n.to_str()).unwrap_or(name);
         let info = self.audio.info.as_deref();
@@ -561,7 +566,7 @@ impl App {
             None => String::new(),
         };
         let tracks = self.audio.session.as_ref().map_or(0, |session| session.list.len());
-        Look {
+        let look = Look {
             title: info.and_then(|i| i.title.clone()).unwrap_or_else(|| stem.to_string()),
             artist: info.and_then(|i| i.artist.clone()).unwrap_or_default(),
             album: info.and_then(|i| i.album.clone()).unwrap_or_default(),
@@ -578,7 +583,9 @@ impl App {
             repeat: self.cfg.repeat(),
             visual_on: self.cfg.player_visual_on,
             visual: self.cfg.visual_style(),
-        }
+            ..Look::default()
+        };
+        self.tuned(look)
     }
 
     pub(in crate::ui::app) fn audio_player_state(&self) -> Option<State> {
@@ -602,7 +609,7 @@ impl App {
     /// What the big player shows when nothing plays: the song under the cursor, waiting for Enter.
     fn audio_idle_look(&self) -> Look {
         let name = self.file_under_cursor().and_then(|path| path.file_stem().map(|stem| stem.to_string_lossy().into_owned()));
-        Look {
+        let look = Look {
             title: name.unwrap_or_default(),
             detail: "Press Enter to play".into(),
             volume: self.audio.volume,
@@ -612,7 +619,8 @@ impl App {
             visual_on: self.cfg.player_visual_on,
             visual: self.cfg.visual_style(),
             ..Look::default()
-        }
+        };
+        self.tuned(look)
     }
 
     /// Paints the player where it lives. Cheap when nothing changed.
@@ -804,6 +812,22 @@ impl App {
         self.paint_music_settings();
     }
 
+    pub(in crate::ui::app) fn audio_set_visual_knob(&mut self, value: u8, pick: impl Fn(&mut rust_commander::config::Config) -> &mut u8) {
+        let value = value.min(100);
+        if *pick(&mut self.cfg) == value {
+            return;
+        }
+        *pick(&mut self.cfg) = value;
+        let _ = config::save(&self.cfg);
+    }
+
+    fn tuned(&self, mut look: Look) -> Look {
+        look.strength = self.cfg.player_visual_strength.min(100);
+        look.smooth = self.cfg.player_visual_smooth.min(100);
+        look.density = self.cfg.player_visual_density.min(100);
+        look
+    }
+
     /// The player folds into a bar under the list it started from. Both lists work as usual again.
     pub(in crate::ui::app) fn audio_minimize(&mut self, sender: &ComponentSender<Self>) {
         let Some(session) = self.audio.session.as_mut() else { return };
@@ -967,6 +991,7 @@ impl App {
             Key::plus | Key::KP_Add | Key::equal => self.audio_volume_step(VOLUME_STEP),
             Key::minus | Key::KP_Subtract => self.audio_volume_step(-VOLUME_STEP),
             Key::m | Key::M => self.audio_toggle_mute(),
+            Key::x | Key::X | Key::Delete | Key::KP_Delete if self.audio_is_mini() => self.audio_close(),
             Key::Return | Key::KP_Enter => {}
             Key::Escape => {
                 self.audio.focus = false;

@@ -73,9 +73,13 @@ impl App {
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let tx = sender.input_sender().clone();
         keys.connect_key_pressed(move |_, key, _, mods| {
+            if crate::ui::shell::claim_f12(key, mods) {
+                return gtk::glib::Propagation::Stop;
+            }
             tx.emit(Msg::Key(key, mods));
             gtk::glib::Propagation::Stop
         });
+        keys.connect_key_released(|_, key, _, _| crate::ui::shell::release_f12(key));
         window.add_controller(keys);
         let tx = sender.input_sender().clone();
         window.connect_close_request(move |_| {
@@ -278,6 +282,9 @@ impl App {
         let tx = sender.input_sender().clone();
         let view_keys = view.clone();
         keys.connect_key_pressed(move |controller, key, _, mods| {
+            if crate::ui::shell::claim_f12(key, mods) {
+                return gtk::glib::Propagation::Stop;
+            }
             if editing_keys.get() {
                 use gtk::gdk::Key;
                 if crate::ui::shell::clipboard_edit(key, mods) {
@@ -296,6 +303,7 @@ impl App {
             tx.emit(Msg::Key(key, mods));
             gtk::glib::Propagation::Stop
         });
+        keys.connect_key_released(|_, key, _, _| crate::ui::shell::release_f12(key));
         window.add_controller(keys);
         let editing_close = Rc::clone(&editing);
         let tx_close = sender.input_sender().clone();

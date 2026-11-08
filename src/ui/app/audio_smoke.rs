@@ -274,11 +274,23 @@ impl App {
             errors.push("music: not stopped after leaving".into());
         }
 
-        // Send goes to the player that is open. None open: the big one in the quick view, else the small one.
+        // Send goes to the player that is open. None open: the big one, and it opens the quick view.
         self.smoke_mark(PaneId::Left, &["tone2.wav", "tone3.wav"]);
         ctrl(self, Key::p);
-        if !self.audio_is_mini() || self.state.quick_view {
-            errors.push("music: ctrl+p with nothing open and no quick view did not start the small player".into());
+        if !self.audio_full() || !self.state.quick_view {
+            errors.push("music: ctrl+p with nothing open did not start the big player in the quick view".into());
+        }
+        // Enter on a song with nothing open starts the big player too, and the quick view comes with it.
+        self.audio_close();
+        if self.state.quick_view {
+            ctrl(self, Key::q);
+        }
+        self.smoke_settle(sender);
+        self.point_at(PaneId::Left, "tone2.wav");
+        press(self, Key::Return);
+        self.smoke_settle(sender);
+        if !self.audio_full() || !self.state.quick_view || self.smoke_track() != "tone2.wav" {
+            errors.push(format!("music: enter with nothing open gave full {}, quick view {}", self.audio_full(), self.state.quick_view));
         }
         self.audio_close();
         self.state.quick_view = true;
@@ -301,7 +313,7 @@ impl App {
         self.sync();
     }
 
-    /// The small player: minimize, Tab and Ctrl+M, expand, and songs sent to it from the other panel.
+    /// The small player: minimize, Tab and Ctrl+M, expand, close, and songs sent to it from the other panel.
     fn smoke_small(&mut self, errors: &mut Vec<String>, sender: &ComponentSender<Self>) {
         let press = |app: &mut Self, key: Key| app.on_key(key, NONE, sender);
         let ctrl = |app: &mut Self, key: Key| app.on_key(key, ModifierType::CONTROL_MASK, sender);
@@ -338,6 +350,14 @@ impl App {
         if !self.audio_focused() {
             errors.push("music: tab did not reach the small player".into());
         }
+        // While the player has the keys, no list has the accent. It blinks when the keys come back.
+        self.smoke_settle(sender);
+        if self.shell.panes.iter().any(|pane| pane.frame.has_css_class("pane-active")) {
+            errors.push("music: a list kept the accent while the small player had the keys".into());
+        }
+        if !self.shell.panes.iter().any(|pane| pane.mini.root.has_css_class("flash")) {
+            errors.push("music: the small player did not blink when it got the keys".into());
+        }
         press(self, Key::space);
         if !self.state.tab(PaneId::Left).marked.is_empty() || !self.state.tab(PaneId::Right).marked.is_empty() {
             errors.push("music: space marked a file while the small player had the keys".into());
@@ -352,6 +372,10 @@ impl App {
         press(self, Key::Tab);
         if self.audio_focused() || self.state.active != PaneId::Left {
             errors.push("music: tab did not come back to the left panel".into());
+        }
+        self.smoke_settle(sender);
+        if !self.shell.panes[0].frame.has_css_class("pane-blink") {
+            errors.push("music: the panel did not blink when the keys came back from the small player".into());
         }
         // Ctrl+M asks for the player, and Escape gives the keys back.
         ctrl(self, Key::m);
@@ -458,6 +482,28 @@ impl App {
         let cursor = self.state.cursor_entry(PaneId::Right).map(|entry| entry.name.to_string()).unwrap_or_default();
         if cursor != "tone.wav" {
             errors.push(format!("music: expand left the cursor on {cursor}"));
+        }
+
+        // X and Delete close the small player from the keyboard.
+        self.state.active = PaneId::Left;
+        for (name, key) in [("x", Key::x), ("delete", Key::Delete)] {
+            if !self.audio_alive() {
+                self.point_at(PaneId::Left, "tone.wav");
+                press(self, Key::Return);
+            }
+            self.audio_minimize(sender);
+            self.smoke_settle(sender);
+            ctrl(self, Key::m);
+            self.smoke_settle(sender);
+            if !self.audio_is_mini() || !self.audio_focused() {
+                errors.push(format!("music: {name}: the small player did not have the keys"));
+                continue;
+            }
+            press(self, key);
+            self.smoke_settle(sender);
+            if self.audio_alive() || self.audio_focused() || self.shell.panes.iter().any(|pane| pane.mini.root.is_visible()) {
+                errors.push(format!("music: {name} did not close the small player"));
+            }
         }
     }
 }

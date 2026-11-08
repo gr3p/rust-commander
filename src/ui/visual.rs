@@ -40,27 +40,42 @@ fn mix(a: Rgb, b: Rgb, t: f64) -> Rgb {
     (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t, a.2 + (b.2 - a.2) * t)
 }
 
-fn rgba(cr: &Context, c: Rgb, alpha: f64) {
-    cr.set_source_rgba(c.0, c.1, c.2, alpha);
+fn rgba(cr: &Context, c: Rgb, alpha: f64, density: f64) {
+    cr.set_source_rgba(c.0, c.1, c.2, (alpha * density).clamp(0.0, 1.0));
 }
 
-/// Draws one of the visualizer styles over a `w` by `h` area. It is a backdrop, so it stays soft
-/// enough for text to read on top of it.
-pub fn draw(cr: &Context, style: VisualStyle, w: f64, h: f64, scene: &Scene, colors: &Colors) {
+/// 50 is the picture as it was drawn before the knobs. 0 is still, 100 is twice as strong.
+fn gain(strength: u8) -> f32 {
+    f32::from(strength.min(100)) / 50.0
+}
+
+/// 50 is the built-in fall. 0 snaps down, 100 barely moves.
+fn fall_scale(smooth: u8) -> f32 {
+    let t = f32::from(smooth.min(100)) / 100.0;
+    1.8 - 1.6 * t
+}
+
+/// 50 is the original ink. 0 disappears, 100 is twice as visible.
+fn ink(density: u8) -> f64 {
+    f64::from(density.min(100)) / 50.0
+}
+
+/// Draws one style over a `w` by `h` area. `density` 1 is the original softness, so text stays readable.
+fn draw_ink(cr: &Context, style: VisualStyle, w: f64, h: f64, scene: &Scene, colors: &Colors, density: f64) {
     if w < 4.0 || h < 4.0 {
         return;
     }
     cr.save().ok();
     match style {
-        VisualStyle::Bars => bars(cr, w, h, scene, colors),
-        VisualStyle::Wave => wave(cr, w, h, scene, colors),
-        VisualStyle::Radial => radial(cr, w, h, scene, colors),
-        VisualStyle::Ribbon => ribbon(cr, w, h, scene, colors),
+        VisualStyle::Bars => bars(cr, w, h, scene, colors, density),
+        VisualStyle::Wave => wave(cr, w, h, scene, colors, density),
+        VisualStyle::Radial => radial(cr, w, h, scene, colors, density),
+        VisualStyle::Ribbon => ribbon(cr, w, h, scene, colors, density),
     }
     cr.restore().ok();
 }
 
-fn bars(cr: &Context, w: f64, h: f64, scene: &Scene, colors: &Colors) {
+fn bars(cr: &Context, w: f64, h: f64, scene: &Scene, colors: &Colors, density: f64) {
     let n = scene.levels.len();
     if n == 0 {
         return;
@@ -72,15 +87,15 @@ fn bars(cr: &Context, w: f64, h: f64, scene: &Scene, colors: &Colors) {
         let x = gap + i as f64 * (bar + gap);
         let height = (f64::from(*level) * top_limit).max(2.0);
         let gradient = LinearGradient::new(0.0, h, 0.0, h - height);
-        gradient.add_color_stop_rgba(0.0, colors.accent.0, colors.accent.1, colors.accent.2, 0.07);
+        gradient.add_color_stop_rgba(0.0, colors.accent.0, colors.accent.1, colors.accent.2, (0.07 * density).clamp(0.0, 1.0));
         let tip = mix(colors.accent, colors.bright, 0.7);
-        gradient.add_color_stop_rgba(1.0, tip.0, tip.1, tip.2, 0.3);
+        gradient.add_color_stop_rgba(1.0, tip.0, tip.1, tip.2, (0.3 * density).clamp(0.0, 1.0));
         cr.set_source(&gradient).ok();
         round_top(cr, x, h - height, bar, height, (bar / 2.0).min(4.0));
         cr.fill().ok();
         if let Some(peak) = scene.peaks.get(i) {
             let y = h - f64::from(*peak) * top_limit - 5.0;
-            rgba(cr, colors.bright, 0.5);
+            rgba(cr, colors.bright, 0.5, density);
             round_top(cr, x, y.min(h - height - 4.0).max(0.0), bar, 3.0, 1.5);
             cr.fill().ok();
         }
@@ -99,7 +114,7 @@ fn round_top(cr: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
     cr.close_path();
 }
 
-fn wave(cr: &Context, w: f64, h: f64, scene: &Scene, colors: &Colors) {
+fn wave(cr: &Context, w: f64, h: f64, scene: &Scene, colors: &Colors, density: f64) {
     let n = scene.wave.len();
     if n < 2 {
         return;
@@ -121,13 +136,13 @@ fn wave(cr: &Context, w: f64, h: f64, scene: &Scene, colors: &Colors) {
     // A soft glow, then the line itself.
     for (width, alpha, color) in [(12.0, 0.08, colors.accent), (7.0, 0.16, colors.accent), (3.0, 0.7, mix(colors.accent, colors.bright, 0.5))] {
         cr.set_line_width(width);
-        rgba(cr, color, alpha);
+        rgba(cr, color, alpha, density);
         trace(cr);
         cr.stroke().ok();
     }
 }
 
-fn radial(cr: &Context, w: f64, h: f64, scene: &Scene, colors: &Colors) {
+fn radial(cr: &Context, w: f64, h: f64, scene: &Scene, colors: &Colors, density: f64) {
     let n = scene.levels.len();
     if n == 0 {
         return;
@@ -138,7 +153,7 @@ fn radial(cr: &Context, w: f64, h: f64, scene: &Scene, colors: &Colors) {
     let r0 = size * 0.22 * (1.0 + 0.14 * bass);
     let reach = size * 0.26;
     cr.set_line_cap(gtk::cairo::LineCap::Round);
-    rgba(cr, colors.accent, 0.12 + 0.2 * bass);
+    rgba(cr, colors.accent, 0.12 + 0.2 * bass, density);
     cr.set_line_width(2.0);
     cr.new_sub_path();
     cr.arc(cx, cy, r0 * 0.96, 0.0, TAU);
@@ -153,7 +168,7 @@ fn radial(cr: &Context, w: f64, h: f64, scene: &Scene, colors: &Colors) {
             let a = FRAC_PI_2 - side * t * PI;
             let (ux, uy) = (a.cos(), a.sin());
             let to = r0 + 3.0 + level * reach;
-            rgba(cr, mix(colors.accent, colors.bright, level), 0.28 + 0.4 * level);
+            rgba(cr, mix(colors.accent, colors.bright, level), 0.28 + 0.4 * level, density);
             cr.move_to(cx + ux * r0, cy + uy * r0);
             cr.line_to(cx + ux * to, cy + uy * to);
             cr.stroke().ok();
@@ -161,7 +176,7 @@ fn radial(cr: &Context, w: f64, h: f64, scene: &Scene, colors: &Colors) {
     }
 }
 
-fn ribbon(cr: &Context, w: f64, h: f64, scene: &Scene, colors: &Colors) {
+fn ribbon(cr: &Context, w: f64, h: f64, scene: &Scene, colors: &Colors, density: f64) {
     let n = scene.levels.len();
     if n < 2 {
         return;
@@ -186,7 +201,7 @@ fn ribbon(cr: &Context, w: f64, h: f64, scene: &Scene, colors: &Colors) {
     };
     if scene.peaks.len() == n {
         cr.set_line_width(1.5);
-        rgba(cr, colors.bright, 0.25);
+        rgba(cr, colors.bright, 0.25, density);
         curve(cr, &scene.peaks, 0.0);
         cr.stroke().ok();
     }
@@ -195,13 +210,13 @@ fn ribbon(cr: &Context, w: f64, h: f64, scene: &Scene, colors: &Colors) {
     cr.line_to(0.0, h);
     cr.close_path();
     let gradient = LinearGradient::new(0.0, h, 0.0, h * 0.1);
-    gradient.add_color_stop_rgba(0.0, colors.accent.0, colors.accent.1, colors.accent.2, 0.03);
-    gradient.add_color_stop_rgba(1.0, colors.accent.0, colors.accent.1, colors.accent.2, 0.3);
+    gradient.add_color_stop_rgba(0.0, colors.accent.0, colors.accent.1, colors.accent.2, (0.03 * density).clamp(0.0, 1.0));
+    gradient.add_color_stop_rgba(1.0, colors.accent.0, colors.accent.1, colors.accent.2, (0.3 * density).clamp(0.0, 1.0));
     cr.set_source(&gradient).ok();
     cr.fill().ok();
     cr.set_line_width(2.5);
     cr.set_line_join(gtk::cairo::LineJoin::Round);
-    rgba(cr, mix(colors.accent, colors.bright, 0.6), 0.6);
+    rgba(cr, mix(colors.accent, colors.bright, 0.6), 0.6, density);
     curve(cr, &scene.levels, 0.0);
     cr.stroke().ok();
 }
@@ -210,6 +225,9 @@ struct State {
     analyzer: Analyzer,
     style: VisualStyle,
     on: bool,
+    strength: u8,
+    smooth: u8,
+    density: u8,
     scope: Option<Scope>,
     samples: Vec<f32>,
     scene: Scene,
@@ -232,6 +250,9 @@ impl Visualizer {
             analyzer: Analyzer::new(),
             style,
             on,
+            strength: 50,
+            smooth: 50,
+            density: 50,
             scope: None,
             samples: Vec::new(),
             scene: Scene::default(),
@@ -248,7 +269,7 @@ impl Visualizer {
         area.set_draw_func(move |_, cr, w, h| {
             let state = shown.borrow();
             if state.on {
-                draw(cr, state.style, f64::from(w), f64::from(h), &state.scene, &state.colors);
+                draw_ink(cr, state.style, f64::from(w), f64::from(h), &state.scene, &state.colors, ink(state.density));
             }
         });
         let live = Rc::clone(&state);
@@ -270,6 +291,23 @@ impl Visualizer {
             state.resting = false;
             self.area.queue_draw();
         }
+    }
+
+    /// Strength, smoothness and density, each 0 to 100. 50 is the original picture.
+    pub fn set_tune(&self, strength: u8, smooth: u8, density: u8) {
+        let mut state = self.state.borrow_mut();
+        let strength = strength.min(100);
+        let smooth = smooth.min(100);
+        let density = density.min(100);
+        if state.strength == strength && state.smooth == smooth && state.density == density {
+            return;
+        }
+        state.strength = strength;
+        state.smooth = smooth;
+        state.density = density;
+        state.analyzer.set_fall(fall_scale(smooth));
+        state.resting = false;
+        self.area.queue_draw();
     }
 
     pub fn set_on(&self, on: bool) {
@@ -312,13 +350,14 @@ fn tick(area: &gtk::DrawingArea, frame_time: i64, state: &mut State) {
     let samples = std::mem::take(&mut state.samples);
     let frame = state.analyzer.update(&samples, if rate == 0 { 44_100 } else { rate }, dt, bands, points);
     let busy = frame.levels.iter().any(|l| *l > 0.002) || frame.wave.iter().any(|w| w.abs() > 0.002);
+    let gain = gain(state.strength);
     state.scene.levels.clear();
-    state.scene.levels.extend_from_slice(frame.levels);
+    state.scene.levels.extend(frame.levels.iter().map(|level| (level * gain).clamp(0.0, 1.0)));
     state.scene.peaks.clear();
-    state.scene.peaks.extend_from_slice(frame.peaks);
+    state.scene.peaks.extend(frame.peaks.iter().map(|level| (level * gain).clamp(0.0, 1.0)));
     state.scene.wave.clear();
-    state.scene.wave.extend_from_slice(frame.wave);
-    state.scene.bass = frame.bass;
+    state.scene.wave.extend(frame.wave.iter().map(|sample| (sample * gain).clamp(-1.0, 1.0)));
+    state.scene.bass = (frame.bass * gain).clamp(0.0, 1.0);
     state.samples = samples;
     if busy || !state.resting {
         area.queue_draw();
@@ -348,7 +387,7 @@ mod tests {
         let mut surface = ImageSurface::create(Format::ARgb32, w, h).unwrap();
         {
             let cr = Context::new(&surface).unwrap();
-            draw(&cr, style, f64::from(w), f64::from(h), scene, &colors());
+            draw_ink(&cr, style, f64::from(w), f64::from(h), scene, &colors(), 1.0);
         }
         surface.data().unwrap().to_vec()
     }
@@ -405,7 +444,7 @@ mod tests {
         let mut surface = ImageSurface::create(Format::ARgb32, 200, 120).unwrap();
         {
             let cr = Context::new(&surface).unwrap();
-            draw(&cr, VisualStyle::Bars, 200.0, 120.0, &scene(16, 0.8), &red);
+            draw_ink(&cr, VisualStyle::Bars, 200.0, 120.0, &scene(16, 0.8), &red, 1.0);
         }
         let data = surface.data().unwrap();
         // ARGB32 is premultiplied BGRA on little-endian: red must dominate blue wherever it is drawn.
@@ -415,5 +454,32 @@ mod tests {
             b += u64::from(px[0]);
         }
         assert!(r > b * 3, "red {r} blue {b}");
+    }
+
+    fn weight(style: VisualStyle, density: f64) -> u64 {
+        let mut surface = ImageSurface::create(Format::ARgb32, 300, 200).unwrap();
+        {
+            let cr = Context::new(&surface).unwrap();
+            draw_ink(&cr, style, 300.0, 200.0, &scene(32, 0.7), &colors(), density);
+        }
+        surface.data().unwrap().chunks_exact(4).map(|px| u64::from(px[3])).sum()
+    }
+
+    #[test]
+    fn density_fades_the_picture_and_can_deepen_it() {
+        let faint = weight(VisualStyle::Bars, 0.4);
+        let normal = weight(VisualStyle::Bars, 1.0);
+        let deep = weight(VisualStyle::Bars, 2.0);
+        assert!(faint < normal && normal < deep, "{faint} {normal} {deep}");
+    }
+
+    #[test]
+    fn the_middle_of_each_knob_is_the_original_picture() {
+        assert_eq!(gain(50), 1.0);
+        assert_eq!(gain(0), 0.0);
+        assert_eq!(gain(100), 2.0);
+        assert!((fall_scale(50) - 1.0).abs() < 1e-6);
+        assert!(fall_scale(0) > fall_scale(100));
+        assert_eq!(ink(50), 1.0);
     }
 }

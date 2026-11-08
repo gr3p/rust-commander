@@ -281,13 +281,21 @@ impl App {
         Some(out)
     }
 
+    fn seven_zip(&self) -> Option<PathBuf> {
+        rust_commander::pack::find_program(&self.cfg.seven_zip, rust_commander::pack::names(rust_commander::pack::Format::SevenZ))
+    }
+
     pub(in crate::ui::app) fn begin_unpack(&mut self, pick: bool, sender: &ComponentSender<Self>) {
         let Some(path) = self.file_under_cursor() else {
             self.status = "Not an archive".into();
             return;
         };
-        if !rust_commander::archive::is_archive(&path) {
+        if !rust_commander::archive::is_testable(&path) {
             self.status = "Not an archive".into();
+            return;
+        }
+        if rust_commander::archive::is_seven_zip(&path) && self.seven_zip().is_none() {
+            self.fail_unpack(rust_commander::pack::SEVEN_ZIP_UNPACK);
             return;
         }
         if self.job.is_some() {
@@ -315,6 +323,7 @@ impl App {
         let Some(pending) = &self.pending else { return };
         let path = pending.archive.clone();
         let password = pending.password.clone();
+        let seven = rust_commander::archive::is_seven_zip(&path).then(|| self.seven_zip()).flatten();
         self.status = "Reading archive".into();
         self.archive_wait = true;
         self.paint_wait();
@@ -324,8 +333,12 @@ impl App {
         self.list_wait = Some((Arc::clone(&cancel), Instant::now()));
         let tx = sender.input_sender().clone();
         std::thread::spawn(move || {
-            let result = rust_commander::archive::list_until(&path, password.as_deref(), &cancel).map_err(|err| err.to_string());
-            tx.emit(Msg::ArchiveListed(generation, result));
+            let result = if rust_commander::archive::is_seven_zip(&path) {
+                rust_commander::archive::list_seven(&path, password.as_deref(), seven.as_deref(), &cancel)
+            } else {
+                rust_commander::archive::list_until(&path, password.as_deref(), &cancel)
+            };
+            tx.emit(Msg::ArchiveListed(generation, result.map_err(|err| err.to_string())));
         });
     }
 
@@ -431,6 +444,7 @@ impl App {
         let dest = pending.dest.clone();
         let names = pending.names.clone();
         let password = pending.password.clone();
+        let seven = rust_commander::archive::is_seven_zip(&archive).then(|| self.seven_zip()).flatten();
         let Some(pipes) = self.open_job(Work::Unpack) else { return };
         self.status = "Unpacking".into();
         rust_commander::log::info(&format!("unpack {}", archive.display()));
@@ -438,7 +452,30 @@ impl App {
         let _ = sender;
         std::thread::spawn(move || {
             let set = names.map(|names| names.into_iter().collect::<std::collections::HashSet<_>>());
-            let result = rust_commander::archive::extract(
+            let result = if rust_commander::archive::is_seven_zip(&archive) {
+                rust_commander::archive::extract_seven(
+                    &archive,
+                    &dest,
+                    set.as_ref(),
+                    password.as_deref(),
+                    seven.as_deref(),
+                    &pipes.cancel,
+                    &mut |progress| {
+                        let mut progress = progress.clone();
+                        if let Some((volume, file)) = progress.note.split_once('\n') {
+                            progress.note = format!("From: {volume}\nTo:   {}\n{file}", dest.display());
+                        }
+                        let _ = pipes.progress_tx.send(progress);
+                    },
+                    &mut |src, dst| {
+                        if pipes.conflict_tx.send((src.to_path_buf(), dst.to_path_buf())).is_err() {
+                            return Choice::Cancel;
+                        }
+                        pipes.answer_rx.recv().unwrap_or(Choice::Cancel)
+                    },
+                )
+            } else {
+                rust_commander::archive::extract(
                 &archive,
                 &dest,
                 set.as_ref(),
@@ -457,7 +494,8 @@ impl App {
                     }
                     pipes.answer_rx.recv().unwrap_or(Choice::Cancel)
                 },
-            );
+            )
+            };
             let _ = pipes.done_tx.send(result.map_err(|err| err.to_string()));
         });
     }
