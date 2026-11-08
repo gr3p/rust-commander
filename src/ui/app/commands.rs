@@ -17,7 +17,7 @@ impl App {
         let name = entry.map(|entry| entry.name.as_ref()).unwrap_or("");
         let file = entry.is_some_and(|entry| !entry.is_dir() && entry.name.as_ref() != "..");
         let dir = entry.is_some_and(|entry| entry.is_dir() && entry.name.as_ref() != "..");
-        let archive = file && rust_commander::archive::is_archive(std::path::Path::new(name));
+        let archive = file && rust_commander::archive::is_testable(std::path::Path::new(name));
         let testable = file && rust_commander::archive::is_testable(std::path::Path::new(name));
         let text = file && commands::is_text(name);
         let image = file && rust_commander::imageview::is_image(name);
@@ -233,6 +233,7 @@ impl App {
             Act::AudioRepeat => self.audio_cycle_repeat(),
             Act::AudioMinimize | Act::AudioJump => self.audio_jump(sender),
             Act::AudioExpand => self.audio_expand(sender),
+            Act::AudioClose => self.audio_close(),
             Act::AudioExternal => self.audio_open_external(),
             Act::AudioFocus => self.audio_tab(false),
             Act::AudioSend => self.audio_send(false, sender),

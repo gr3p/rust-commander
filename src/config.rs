@@ -76,6 +76,15 @@ pub struct Config {
     pub player_visual: String,
     #[serde(default = "default_true")]
     pub player_visual_on: bool,
+    /// How hard the sound moves the picture. 50 is the original strength.
+    #[serde(default = "default_visual_mid")]
+    pub player_visual_strength: u8,
+    /// How slowly the picture falls back. 50 is the original fall.
+    #[serde(default = "default_visual_mid")]
+    pub player_visual_smooth: u8,
+    /// How visible the picture is behind the text. 50 is the original density.
+    #[serde(default = "default_visual_mid")]
+    pub player_visual_density: u8,
     /// What the player does after the last track: off, all or one.
     #[serde(default = "default_repeat")]
     pub player_repeat: String,
@@ -109,6 +118,10 @@ fn default_cursor_alpha() -> u8 {
 
 fn default_visual() -> String {
     crate::audio::VisualStyle::default().name().into()
+}
+
+fn default_visual_mid() -> u8 {
+    50
 }
 
 fn default_repeat() -> String {
@@ -146,6 +159,9 @@ impl Default for Config {
             cursor_frame: false,
             player_visual: default_visual(),
             player_visual_on: true,
+            player_visual_strength: default_visual_mid(),
+            player_visual_smooth: default_visual_mid(),
+            player_visual_density: default_visual_mid(),
             player_repeat: default_repeat(),
             player_shuffle: false,
         }
@@ -305,6 +321,9 @@ mod tests {
     fn the_player_remembers_its_modes_and_defaults_for_old_configs() {
         let old: Config = toml::from_str("").unwrap();
         assert!(old.player_visual_on);
+        assert_eq!(old.player_visual_strength, 50);
+        assert_eq!(old.player_visual_smooth, 50);
+        assert_eq!(old.player_visual_density, 50);
         assert_eq!(old.visual_style(), crate::audio::VisualStyle::Bars);
         assert_eq!(old.repeat(), crate::audio::Repeat::Off);
         assert!(!old.player_shuffle);

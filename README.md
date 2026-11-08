@@ -8,7 +8,7 @@
 
 A dual-pane file manager for Linux, in the tradition of Total Commander on Windows and Midnight Commander in the terminal. It keeps the keyboard-driven F-key workflow and adds a native GTK4 window written in Rust, built-in terminals, image and text viewers, and themes that follow your desktop. On [Omarchy](https://omarchy.org) it restyles itself when you change theme.
 
-Early release (0.1.x): expect rough edges, and please [report them](https://github.com/gr3p/rust-commander/issues).
+Early release (0.2): expect rough edges, and please [report them](https://github.com/gr3p/rust-commander/issues).
 
 <table>
   <tr>
@@ -117,6 +117,7 @@ The panel with focus is the source, the other is the target. Press F1 for all co
 | Ctrl+F3 to Ctrl+F6 | Sort |
 | Ctrl+H | Show or hide dotfiles |
 | Ctrl+Shift+F1 | Thumbnail grid |
+| Super+Up / Super+Down | Maximize the window / restore it, as in other GNOME windows. If your window manager already has its own binding for these keys, it handles them first |
 
 | Files | |
 | --- | --- |
@@ -138,7 +139,7 @@ The panel with focus is the source, the other is the target. Press F1 for all co
 | Music (the big player in the quick view) | |
 | --- | --- |
 | Ctrl+Q on a song | The song starts playing in the other panel at once, and the playlist is the music files of that folder in the order the list shows them. Ctrl+Q again closes the quick view and stops the music |
-| Enter on a song | Plays that song. With the quick view on a song and nothing playing, the player waits for Enter |
+| Enter on a song | Plays that song. With nothing playing it starts the big player, and the quick view opens with it. With the quick view on a song and nothing playing, the player waits for Enter |
 | Tab | The keys go to the player, and Tab again hands them back to the file panel. The player is outlined while it has them |
 | Space (or the media key) | Play or pause. Press it after the song has ended to play it again |
 | Ctrl+Left / Ctrl+Right | Seek 5 seconds back or forward, 30 seconds with Shift. The seek bar and volume also work with the mouse |
@@ -165,16 +166,17 @@ The visualizer plays behind the whole player and follows the sound itself. The s
 | Right-click, Send and replace music in player (or Ctrl+P) | The marked songs of the panel become the playlist, in the order the list shows them, and the first one plays. With nothing marked, the song under the cursor is sent. A right-click on a row that is not marked sends only that row and leaves the marks |
 | Right-click, Add to current playlist (or Ctrl+Shift+P) | The songs go last in the playlist that is playing. Songs already in it are not added twice. With nothing playing they start a playlist |
 
-The songs go to the player that is open: the small one if the small player is up, the big one if it is, and with none open the big one when the quick view is on and otherwise the small one. A picked playlist stays as it is, whatever the list shows.
+The songs go to the player that is open: the small one if the small player is up, the big one if it is. With none open they go to the big one, and the quick view opens for it (an editor or a shell in the other panel leaves no room, so the small one starts then). A picked playlist stays as it is, whatever the list shows.
 
 | Small player | |
 | --- | --- |
 | Minimize button or Ctrl+M | The player folds into a bar under the list it started from, the quick view closes and both lists work as usual. The music plays on, to the end of the folder, and the cursor follows it unless you have moved it away |
-| Enter on a song | Plays it in the small player, in any folder and in either panel. If no player is up and the quick view is off, it starts the small player under that panel |
+| Enter on a song | Plays it in the small player, in any folder and in either panel |
 | Ctrl+Q on a song | While the small player is up, a song under the cursor plays there instead of opening the quick view. Ctrl+Q on anything else is the quick view as usual |
-| Tab | Left panel, right panel, small player, and round again |
+| Tab | Left panel, right panel, small player, and round again. The small player blinks when it gets the keys, and the panel blinks when they come back |
 | Ctrl+M | Jump to the small player. Ctrl+M again, with the keys in it, makes it big. In the big player Ctrl+M folds it, so Ctrl+M toggles between the two. Escape and any list key give the keys back to the list. Space, Ctrl+Left / Right, N / P (or Up / Down), R, S, + / − and M work on it while it has them |
-| Expand button | Back to the big player: the list shows the folder with the cursor on the song, and the quick view opens. The X stops the music and closes the player |
+| X or Delete | Stops the music and closes the small player, while it has the keys |
+| Expand button | Back to the big player: the list shows the folder with the cursor on the song, and the quick view opens. The X button stops the music and closes the player |
 
 | Archives and checksums | |
 | --- | --- |

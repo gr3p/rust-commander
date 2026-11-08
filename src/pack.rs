@@ -12,6 +12,7 @@ use crate::archive::Fail;
 use crate::ops::{Progress, Report};
 
 pub const SEVEN_ZIP_HINT: &str = "Point 7-Zip at the 7z program, for example /usr/bin/7z or /usr/bin/7zz. The package is 7zip or p7zip-full. This program creates .7z. It does not create .rar.";
+pub const SEVEN_ZIP_UNPACK: &str = "This .7z archive needs 7-Zip. Install the package 7zip or p7zip-full, then set the 7z program in Settings (F12). Unpacking works after that.";
 pub const RAR_HINT: &str = "Point RAR at RARLAB's rar program, for example /usr/bin/rar. unrar only unpacks. 7z does not create .rar. Unpacking RAR does not need this path.";
 
 pub const LEVELS: [(&str, u8); 6] = [("Store", 0), ("Fastest", 1), ("Fast", 3), ("Normal", 5), ("Maximum", 7), ("Ultra", 9)];

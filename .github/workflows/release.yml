@@ -33,16 +33,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Major.minor comes from Cargo.toml, the patch is the commit count, so every push is a new version.
+      # The version in Cargo.toml is the release version.
       - name: Set version
         id: version
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          base=$(sed -n 's/^version = "\([0-9]*\.[0-9]*\)\..*/\1/p' Cargo.toml | head -n 1)
-          version="$base.$(git rev-list --count HEAD)"
-          sed -i "0,/^version = .*/s//version = \"$version\"/" Cargo.toml
-          # Cargo.lock must follow, the package build uses --locked.
-          perl -0pi -e "s/(name = \"rust-commander\"\nversion = )\"[^\"]*\"/\$1\"$version\"/" Cargo.lock
+          version=$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)
           printf 'rust-commander (%s-1) unstable; urgency=medium\n\n  * Automated release.\n\n -- Rust Commander <sysopt@protonmail.com>  %s\n\n%s\n' \
             "$version" "$(date -R)" "$(cat debian/changelog)" > debian/changelog
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -116,15 +112,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Same version as the .deb: major.minor from Cargo.toml, patch is the commit count.
+      # Same version as the .deb: the version in Cargo.toml.
       - name: Set version
         id: version
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          base=$(sed -n 's/^version = "\([0-9]*\.[0-9]*\)\..*/\1/p' Cargo.toml | head -n 1)
-          version="$base.$(git rev-list --count HEAD)"
-          sed -i "0,/^version = .*/s//version = \"$version\"/" Cargo.toml
-          perl -0pi -e "s/(name = \"rust-commander\"\nversion = )\"[^\"]*\"/\$1\"$version\"/" Cargo.lock
+          version=$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Build package

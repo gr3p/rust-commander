@@ -28,6 +28,24 @@ const BLINK_STEP: Duration = Duration::from_millis(80);
 const BLINK_PHASES: u8 = 6;
 pub const BLINK_LEN: Duration = Duration::from_millis(300);
 
+thread_local! {
+    static F12_HELD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// True when this F12 repeats a key that is already down, so Settings does not open and close on one press.
+pub(crate) fn claim_f12(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
+    if key != gtk::gdk::Key::F12 || mods.contains(gtk::gdk::ModifierType::CONTROL_MASK) || mods.contains(gtk::gdk::ModifierType::ALT_MASK) {
+        return false;
+    }
+    F12_HELD.with(|held| held.replace(true))
+}
+
+pub(crate) fn release_f12(key: gtk::gdk::Key) {
+    if key == gtk::gdk::Key::F12 {
+        F12_HELD.with(|held| held.set(false));
+    }
+}
+
 pub struct PaneUi {
     pub frame: gtk::Frame,
     pub path: gtk::Entry,
@@ -236,6 +254,17 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
     let win = window.clone();
     let editing_keys = Rc::clone(&editing);
     keys.connect_key_pressed(move |controller, key, _, mods| {
+        if claim_f12(key, mods) {
+            return gtk::glib::Propagation::Stop;
+        }
+        if let Some(maximize) = window_size_key(key, mods) {
+            if maximize {
+                win.maximize();
+            } else if win.is_maximized() {
+                win.unmaximize();
+            }
+            return gtk::glib::Propagation::Stop;
+        }
         let focused = relm4::gtk::prelude::GtkWindowExt::focus(&win);
         let typing = focused.as_ref().is_some_and(|widget| {
             let mut current = Some(widget.clone());
@@ -284,6 +313,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
         tx.emit(super::msg::Msg::Key(key, mods));
         gtk::glib::Propagation::Stop
     });
+    keys.connect_key_released(|_, key, _, _| release_f12(key));
     window.add_controller(keys);
 
     Shell {
@@ -395,6 +425,7 @@ fn drive_bar(
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
     bar.add_css_class("drives");
     bar.set_margin_top(2);
+    bar.set_margin_bottom(2);
     let snapshot = (rust_commander::places::mounts(), super::drives::idle_volumes());
     let (drives, idle) = drive_buttons(sender, active, icon_pack, &snapshot);
     for button in drives.iter().map(|(_, button)| button).chain(idle.iter()) {
@@ -1044,6 +1075,21 @@ fn entry_input(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
         || (ctrl && !alt && matches!(key, Key::a | Key::A | Key::c | Key::C | Key::v | Key::V | Key::x | Key::X | Key::z | Key::Z))
 }
 
+// Super+Up maximizes the window and Super+Down restores it, as in other GNOME windows. When the window manager has
+// no binding for them the keys arrive here, and would otherwise only move the cursor.
+// Some(true) maximizes, Some(false) restores.
+fn window_size_key(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> Option<bool> {
+    use gtk::gdk::{Key, ModifierType};
+    if !mods.contains(ModifierType::SUPER_MASK) || mods.intersects(ModifierType::ALT_MASK | ModifierType::SHIFT_MASK) {
+        return None;
+    }
+    match key {
+        Key::Up | Key::KP_Up => Some(true),
+        Key::Down | Key::KP_Down => Some(false),
+        _ => None,
+    }
+}
+
 fn is_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
     use gtk::gdk::Key;
     let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
@@ -1406,8 +1452,23 @@ pub fn paint_terminal(term: &Terminal, theme: &rust_commander::theme::TerminalTh
 
 #[cfg(test)]
 mod tests {
-    use super::{clipboard_edit, edit_command, entry_input};
+    use super::{clipboard_edit, edit_command, entry_input, window_size_key};
     use relm4::gtk::gdk::{Key, ModifierType};
+
+    #[test]
+    fn super_arrows_size_the_window_and_nothing_else_does() {
+        assert_eq!(window_size_key(Key::Up, ModifierType::SUPER_MASK), Some(true));
+        assert_eq!(window_size_key(Key::KP_Up, ModifierType::SUPER_MASK), Some(true));
+        assert_eq!(window_size_key(Key::Down, ModifierType::SUPER_MASK), Some(false));
+        // Num Lock and Caps Lock do not change it.
+        assert_eq!(window_size_key(Key::Up, ModifierType::SUPER_MASK | ModifierType::LOCK_MASK), Some(true));
+        // Plain arrows move the cursor, and the other modifiers keep their own meaning.
+        assert_eq!(window_size_key(Key::Up, ModifierType::empty()), None);
+        assert_eq!(window_size_key(Key::Up, ModifierType::CONTROL_MASK), None);
+        assert_eq!(window_size_key(Key::Up, ModifierType::SUPER_MASK | ModifierType::ALT_MASK), None);
+        assert_eq!(window_size_key(Key::Up, ModifierType::SUPER_MASK | ModifierType::SHIFT_MASK), None);
+        assert_eq!(window_size_key(Key::Left, ModifierType::SUPER_MASK), None);
+    }
 
     #[test]
     fn filter_entry_receives_text_but_not_search_shortcuts() {

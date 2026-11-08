@@ -1,5 +1,5 @@
 # CI passes ver. A local build without it uses the base version.
-%{!?ver:%global ver 0.1.0}
+%{!?ver:%global ver 0.2.1}
 %global debug_package %{nil}
 
 Name:           rust-commander

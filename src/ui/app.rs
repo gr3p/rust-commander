@@ -223,6 +223,8 @@ pub struct App {
     preview: lister::PreviewSlot,
     preview_sent: u64,
     preview_shown: [u64; 2],
+    /// The panes have been painted once, so a later change of the accent border may blink.
+    accent_painted: bool,
     quick_fit: bool,
     edit_quiet: Rc<Cell<bool>>,
     syntax_on: Rc<Cell<bool>>,
@@ -388,6 +390,7 @@ impl SimpleComponent for App {
             preview: lister::PreviewSlot::default(),
             preview_sent: 0,
             preview_shown: [0, 0],
+            accent_painted: false,
             quick_fit: true,
             edit_quiet,
             syntax_on,
@@ -544,6 +547,9 @@ impl App {
             Msg::AudioVisualOn(on) => self.audio_set_visual_on(on),
             Msg::AudioVisualToggle => self.audio_set_visual_on(!self.cfg.player_visual_on),
             Msg::AudioVisualStyle(style) => self.audio_set_visual_style(style),
+            Msg::AudioVisualStrength(value) => self.audio_set_visual_knob(value, |cfg| &mut cfg.player_visual_strength),
+            Msg::AudioVisualSmooth(value) => self.audio_set_visual_knob(value, |cfg| &mut cfg.player_visual_smooth),
+            Msg::AudioVisualDensity(value) => self.audio_set_visual_knob(value, |cfg| &mut cfg.player_visual_density),
             Msg::AudioRepeatSet(repeat) => self.audio_set_repeat(repeat),
             Msg::Enqueue(text) => self.enqueue(&text, sender),
             Msg::QueuePause => self.toggle_queue_pause(),
@@ -1507,7 +1513,8 @@ impl App {
         self.restamp_shells();
         let mut pending: [Option<Vec<Entry>>; 2] = [None, None];
         // First sync only paints the accent. A later focus change blinks that border, then it stays.
-        let focused_before = self.shell.panes.iter().any(|ui| ui.frame.has_css_class("pane-active"));
+        // That includes the keys coming back from the player, when no list had the accent.
+        let focused_before = self.accent_painted;
         for pane in 0..2 {
             let id = PaneId::from_index(pane);
             let active = self.state.active == id;
@@ -1632,6 +1639,7 @@ impl App {
         self.sync_hints();
         self.paint_mode_bar();
         self.mark_drives();
+        self.accent_painted = true;
         SYNCING.store(false, Ordering::Relaxed);
     }
 

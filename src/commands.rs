@@ -9,6 +9,7 @@ const HINTS: &[Act] = &[
     Act::AudioMinimize,
     Act::AudioJump,
     Act::AudioExpand,
+    Act::AudioClose,
     Act::AudioFocus,
     Act::AudioSend,
     Act::AudioAdd,
@@ -142,6 +143,7 @@ pub enum Act {
     AudioMinimize,
     AudioJump,
     AudioExpand,
+    AudioClose,
     AudioFocus,
     AudioSend,
     AudioAdd,
@@ -153,7 +155,7 @@ pub enum Act {
 }
 
 impl Act {
-    pub const ALL: [Act; 91] = [
+    pub const ALL: [Act; 92] = [
         Act::Refresh,
         Act::View,
         Act::Edit,
@@ -237,6 +239,7 @@ impl Act {
         Act::AudioMinimize,
         Act::AudioJump,
         Act::AudioExpand,
+        Act::AudioClose,
         Act::AudioFocus,
         Act::AudioSend,
         Act::AudioAdd,
@@ -271,7 +274,7 @@ pub struct Cue {
     pub editing: bool,
     // The active panel stands at the root of a drive, as right after picking one.
     pub drive: bool,
-    // zip, rar, tar and 7z. Unpack stays on `archive`, which does not include 7z.
+    // zip, rar, tar and 7z. Unpack follows `archive`, which includes 7z.
     pub testable: bool,
 }
 
@@ -409,7 +412,7 @@ pub fn applies(act: Act, cue: &Cue) -> bool {
         Act::AudioNext | Act::AudioPrev | Act::AudioShuffle | Act::AudioRepeat => cue.audio,
         Act::AudioMinimize => cue.player && !cue.mini,
         Act::AudioJump => cue.mini && !cue.audio,
-        Act::AudioExpand => cue.mini && cue.audio,
+        Act::AudioExpand | Act::AudioClose => cue.mini && cue.audio,
         Act::AudioFocus => cue.player && !cue.audio,
         Act::AudioSend => cue.song || cue.marks > 0,
         Act::AudioAdd => cue.player && (cue.song || cue.marks > 0),
@@ -426,6 +429,7 @@ fn score(act: Act, cue: &Cue) -> i32 {
     match act {
         Act::AudioJump if cue.mini && !cue.audio => 121,
         Act::AudioExpand if cue.mini && cue.audio => 117,
+        Act::AudioClose if cue.mini && cue.audio => 116,
         Act::AudioFocus if cue.player && !cue.mini && !cue.audio => 121,
         Act::AudioToggle if cue.audio => 120,
         Act::AudioNext if cue.audio => 119,
@@ -524,6 +528,7 @@ const CATALOG: &[Item] = &[
     Item { act: Act::AudioMinimize, keys: "Ctrl+M", label: "Minimize player", group: Group::View },
     Item { act: Act::AudioJump, keys: "Ctrl+M", label: "Jump to player", group: Group::View },
     Item { act: Act::AudioExpand, keys: "Ctrl+M", label: "Big player", group: Group::View },
+    Item { act: Act::AudioClose, keys: "X", label: "Close player", group: Group::View },
     Item { act: Act::AudioFocus, keys: "Tab", label: "Panel or player", group: Group::View },
     Item { act: Act::AudioSend, keys: "Ctrl+P", label: "Send and replace music in player", group: Group::View },
     Item { act: Act::AudioAdd, keys: "Ctrl+Shift+P", label: "Add to current playlist", group: Group::View },
@@ -698,8 +703,12 @@ mod tests {
         assert_eq!(&ranked[..4], &[Act::AudioToggle, Act::AudioNext, Act::AudioPrev, Act::AudioExpand]);
         assert!(!applies(Act::AudioJump, &small_keys) && !applies(Act::AudioMinimize, &small_keys));
         assert!(!applies(Act::AudioExpand, &small) && !applies(Act::AudioExpand, &big));
+        // Closing is offered to the small player once it has the keys, and nowhere else.
+        assert!(applies(Act::AudioClose, &small_keys) && rank(&small_keys).contains(&Act::AudioClose));
+        assert!(!applies(Act::AudioClose, &small) && !applies(Act::AudioClose, &big) && !applies(Act::AudioClose, &list_has_keys));
+        assert!(hint_label(Act::AudioClose, "right").contains("Close player"));
         // Nothing plays: none of it is on offer.
-        for act in [Act::AudioNext, Act::AudioJump, Act::AudioMinimize, Act::AudioFocus, Act::AudioAdd] {
+        for act in [Act::AudioNext, Act::AudioJump, Act::AudioMinimize, Act::AudioClose, Act::AudioFocus, Act::AudioAdd] {
             assert!(!applies(act, &cue(|cue| cue.file = true)), "{act:?}");
         }
     }
