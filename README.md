@@ -8,7 +8,7 @@
 
 A dual-pane file manager for Linux, in the tradition of Total Commander on Windows and Midnight Commander in the terminal. It keeps the keyboard-driven F-key workflow and adds a native GTK4 window written in Rust, built-in terminals, image and text viewers, and themes that follow your desktop. On [Omarchy](https://omarchy.org) it restyles itself when you change theme.
 
-Early release (0.1.x): expect rough edges, and please [report them](https://github.com/gr3p/rust-commander/issues).
+Early release (0.2): expect rough edges, and please [report them](https://github.com/gr3p/rust-commander/issues).
 
 <table>
   <tr>
