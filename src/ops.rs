@@ -995,6 +995,7 @@ fn normalize(path: &Path) -> PathBuf {
 }
 
 pub fn make_dir(parent: &Path, name: &str) -> io::Result<PathBuf> {
+    check_name(name)?;
     let path = parent.join(name);
     fs::create_dir(&path)?;
     Ok(path)
