@@ -1,7 +1,7 @@
 name: Release
 
-# Every push to master builds a .deb and a Fedora 44 .rpm, publishes a GitHub release
-# and updates the apt and dnf repos on gh-pages.
+# Every push to master builds a .deb and an .rpm for the current Fedora, publishes a
+# GitHub release and updates the apt and dnf repos on gh-pages.
 on:
   workflow_dispatch:
   push:
@@ -100,7 +100,7 @@ jobs:
   rpm:
     needs: release
     runs-on: ubuntu-latest
-    container: fedora:44
+    container: fedora:latest
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -153,7 +153,11 @@ jobs:
           APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
         run: |
           echo "$APT_GPG_KEY" | gpg --batch --import
-          install -d "$HOME/.gnupg" rpm/fedora/44/x86_64
+          # Directory follows the image. The repo file selects it with $releasever.
+          . /etc/os-release
+          [ -n "$VERSION_ID" ]
+          dir="rpm/fedora/${VERSION_ID}/x86_64"
+          install -d "$HOME/.gnupg" "$dir"
           chmod 700 "$HOME/.gnupg"
           printf 'allow-loopback-pinentry\n' > "$HOME/.gnupg/gpg-agent.conf"
           printf '%s\n' "$APT_GPG_PASSPHRASE" > "$HOME/.gnupg/pass"
@@ -165,14 +169,14 @@ jobs:
           %_gpg_path $HOME/.gnupg
           %_gpg_sign_cmd_extra_args --batch --yes --pinentry-mode loopback --passphrase-file $HOME/.gnupg/pass
           EOF
-          rm -f rpm/fedora/44/x86_64/rust-commander-*.rpm
-          cp "$HOME/rpmbuild/RPMS/x86_64"/rust-commander-*.rpm rpm/fedora/44/x86_64/
+          rm -f "$dir"/rust-commander-*.rpm
+          cp "$HOME/rpmbuild/RPMS/x86_64"/rust-commander-*.rpm "$dir"/
           cp "$GITHUB_WORKSPACE/packaging/fedora/rust-commander.repo" rpm/rust-commander.repo
           # Sign before createrepo, the signature changes the file.
-          rpmsign --addsign rpm/fedora/44/x86_64/rust-commander-*.rpm
-          createrepo_c rpm/fedora/44/x86_64
+          rpmsign --addsign "$dir"/rust-commander-*.rpm
+          createrepo_c "$dir"
           sign() { gpg --batch --yes --pinentry-mode loopback --passphrase "$APT_GPG_PASSPHRASE" --default-key B203CAEB2B841D3A "$@"; }
-          sign --detach-sign --armor -o rpm/fedora/44/x86_64/repodata/repomd.xml.asc rpm/fedora/44/x86_64/repodata/repomd.xml
+          sign --detach-sign --armor -o "$dir/repodata/repomd.xml.asc" "$dir/repodata/repomd.xml"
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
           git add -A
