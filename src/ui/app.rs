@@ -249,6 +249,7 @@ pub struct App {
     settings: Option<SettingsUi>,
     command_list: Option<gtk::Window>,
     smoke: bool,
+    tx: relm4::Sender<Msg>,
 }
 
 pub fn run(smoke: bool) {
@@ -419,6 +420,7 @@ impl SimpleComponent for App {
             settings: None,
             command_list: None,
             smoke,
+            tx: sender.input_sender().clone(),
         };
         model.apply_css(&theme::load_named(&theme::active_name(
             &model.cfg.theme,
@@ -461,7 +463,7 @@ impl SimpleComponent for App {
     fn update(&mut self, msg: Msg, sender: ComponentSender<Self>) {
         let idle_poll = matches!(msg, Msg::Poll);
         self.on_msg(msg, &sender);
-        self.arm_watches(&sender);
+        self.arm_watches();
         self.kick_preview(&sender);
         // Finding the file under the cursor sorts the folder, so an idle poll leaves it be.
         if !idle_poll || self.dirty.iter().any(|pane| *pane) {
@@ -741,6 +743,9 @@ impl App {
             Msg::DiskInfo(path) => self.show_disk_info(path),
             Msg::DrivesChanged => self.refresh_drives(sender),
             Msg::DriveStatus(text) => self.status = text,
+            Msg::Status(text) => self.status = text,
+            Msg::FilmChecked { path, film } => self.film_checked(path, film, sender),
+            Msg::WatchReady(pane, path) => self.watch_ready(pane, &path),
             Msg::MountVolume(pane, id) => {
                 self.status = format!("Mounting {id}");
                 let tx = sender.input_sender().clone();
@@ -1475,10 +1480,14 @@ impl App {
             return;
         };
         if viewer && self.cfg.viewer.trim().is_empty() {
-            if let Err(err) = launch_default(&path) {
-                rust_commander::log::error(&err);
-                self.status = err;
-            }
+            // The type lookup reads the file, which can stall on a dead mount.
+            let tx = self.tx.clone();
+            std::thread::spawn(move || {
+                if let Err(err) = launch_default(&path) {
+                    rust_commander::log::error(&err);
+                    tx.emit(Msg::Status(err));
+                }
+            });
             return;
         }
         let argv = if viewer {

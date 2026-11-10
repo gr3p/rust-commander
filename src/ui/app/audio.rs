@@ -132,6 +132,12 @@ impl App {
         self.audio.session.as_ref().map(|session| session.mode)
     }
 
+    /// One line in the log, so a stuck player can be read from what led up to it.
+    fn audio_note(&self, what: &str) {
+        let track = self.audio.target.as_deref().and_then(Path::file_name).map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        rust_commander::log::info(&format!("audio {what} mode={:?} focus={} track={track}", self.audio_mode(), self.audio.focus));
+    }
+
     /// The big player fills the quick view pane.
     pub(in crate::ui::app) fn audio_full(&self) -> bool {
         self.audio_mode() == Some(Mode::Full)
@@ -456,17 +462,34 @@ impl App {
 
     /// Enter on a song plays it. A film opens in the external program instead; its sound is Ctrl+Q.
     pub(in crate::ui::app) fn audio_enter(&mut self, sender: &ComponentSender<Self>) -> bool {
-        if self.cursor_is_film() {
-            return false;
+        if self.cursor_is_audio() && self.cursor_is_mp4() {
+            let Some(path) = self.file_under_cursor() else { return false };
+            // Probing reads the file, which can stall on a dead mount. The answer comes back as FilmChecked.
+            let tx = sender.input_sender().clone();
+            std::thread::spawn(move || {
+                let film = audio::has_picture(&path);
+                tx.emit(Msg::FilmChecked { path, film });
+            });
+            return true;
         }
         self.audio_play_here(true, sender)
     }
 
-    /// An mp4 that contains a picture. Probed only on Enter, and only for that extension.
-    fn cursor_is_film(&self) -> bool {
+    /// A film opens in the external program, a song plays here. The Enter is dropped if the cursor moved meanwhile.
+    pub(in crate::ui::app) fn film_checked(&mut self, path: PathBuf, film: bool, sender: &ComponentSender<Self>) {
+        if self.file_under_cursor().as_deref() != Some(path.as_path()) {
+            return;
+        }
+        if film || !self.audio_play_here(true, sender) {
+            self.audio_pause_for_external();
+            self.open_external(true);
+        }
+    }
+
+    fn cursor_is_mp4(&self) -> bool {
         let Some(path) = self.file_under_cursor() else { return false };
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else { return false };
-        listing::extension(name).eq_ignore_ascii_case("mp4") && audio::has_picture(&path)
+        listing::extension(name).eq_ignore_ascii_case("mp4")
     }
 
     /// The same track again from its start.
@@ -490,6 +513,14 @@ impl App {
     }
 
     pub(in crate::ui::app) fn on_audio_event(&mut self, event: Event, sender: &ComponentSender<Self>) {
+        let current = match &event {
+            Event::Loaded { generation, .. } | Event::Failed { generation, .. } | Event::Ended { generation } => *generation == self.audio.generation,
+        };
+        match &event {
+            Event::Loaded { .. } => self.audio_note(&format!("loaded current={current}")),
+            Event::Failed { message, .. } => self.audio_note(&format!("failed current={current}: {message}")),
+            Event::Ended { .. } => self.audio_note(&format!("ended current={current}")),
+        }
         match event {
             Event::Loaded { generation, info } if generation == self.audio.generation => {
                 self.audio.problem = None;
@@ -851,6 +882,7 @@ impl App {
         }
         self.focus_list();
         self.status = "Player minimized, Ctrl+M jumps to it".into();
+        self.audio_note("minimize");
     }
 
     /// Back to the full player: the list shows the folder with the track under the cursor, and the quick view opens.
@@ -919,6 +951,7 @@ impl App {
     }
 
     pub(in crate::ui::app) fn audio_close(&mut self) {
+        self.audio_note("close");
         self.end_session();
         // A quick view on a music file shows the full player again, and the cursor starts it.
         self.note_preview_target();
@@ -934,6 +967,7 @@ impl App {
             Some(Mode::Full) => self.audio_minimize(sender),
             None => self.status = "No music is playing".into(),
         }
+        self.audio_note("jump");
     }
 
     /// Ctrl+Enter: the default player opens the file, and the built-in one pauses.
@@ -951,6 +985,11 @@ impl App {
     /// Tab goes left panel, right panel, player, and round again. With the quick view up there is one
     /// panel, so it goes panel, player, panel.
     pub(in crate::ui::app) fn audio_tab(&mut self, back: bool) {
+        self.audio_tab_step(back);
+        self.audio_note("tab");
+    }
+
+    fn audio_tab_step(&mut self, back: bool) {
         if self.audio.focus {
             self.audio.focus = false;
             if !self.state.quick_view {
@@ -1005,6 +1044,7 @@ impl App {
             Key::Return | Key::KP_Enter => {}
             Key::Escape => {
                 self.audio.focus = false;
+                self.audio_note("escape");
                 self.focus_list();
             }
             Key::Tab | Key::ISO_Left_Tab => self.audio_tab(key == Key::ISO_Left_Tab || shift),

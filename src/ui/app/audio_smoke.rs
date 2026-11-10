@@ -254,6 +254,7 @@ impl App {
         self.state.tab_mut(PaneId::Left).marked.clear();
 
         self.smoke_small(errors, sender);
+        self.smoke_hammer(errors, sender);
 
         // Ctrl+Q starts the big player on a song at once. Ctrl+Q again stops it.
         self.audio_close();
@@ -311,6 +312,64 @@ impl App {
         self.reload_pane(PaneId::Right);
         self.state.active = PaneId::Left;
         self.sync();
+    }
+
+    /// Tab, Ctrl+M and the list keys pressed in a hurry with the small player up: no step may stall, and the keys never end up half in the player.
+    fn smoke_hammer(&mut self, errors: &mut Vec<String>, sender: &ComponentSender<Self>) {
+        const SHIFT: ModifierType = ModifierType::SHIFT_MASK;
+        const CTRL: ModifierType = ModifierType::CONTROL_MASK;
+        let keys = [
+            (Key::Tab, NONE),
+            (Key::Tab, NONE),
+            (Key::ISO_Left_Tab, SHIFT),
+            (Key::m, CTRL),
+            (Key::Down, NONE),
+            (Key::Escape, NONE),
+            (Key::Tab, NONE),
+            (Key::Page_Down, NONE),
+            (Key::Up, NONE),
+            (Key::space, NONE),
+        ];
+        if self.audio_alive() {
+            self.audio_close();
+        }
+        self.state.active = PaneId::Left;
+        self.point_at(PaneId::Left, "tone.wav");
+        self.on_key(Key::Return, NONE, sender);
+        self.audio_minimize(sender);
+        self.smoke_settle(sender);
+        if !self.audio_is_mini() {
+            errors.push("music: hammer: the small player did not start".into());
+            return;
+        }
+        let begun = Instant::now();
+        let mut slowest = Duration::ZERO;
+        for round in 0..400 {
+            // Ctrl+M can make it big. Fold it again so the next keys meet the small one.
+            if self.audio_full() {
+                self.audio_minimize(sender);
+            }
+            let (key, mods) = keys[round % keys.len()];
+            let at = Instant::now();
+            self.on_key(key, mods, sender);
+            if round % 5 == 0 {
+                self.smoke_settle(sender);
+            }
+            slowest = slowest.max(at.elapsed());
+            let shown = self.shell.panes.iter().filter(|pane| pane.mini.root.is_visible()).count();
+            if shown > 1 {
+                errors.push(format!("music: hammer round {round}: {shown} small players"));
+                break;
+            }
+        }
+        self.smoke_settle(sender);
+        if self.audio_is_mini() && !self.shell.panes.iter().any(|pane| pane.mini.root.is_visible()) {
+            errors.push("music: hammer: the small player is playing without a bar".into());
+        }
+        if slowest > Duration::from_millis(500) || begun.elapsed() > Duration::from_secs(10) {
+            errors.push(format!("music: hammer was slow, slowest key {slowest:?}, all {:?}", begun.elapsed()));
+        }
+        self.audio_close();
     }
 
     /// The small player: minimize, Tab and Ctrl+M, expand, close, and songs sent to it from the other panel.
