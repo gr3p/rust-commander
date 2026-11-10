@@ -1,0 +1,18 @@
+_drop_user_desktop() {
+	# Same id as the packaged desktop file. A copy in the home directory wins,
+	# and a dev build writes Exec as its own path, so the dock stays on the old binary.
+	id=se.rustcommander.RustCommander.desktop
+	getent passwd | while IFS=: read -r user _ uid _ _ home _; do
+		[ "$uid" -ge 1000 ] 2>/dev/null || continue
+		[ -n "$home" ] && [ -e "$home/.local/share/applications/$id" ] || continue
+		runuser -u "$user" -- rm -f "$home/.local/share/applications/$id" || true
+	done
+}
+
+post_install() {
+	_drop_user_desktop
+}
+
+post_upgrade() {
+	_drop_user_desktop
+}

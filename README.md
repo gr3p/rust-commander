@@ -61,10 +61,16 @@ A music player that lives in your file manager. Press Ctrl+Q on a song and keep 
 
 ## Install
 
-**Arch and Omarchy**
+**Arch and Omarchy** (x86_64)
+
+Add the repository once. pacman then installs Rust Commander, and later system updates, including `omarchy update`, keep it current.
 
 ```bash
-yay -S rust-commander
+curl -fsSL https://gr3p.github.io/rust-commander/pubkey.asc | sudo pacman-key --add -
+sudo pacman-key --lsign-key 0803B713F76C8CFB8CBD3C95B203CAEB2B841D3A
+curl -fsSL https://gr3p.github.io/rust-commander/arch/rust-commander.conf | sudo tee -a /etc/pacman.conf >/dev/null
+sudo pacman -Sy
+sudo pacman -S rust-commander
 ```
 
 **Ubuntu 26.04** (amd64)
@@ -97,7 +103,7 @@ sudo dnf config-manager addrepo --from-repofile=https://gr3p.github.io/rust-comm
 sudo dnf install rust-commander
 ```
 
-Start it from the application menu, or run `rust-commander`. To remove it: `sudo apt remove rust-commander`, `yay -R rust-commander` or `sudo dnf remove rust-commander`.
+Start it from the application menu, or run `rust-commander`. To remove it: `sudo pacman -R rust-commander`, `sudo apt remove rust-commander` or `sudo dnf remove rust-commander`.
 
 Music plays through ALSA, which PipeWire and PulseAudio answer to, so it works with the sound setup you already have. The package asks for `libasound2` and, for Opus files, `libopus0`. Without them the player says so and everything else works as before.
 
