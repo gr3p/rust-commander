@@ -78,6 +78,7 @@ pub enum Msg {
     MountVolume(usize, String),
     EjectVolume(String),
     Unmount(std::path::PathBuf, bool),
+    ForgetMount(std::path::PathBuf),
     DriveStatus(String),
     MountClosed(u64),
     MountFinished {

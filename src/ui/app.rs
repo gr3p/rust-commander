@@ -761,9 +761,18 @@ impl App {
             Msg::Unmount(path, eject) => {
                 let tx = sender.input_sender().clone();
                 let name = path.display().to_string();
+                let path_done = path.clone();
                 super::drives::release(&path, eject, move |result| {
-                    tx.emit(Msg::DriveStatus(released(&name, result)))
+                    let ok = result.is_ok();
+                    tx.emit(Msg::DriveStatus(released(&name, result)));
+                    if ok {
+                        tx.emit(Msg::ForgetMount(path_done));
+                    }
                 });
+            }
+            Msg::ForgetMount(path) => {
+                self.shell.released.push(path);
+                self.refresh_drives(sender);
             }
             Msg::MountClosed(generation) => {
                 if self.mount_gen == generation {
@@ -1247,7 +1256,7 @@ impl App {
             Err(err) => {
                 self.state.cancel_load(id, token);
                 rust_commander::log::error(&format!("list pane={pane}: {err}"));
-                self.status = err;
+                self.status = self.unreachable_note(&err).unwrap_or(err);
             }
         }
     }
@@ -2481,7 +2490,24 @@ impl App {
         self.focus_list();
     }
 
+    fn unreachable_note(&self, err: &str) -> Option<String> {
+        let mut mounts: Vec<_> = self.shell.drive_snapshot.0.iter().filter(|mount| mount.network).collect();
+        mounts.extend(self.shell.down.iter());
+        mounts.sort_by_key(|mount| std::cmp::Reverse(mount.path.as_os_str().len()));
+        mounts
+            .into_iter()
+            .find(|mount| rust_commander::places::link_lost(err, &mount.path))
+            .map(|mount| unreachable(&mount.label))
+    }
+
     fn goto_mount(&mut self, pane: usize, path: PathBuf, sender: &ComponentSender<Self>) {
+        if let Some(label) = self.shell.down.iter().find(|mount| mount.path == path).map(|mount| mount.label.clone()) {
+            self.status = unreachable(&label);
+            if let Some((_, button)) = self.shell.drives.iter().find(|(mount, _)| mount == &path) {
+                shell::blink_drive(button);
+            }
+            return;
+        }
         let id = PaneId::from_index(pane);
         self.state.active = id;
         self.shell.active.set(pane);
@@ -2495,11 +2521,17 @@ impl App {
     }
 
     fn refresh_drives(&mut self, sender: &ComponentSender<Self>) {
+        let known: Vec<std::path::PathBuf> = self.shell.down.iter().map(|mount| mount.path.clone()).collect();
         let Some(gone) =
             shell::rebuild_drives(&mut self.shell, sender.input_sender(), &self.cfg.icon_pack)
         else {
             return;
         };
+        for mount in &self.shell.down {
+            if !known.iter().any(|path| path == &mount.path) {
+                self.status = unreachable(&mount.label);
+            }
+        }
         // A pane left on a vanished mount would show a dead folder.
         for id in [PaneId::Left, PaneId::Right] {
             let path = self.state.tab(id).path.clone();
@@ -2658,6 +2690,10 @@ fn spawn_argv(argv: &[std::ffi::OsString]) -> Result<(), String> {
         let _ = child.wait();
     });
     Ok(())
+}
+
+fn unreachable(label: &str) -> String {
+    format!("{label} is not reachable")
 }
 
 // Rows live in the inner list, which owns list.scroll-to-item.

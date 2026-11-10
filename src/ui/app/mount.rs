@@ -60,6 +60,7 @@ impl App {
         self.status = if open {
             format!("Mounted {}", point.display())
         } else {
+            self.shell.released.push(point.clone());
             format!("Unmounted {}", point.display())
         };
         if shown {
@@ -118,6 +119,11 @@ fn dialog(parent: &gtk::Window, generation: u64, tx: relm4::Sender<Msg>) -> (gtk
     let (user_row, _, user) = labeled("User", false);
     let (secret_row, _, secret) = labeled("Password", true);
     let (net_point_row, _, net_point) = labeled("Mount point", false);
+    server.set_placeholder_text(Some("files.example.com"));
+    share.set_placeholder_text(Some("share"));
+    user.set_placeholder_text(Some("username"));
+    secret.set_placeholder_text(Some("password"));
+    net_point.set_placeholder_text(Some("/mnt/share"));
     net_point.set_text("/mnt/share");
     let net_btn = action_button("Mount");
     net.append(&row("Type", &kind));
@@ -129,7 +135,7 @@ fn dialog(parent: &gtk::Window, generation: u64, tx: relm4::Sender<Msg>) -> (gtk
     net.append(&net_btn);
     actions.push(net_btn.clone());
     watch_share(&share, &net_point);
-    watch_kind(&kind, &share_name, &user_row, &secret_row);
+    watch_kind(&kind, &share, &share_name, &user_row, &secret_row);
 
     let held: Vec<_> = mount::held()
         .into_iter()
@@ -385,10 +391,12 @@ fn watch_share(share: &gtk::Entry, point: &gtk::Entry) {
 
 fn watch_kind(
     kind: &gtk::DropDown,
+    share: &gtk::Entry,
     share_name: &gtk::Label,
     user_row: &gtk::Box,
     secret_row: &gtk::Box,
 ) {
+    let share = share.clone();
     let share_name = share_name.clone();
     let user_row = user_row.clone();
     let secret_row = secret_row.clone();
@@ -397,6 +405,7 @@ fn watch_kind(
         user_row.set_visible(!nfs);
         secret_row.set_visible(!nfs);
         share_name.set_text(if nfs { "Export" } else { "Share" });
+        share.set_placeholder_text(Some(if nfs { "/export/share" } else { "share" }));
     });
 }
 
