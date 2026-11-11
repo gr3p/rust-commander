@@ -1,5 +1,5 @@
 # CI passes ver. A local build without it uses the base version.
-%{!?ver:%global ver 0.1.0}
+%{!?ver:%global ver 0.2.1}
 %global debug_package %{nil}
 
 Name:           rust-commander
@@ -16,6 +16,8 @@ BuildRequires:  gcc
 BuildRequires:  gtk4-devel
 BuildRequires:  vte291-gtk4-devel
 Requires:       hicolor-icon-theme
+Requires:       alsa-lib
+Recommends:     opus
 
 %description
 Dual-pane file manager for Linux, with built-in terminals, viewers and themes.

@@ -42,7 +42,8 @@ set -- \
     --setenv TMPDIR /sandbox \
     --setenv XDG_CONFIG_HOME /sandbox/.config \
     --setenv XDG_DATA_HOME /sandbox/.local/share \
-    --setenv PATH /usr/bin:/bin
+    --setenv PATH /usr/bin:/bin \
+    --setenv RUST_COMMANDER_AUDIO_DEVICE null
 
 set -- "$@" --ro-bind "$socket" /sandbox/wayland-0 \
     --setenv XDG_RUNTIME_DIR /sandbox \
@@ -54,6 +55,11 @@ out=$(bwrap "$@" -- /target/debug/rust-commander --smoke 2>&1) || {
     exit 1
 }
 printf '%s\n' "$out"
+case "$out" in
+    *SMOKE_MUSIC\ ran*) ;;
+    *SMOKE_MUSIC\ skipped*) echo "note: the music part was skipped" >&2 ;;
+    *) echo "GUI smoke never reached the music part" >&2; exit 1 ;;
+esac
 case "$out" in
     *SMOKE_OK*) ;;
     *)

@@ -16,6 +16,8 @@ use crate::ui::msg::Msg;
 
 use super::{App, Ask, Job, JobOut, PendingUnpack, Phase, Queued, Work, home_dir};
 
+const LONG_JOB_AFTER: Duration = Duration::from_millis(500);
+
 impl App {
     pub(in crate::ui::app) fn spawn_transfer(&mut self, items: Vec<(PathBuf, PathBuf)>, kind: Kind, sender: &ComponentSender<Self>) {
         if items.is_empty() {
@@ -24,6 +26,7 @@ impl App {
         }
         // One job at a time. A second job would take over the progress and conflict channels.
         let Some(pipes) = self.open_job(Work::Transfer) else { return };
+        self.name_job(if kind == Kind::Move { "Moving" } else { "Copying" });
         run_transfer(items, kind, Arc::new(std::sync::atomic::AtomicBool::new(false)), pipes);
         let _ = sender;
     }
@@ -34,8 +37,18 @@ impl App {
             return;
         }
         let Some(pipes) = self.open_job(Work::Delete) else { return };
+        let caption = if permanent { "Deleting" } else { "Moving to trash" };
+        self.name_job(caption);
+        self.status = caption.into();
         let JobOut { cancel, progress_tx, done_tx, .. } = pipes;
         spawn_worker(move || {
+            if permanent {
+                let result = ops::remove_paths(&paths, &cancel, &mut |progress| {
+                    let _ = progress_tx.send(progress.clone());
+                });
+                let _ = done_tx.send(result.map_err(|err| err.to_string()));
+                return;
+            }
             let total = paths.len() as u64;
             for (done, path) in paths.iter().enumerate() {
                 if cancel.load(Ordering::Relaxed) {
@@ -43,7 +56,7 @@ impl App {
                     return;
                 }
                 let _ = progress_tx.send(ops::Progress { done: done as u64, total, current: path.clone(), note: String::new() });
-                let result = ops::delete_paths(std::slice::from_ref(path), permanent, &mut |path| gio_trash(path));
+                let result = ops::delete_paths(std::slice::from_ref(path), false, &mut |path| gio_trash(path));
                 if let Err(err) = result {
                     let _ = done_tx.send(Err(format!("{}: {err}", path.display())));
                     return;
@@ -86,14 +99,14 @@ impl App {
                 } else {
                     Some(progress.done as f64 / progress.total as f64)
                 });
-                if matches!(job.work, Work::Unpack | Work::Test) && progress.total > 0 {
+                if matches!(job.work, Work::Unpack | Work::Test | Work::Sfv | Work::Sum | Work::Shred) && progress.total > 0 {
                     amount = Some(format!(
                         "{:.0}%   {} / {}",
                         (progress.done as f64 / progress.total as f64 * 100.0).min(100.0),
                         rust_commander::listing::format_size(progress.done),
                         rust_commander::listing::format_size(progress.total)
                     ));
-                } else if matches!(job.work, Work::Verify) && progress.total > 0 {
+                } else if matches!(job.work, Work::Verify | Work::Delete) && progress.total > 0 {
                     amount = Some(format!("{} / {}", progress.done, progress.total));
                 }
                 show = job.started.elapsed() > Duration::from_millis(200);
@@ -110,6 +123,15 @@ impl App {
             // A fast test only leaves the result. A longer one keeps this window and fills the bar.
             if matches!(job.work, Work::Test) {
                 show = done.is_none() && job.started.elapsed() > Duration::from_millis(200);
+            }
+            // A small delete never shows it, not even for a burst of progress.
+            if matches!(job.work, Work::Delete) {
+                show = false;
+            }
+            // Any job still running after half a second gets the window, also while it sends nothing new,
+            // but never on top of a question about an existing file.
+            if done.is_none() && !job.conflict_open && job.started.elapsed() > LONG_JOB_AFTER {
+                show = true;
             }
             (line, broken, show, fraction, amount, conflict, done)
         };
@@ -198,7 +220,7 @@ impl App {
                 return;
             }
             self.pending = None;
-            if !test_dialog && !matches!(work, Work::Verify | Work::Transfer | Work::Delete) {
+            if !test_dialog && !matches!(work, Work::Verify | Work::Transfer) {
                 let title = match work {
                     Work::Unpack if err.starts_with("Archive is damaged") => "Damaged archive",
                     Work::Unpack if err.starts_with("Skipped ") => "Unpack",
@@ -208,7 +230,8 @@ impl App {
                     Work::Shred => "Secure delete failed",
                     Work::Test => "Test failed",
                     Work::Encode => "Encode failed",
-                    Work::Verify | Work::Transfer | Work::Delete => "Failed",
+                    Work::Delete => "Delete failed",
+                    Work::Verify | Work::Transfer => "Failed",
                 };
                 self.show_error(title, err);
             }
@@ -241,6 +264,13 @@ impl App {
         }
     }
 
+    // Titles the progress window when the status line would not say what is going on.
+    pub(in crate::ui::app) fn name_job(&mut self, caption: &'static str) {
+        if let Some(job) = self.job.as_mut() {
+            job.caption = Some(caption);
+        }
+    }
+
     pub(in crate::ui::app) fn open_job(&mut self, work: Work) -> Option<JobOut> {
         if self.job.is_some() {
             self.status = "Busy".into();
@@ -252,13 +282,21 @@ impl App {
         Some(out)
     }
 
+    fn seven_zip(&self) -> Option<PathBuf> {
+        rust_commander::pack::find_program(&self.cfg.seven_zip, rust_commander::pack::names(rust_commander::pack::Format::SevenZ))
+    }
+
     pub(in crate::ui::app) fn begin_unpack(&mut self, pick: bool, sender: &ComponentSender<Self>) {
         let Some(path) = self.file_under_cursor() else {
             self.status = "Not an archive".into();
             return;
         };
-        if !rust_commander::archive::is_archive(&path) {
+        if !rust_commander::archive::is_testable(&path) {
             self.status = "Not an archive".into();
+            return;
+        }
+        if rust_commander::archive::is_seven_zip(&path) && self.seven_zip().is_none() {
+            self.fail_unpack(rust_commander::pack::SEVEN_ZIP_UNPACK);
             return;
         }
         if self.job.is_some() {
@@ -286,19 +324,74 @@ impl App {
         let Some(pending) = &self.pending else { return };
         let path = pending.archive.clone();
         let password = pending.password.clone();
+        let seven = rust_commander::archive::is_seven_zip(&path).then(|| self.seven_zip()).flatten();
         self.status = "Reading archive".into();
         self.archive_wait = true;
         self.paint_wait();
+        self.list_gen = self.list_gen.wrapping_add(1);
+        let generation = self.list_gen;
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.list_wait = Some((Arc::clone(&cancel), Instant::now()));
         let tx = sender.input_sender().clone();
         std::thread::spawn(move || {
-            let result = rust_commander::archive::list(&path, password.as_deref()).map_err(|err| err.to_string());
-            tx.emit(Msg::ArchiveListed(result));
+            let result = if rust_commander::archive::is_seven_zip(&path) {
+                rust_commander::archive::list_seven(&path, password.as_deref(), seven.as_deref(), &cancel)
+            } else {
+                rust_commander::archive::list_until(&path, password.as_deref(), &cancel)
+            };
+            tx.emit(Msg::ArchiveListed(generation, result.map_err(|err| err.to_string())));
         });
     }
 
-    pub(in crate::ui::app) fn on_archive_listed(&mut self, result: Result<rust_commander::archive::Listed, String>, sender: &ComponentSender<Self>) {
+    // A slow read gets the progress window, so it can be cancelled like a job.
+    pub(in crate::ui::app) fn poll_archive_list(&mut self) {
+        let Some((cancel, started)) = &self.list_wait else { return };
+        if cancel.load(Ordering::Relaxed) {
+            self.end_archive_list();
+            self.pending = None;
+            self.status = "Cancelled".into();
+            return;
+        }
+        if self.job.is_some() {
+            return;
+        }
+        if started.elapsed() > LONG_JOB_AFTER {
+            self.ensure_progress();
+        }
+        if let Some((_, _, bar, _)) = &self.progress {
+            bar.pulse();
+        }
+    }
+
+    fn end_archive_list(&mut self) {
+        self.list_wait = None;
         self.archive_wait = false;
         self.paint_wait();
+        // The window belongs to the read only while no job runs. A job closes its own.
+        if self.job.is_none() {
+            if let Some((win, ..)) = self.progress.take() {
+                win.close();
+            }
+        }
+    }
+
+    pub(in crate::ui::app) fn on_archive_listed(
+        &mut self,
+        generation: u64,
+        result: Result<rust_commander::archive::Listed, String>,
+        sender: &ComponentSender<Self>,
+    ) {
+        let Some((cancel, _)) = &self.list_wait else { return };
+        if generation != self.list_gen {
+            return;
+        }
+        let cancelled = cancel.load(Ordering::Relaxed);
+        self.end_archive_list();
+        if cancelled {
+            self.pending = None;
+            self.status = "Cancelled".into();
+            return;
+        }
         let Some(pending) = &self.pending else { return };
         let pick = pending.pick;
         let password = pending.password.clone();
@@ -352,6 +445,7 @@ impl App {
         let dest = pending.dest.clone();
         let names = pending.names.clone();
         let password = pending.password.clone();
+        let seven = rust_commander::archive::is_seven_zip(&archive).then(|| self.seven_zip()).flatten();
         let Some(pipes) = self.open_job(Work::Unpack) else { return };
         self.status = "Unpacking".into();
         rust_commander::log::info(&format!("unpack {}", archive.display()));
@@ -359,7 +453,30 @@ impl App {
         let _ = sender;
         std::thread::spawn(move || {
             let set = names.map(|names| names.into_iter().collect::<std::collections::HashSet<_>>());
-            let result = rust_commander::archive::extract(
+            let result = if rust_commander::archive::is_seven_zip(&archive) {
+                rust_commander::archive::extract_seven(
+                    &archive,
+                    &dest,
+                    set.as_ref(),
+                    password.as_deref(),
+                    seven.as_deref(),
+                    &pipes.cancel,
+                    &mut |progress| {
+                        let mut progress = progress.clone();
+                        if let Some((volume, file)) = progress.note.split_once('\n') {
+                            progress.note = format!("From: {volume}\nTo:   {}\n{file}", dest.display());
+                        }
+                        let _ = pipes.progress_tx.send(progress);
+                    },
+                    &mut |src, dst| {
+                        if pipes.conflict_tx.send((src.to_path_buf(), dst.to_path_buf())).is_err() {
+                            return Choice::Cancel;
+                        }
+                        pipes.answer_rx.recv().unwrap_or(Choice::Cancel)
+                    },
+                )
+            } else {
+                rust_commander::archive::extract(
                 &archive,
                 &dest,
                 set.as_ref(),
@@ -378,7 +495,8 @@ impl App {
                     }
                     pipes.answer_rx.recv().unwrap_or(Choice::Cancel)
                 },
-            );
+            )
+            };
             let _ = pipes.done_tx.send(result.map_err(|err| err.to_string()));
         });
     }
@@ -724,6 +842,7 @@ impl App {
         let root = self.state.tab(self.state.active).path.clone();
         let sources = self.state.selected_paths(self.state.active);
         let Some(pipes) = self.open_job(Work::Sfv) else { return };
+        self.name_job("Creating SFV");
         let _ = sender;
         spawn_worker(move || {
             let result = rust_commander::sfv::create(&root, &sources, &dest, &pipes.cancel, &mut |progress| {
@@ -769,6 +888,7 @@ impl App {
         let root = self.state.tab(self.state.active).path.clone();
         let sources = self.state.selected_paths(self.state.active);
         let Some(pipes) = self.open_job(Work::Sum) else { return };
+        self.name_job("Creating checksums");
         let _ = sender;
         spawn_worker(move || {
             let result = rust_commander::sum::create(kind, &root, &sources, &dest, &pipes.cancel, &mut |progress| {
@@ -787,31 +907,10 @@ impl App {
         self.ensure_progress();
         let _ = sender;
         spawn_worker(move || {
-            let total = paths.len() as u64;
-            for (done, path) in paths.iter().enumerate() {
-                if pipes.cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                    let _ = pipes.done_tx.send(Ok(rust_commander::ops::Report { cancelled: true, files: done as u64 }));
-                    return;
-                }
-                let _ = pipes.progress_tx.send(rust_commander::ops::Progress {
-                    done: done as u64,
-                    total,
-                    current: path.clone(),
-                    note: String::new(),
-                });
-                match rust_commander::ops::shred(path, &pipes.cancel) {
-                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
-                        let _ = pipes.done_tx.send(Ok(rust_commander::ops::Report { cancelled: true, files: done as u64 }));
-                        return;
-                    }
-                    Err(err) => {
-                        let _ = pipes.done_tx.send(Err(format!("{}: {err}", path.display())));
-                        return;
-                    }
-                    Ok(()) => {}
-                }
-            }
-            let _ = pipes.done_tx.send(Ok(rust_commander::ops::Report { cancelled: false, files: total }));
+            let result = rust_commander::ops::shred_paths(&paths, &pipes.cancel, &mut |progress| {
+                let _ = pipes.progress_tx.send(progress.clone());
+            });
+            let _ = pipes.done_tx.send(result.map_err(|err| err.to_string()));
         });
     }
 
@@ -846,6 +945,7 @@ impl App {
         sender: &ComponentSender<Self>,
     ) {
         let Some(pipes) = self.open_job(Work::Encode) else { return };
+        self.name_job("Encoding");
         let _ = sender;
         spawn_worker(move || {
             let result = rust_commander::encode::encode(codec, &source, &dest, &pipes.cancel, &mut |progress| {
@@ -857,6 +957,7 @@ impl App {
 
     pub(in crate::ui::app) fn spawn_decode(&mut self, source: PathBuf, dest_dir: PathBuf, sender: &ComponentSender<Self>) {
         let Some(pipes) = self.open_job(Work::Encode) else { return };
+        self.name_job("Decoding");
         let _ = sender;
         spawn_worker(move || {
             let result = rust_commander::encode::decode(&source, &dest_dir, &pipes.cancel, &mut |progress| {
@@ -1169,8 +1270,11 @@ impl App {
         }
         let win = gtk::Window::new();
         let testing = matches!(self.job.as_ref().map(|job| job.work), Some(Work::Test));
+        let named = self.job.as_ref().and_then(|job| job.caption);
         let caption = if testing {
             "Testing archive"
+        } else if let Some(named) = named {
+            named
         } else if self.status.is_empty() {
             "Working"
         } else {
@@ -1192,7 +1296,11 @@ impl App {
         bar.add_css_class("job");
         bar.set_show_text(false);
         let cancel = gtk::Button::with_label("Cancel");
-        let flag = self.job.as_ref().map(|job| Arc::clone(&job.cancel));
+        let flag = self
+            .job
+            .as_ref()
+            .map(|job| Arc::clone(&job.cancel))
+            .or_else(|| self.list_wait.as_ref().map(|(cancel, _)| Arc::clone(cancel)));
         let close_flag = flag.clone();
         crate::ui::shell::on_click(&cancel, move || {
             if let Some(flag) = &flag {
@@ -1360,6 +1468,7 @@ pub(in crate::ui::app) fn new_job(work: Work) -> (Job, JobOut) {
         done_rx,
         started: Instant::now(),
         conflict_open: false,
+        caption: None,
     };
     (job, JobOut { cancel, progress_tx, conflict_tx, answer_rx, done_tx })
 }

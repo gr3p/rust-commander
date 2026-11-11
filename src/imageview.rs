@@ -10,6 +10,8 @@ use crate::listing;
 
 pub const MAX_EDGE: u32 = 2048;
 const MAX_BYTES: u64 = 48 * 1024 * 1024;
+// Uncompressed pixels, not the file. A 2MB JPEG can be 9334×6000, about 160MB.
+const MAX_ALLOC: u64 = 512 * 1024 * 1024;
 
 pub struct Rgba {
     pub width: u32,
@@ -20,7 +22,7 @@ pub struct Rgba {
 pub fn is_image(name: &str) -> bool {
     matches!(
         listing::extension(name).to_ascii_lowercase().as_str(),
-        "jpg" | "jpeg" | "jfif" | "png" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "ico" | "heic" | "heif"
+        "jpg" | "jpeg" | "jfif" | "png" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "ico" | "heic" | "heif" | "psd" | "psb"
     )
 }
 
@@ -51,7 +53,7 @@ pub fn decode(path: &Path, max_edge: u32) -> Result<Rgba, String> {
     if len > MAX_BYTES {
         return Err("Image too large".into());
     }
-    if let Some(kind) = heif_kind(path) {
+    if let Some(kind) = container_kind(path) {
         return Err(format!("{kind} image, no decoder"));
     }
     let mut reader = ImageReader::open(path)
@@ -61,7 +63,7 @@ pub fn decode(path: &Path, max_edge: u32) -> Result<Rgba, String> {
     let mut limits = Limits::default();
     limits.max_image_width = Some(16_384);
     limits.max_image_height = Some(16_384);
-    limits.max_alloc = Some(128 * 1024 * 1024);
+    limits.max_alloc = Some(MAX_ALLOC);
     reader.limits(limits);
     let img = reader.decode().map_err(|err| err.to_string())?;
     let img = downscale(img, max_edge);
@@ -71,6 +73,22 @@ pub fn decode(path: &Path, max_edge: u32) -> Result<Rgba, String> {
         height: rgba.height(),
         pixels: rgba.into_raw(),
     })
+}
+
+/// Cover art and other pictures that are already in memory.
+pub fn decode_bytes(bytes: &[u8], max_edge: u32) -> Result<Rgba, String> {
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err("Image too large".into());
+    }
+    let mut reader = ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|err| err.to_string())?;
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(MAX_ALLOC);
+    reader.limits(limits);
+    let img = downscale(reader.decode().map_err(|err| err.to_string())?, max_edge);
+    let rgba = img.to_rgba8();
+    Ok(Rgba { width: rgba.width(), height: rgba.height(), pixels: rgba.into_raw() })
 }
 
 pub fn render_svg(svg: &str, edge: u32) -> Result<Rgba, String> {
@@ -90,11 +108,15 @@ pub fn render_svg(svg: &str, edge: u32) -> Result<Rgba, String> {
     Ok(Rgba { width: edge, height: edge, pixels })
 }
 
-// ftyp box: major brand, minor version, then compatible brands.
-fn heif_kind(path: &Path) -> Option<&'static str> {
+fn container_kind(path: &Path) -> Option<&'static str> {
     let mut buf = [0u8; 64];
     let n = File::open(path).ok()?.read(&mut buf).ok()?;
     let header = &buf[..n];
+    heif_kind(header).or_else(|| photoshop_kind(header))
+}
+
+// ftyp box: major brand, minor version, then compatible brands.
+fn heif_kind(header: &[u8]) -> Option<&'static str> {
     if header.len() < 16 || &header[4..8] != b"ftyp" {
         return None;
     }
@@ -126,6 +148,17 @@ fn heif_kind(path: &Path) -> Option<&'static str> {
     }
 }
 
+// 8BPS, then a big-endian version. 1 is PSD, 2 is PSB.
+fn photoshop_kind(header: &[u8]) -> Option<&'static str> {
+    if header.len() < 6 || &header[..4] != b"8BPS" {
+        return None;
+    }
+    match u16::from_be_bytes([header[4], header[5]]) {
+        2 => Some("PSB"),
+        _ => Some("PSD"),
+    }
+}
+
 fn downscale(img: DynamicImage, max_edge: u32) -> DynamicImage {
     let (w, h) = fit_size(img.width(), img.height(), max_edge);
     if w == img.width() && h == img.height() {
@@ -143,4 +176,34 @@ fn fit_size(w: u32, h: u32, max_edge: u32) -> (u32, u32) {
     let nw = (w as u64 * max_edge as u64 / long as u64).max(1) as u32;
     let nh = (h as u64 * max_edge as u64 / long as u64).max(1) as u32;
     (nw, nh)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cover() -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/audio/tagged.flac");
+        let source = crate::audio::FileSource::open(&path).unwrap();
+        source.info().cover.as_ref().unwrap().data.clone()
+    }
+
+    #[test]
+    fn cover_bytes_decode_and_shrink() {
+        let bytes = cover();
+        let full = decode_bytes(&bytes, 2048).unwrap();
+        assert_eq!((full.width, full.height), (64, 64));
+        assert_eq!(full.pixels.len(), 64 * 64 * 4);
+        let small = decode_bytes(&bytes, 16).unwrap();
+        assert_eq!((small.width, small.height), (16, 16));
+    }
+
+    #[test]
+    fn bad_cover_bytes_are_an_error() {
+        assert!(decode_bytes(b"", 64).is_err());
+        assert!(decode_bytes(b"not an image at all", 64).is_err());
+        let mut cut = cover();
+        cut.truncate(40);
+        assert!(decode_bytes(&cut, 64).is_err());
+    }
 }

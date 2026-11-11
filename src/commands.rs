@@ -3,6 +3,16 @@ use crate::listing;
 // The context row is for everyday commands. Special commands stay in the F1 menu.
 // Higher is more likely. Several marked files outrank the file type.
 const HINTS: &[Act] = &[
+    Act::AudioToggle,
+    Act::AudioNext,
+    Act::AudioPrev,
+    Act::AudioMinimize,
+    Act::AudioJump,
+    Act::AudioExpand,
+    Act::AudioClose,
+    Act::AudioFocus,
+    Act::AudioSend,
+    Act::AudioAdd,
     Act::Copy,
     Act::Move,
     Act::Pack,
@@ -122,6 +132,22 @@ pub enum Act {
     Discard,
     LeaveEdit,
     CopyImage,
+    AudioToggle,
+    AudioSeek,
+    AudioVolume,
+    AudioMute,
+    AudioNext,
+    AudioPrev,
+    AudioShuffle,
+    AudioRepeat,
+    AudioMinimize,
+    AudioJump,
+    AudioExpand,
+    AudioClose,
+    AudioFocus,
+    AudioSend,
+    AudioAdd,
+    AudioExternal,
     Drive,
     DiskInfo,
     Mount,
@@ -129,7 +155,7 @@ pub enum Act {
 }
 
 impl Act {
-    pub const ALL: [Act; 76] = [
+    pub const ALL: [Act; 92] = [
         Act::Refresh,
         Act::View,
         Act::Edit,
@@ -202,6 +228,22 @@ impl Act {
         Act::Discard,
         Act::LeaveEdit,
         Act::CopyImage,
+        Act::AudioToggle,
+        Act::AudioSeek,
+        Act::AudioVolume,
+        Act::AudioMute,
+        Act::AudioNext,
+        Act::AudioPrev,
+        Act::AudioShuffle,
+        Act::AudioRepeat,
+        Act::AudioMinimize,
+        Act::AudioJump,
+        Act::AudioExpand,
+        Act::AudioClose,
+        Act::AudioFocus,
+        Act::AudioSend,
+        Act::AudioAdd,
+        Act::AudioExternal,
         Act::Drive,
         Act::DiskInfo,
         Act::Mount,
@@ -221,10 +263,18 @@ pub struct Cue {
     pub lister: bool,
     pub image_view: bool,
     pub quick_view: bool,
+    /// The quick view shows the music player.
+    pub audio: bool,
+    /// Music plays, in the quick view or in the small player.
+    pub player: bool,
+    /// The player in play is the small one.
+    pub mini: bool,
+    /// The cursor is on a music file.
+    pub song: bool,
     pub editing: bool,
     // The active panel stands at the root of a drive, as right after picking one.
     pub drive: bool,
-    // zip, rar, tar and 7z. Unpack stays on `archive`, which does not include 7z.
+    // zip, rar, tar and 7z. Unpack follows `archive`, which includes 7z.
     pub testable: bool,
 }
 
@@ -241,6 +291,10 @@ impl Cue {
             lister: false,
             image_view: false,
             quick_view: false,
+            audio: false,
+            player: false,
+            mini: false,
+            song: false,
             editing: false,
             drive: false,
             testable: false,
@@ -325,6 +379,10 @@ pub fn hint_label(act: Act, side: &str) -> String {
         Act::Properties => caption("Alt+Enter", "Properties"),
         Act::Filter => caption("Ctrl+S", "Filter"),
         Act::Search => caption("Ctrl+Shift+S", "Search"),
+        // The key row is narrow. The list in F1 and the right-click menu spell these out.
+        Act::AudioSend => caption("Ctrl+P", "Send to player"),
+        Act::AudioAdd => caption("Ctrl+Shift+P", "Add to playlist"),
+        Act::AudioFocus => caption("Tab", "Player"),
         other => CATALOG
             .iter()
             .find(|item| item.act == other)
@@ -350,6 +408,15 @@ pub fn applies(act: Act, cue: &Cue) -> bool {
         Act::QuickEdit => cue.quick_view && cue.file && !cue.image && !cue.archive && !cue.editing,
         Act::ImageFit | Act::ImageStep => cue.image_view,
         Act::CopyImage => cue.image_view,
+        Act::AudioToggle | Act::AudioSeek | Act::AudioVolume | Act::AudioMute => cue.audio,
+        Act::AudioNext | Act::AudioPrev | Act::AudioShuffle | Act::AudioRepeat => cue.audio,
+        Act::AudioMinimize => cue.player && !cue.mini,
+        Act::AudioJump => cue.mini && !cue.audio,
+        Act::AudioExpand | Act::AudioClose => cue.mini && cue.audio,
+        Act::AudioFocus => cue.player && !cue.audio,
+        Act::AudioSend => cue.song || cue.marks > 0,
+        Act::AudioAdd => cue.player && (cue.song || cue.marks > 0),
+        Act::AudioExternal => cue.song || cue.player,
         Act::ListerText | Act::ListerBinary | Act::ListerHex => cue.lister,
         Act::ListerAnsi | Act::ListerAscii | Act::ListerJson => cue.lister || cue.quick_view,
         _ => true,
@@ -360,6 +427,16 @@ fn score(act: Act, cue: &Cue) -> i32 {
     let multi = cue.marks >= 2;
     let marked = cue.marks >= 1;
     match act {
+        Act::AudioJump if cue.mini && !cue.audio => 121,
+        Act::AudioExpand if cue.mini && cue.audio => 117,
+        Act::AudioClose if cue.mini && cue.audio => 116,
+        Act::AudioFocus if cue.player && !cue.mini && !cue.audio => 121,
+        Act::AudioToggle if cue.audio => 120,
+        Act::AudioNext if cue.audio => 119,
+        Act::AudioPrev if cue.audio => 118,
+        Act::AudioMinimize if cue.audio && !cue.mini => 117,
+        Act::AudioSend if cue.song && !cue.audio => 59,
+        Act::AudioAdd if cue.song && cue.player && !cue.audio => 58,
         Act::Copy if multi => 100,
         Act::Move if multi => 90,
         Act::Pack if multi => 80,
@@ -398,9 +475,9 @@ const CATALOG: &[Item] = &[
     Item { act: Act::Queue, keys: "F2 in F5/F6", label: "Add to queue", group: Group::Files },
     Item { act: Act::Mkdir, keys: "F7", label: "New folder", group: Group::Files },
     Item { act: Act::Trash, keys: "F8 / Delete", label: "Trash", group: Group::Files },
-    Item { act: Act::Delete, keys: "Shift+F8", label: "Delete", group: Group::Files },
+    Item { act: Act::Delete, keys: "Ctrl+Delete / Shift+F8", label: "Delete", group: Group::Files },
     Item { act: Act::NewLink, keys: "Shift+F7", label: "New link", group: Group::Files },
-    Item { act: Act::Shred, keys: "Ctrl+Delete", label: "Secure delete", group: Group::Files },
+    Item { act: Act::Shred, keys: "Ctrl+Shift+Delete", label: "Secure delete", group: Group::Files },
     Item { act: Act::Encode, keys: "Ctrl+Shift+F7", label: "Encode", group: Group::Files },
     Item { act: Act::CopyAs, keys: "Shift+F5", label: "Copy as", group: Group::Files },
     Item { act: Act::Rename, keys: "Shift+F6", label: "Rename", group: Group::Files },
@@ -440,6 +517,22 @@ const CATALOG: &[Item] = &[
     Item { act: Act::SortAttr, keys: "Ctrl+F7", label: "Sort by attributes", group: Group::Navigate },
     Item { act: Act::CopyPaths, keys: "Ctrl+Shift+C", label: "Copy path", group: Group::Clipboard },
     Item { act: Act::CopyImage, keys: "Ctrl+C", label: "Copy image", group: Group::Clipboard },
+    Item { act: Act::AudioToggle, keys: "Space", label: "Play or pause", group: Group::View },
+    Item { act: Act::AudioSeek, keys: "Ctrl+Left/Right", label: "Seek 5 s, Shift 30 s", group: Group::View },
+    Item { act: Act::AudioVolume, keys: "+/-", label: "Volume", group: Group::View },
+    Item { act: Act::AudioMute, keys: "M", label: "Mute", group: Group::View },
+    Item { act: Act::AudioNext, keys: "N", label: "Next track", group: Group::View },
+    Item { act: Act::AudioPrev, keys: "P", label: "Previous track", group: Group::View },
+    Item { act: Act::AudioShuffle, keys: "S", label: "Shuffle", group: Group::View },
+    Item { act: Act::AudioRepeat, keys: "R", label: "Repeat: off, all, one", group: Group::View },
+    Item { act: Act::AudioMinimize, keys: "Ctrl+M", label: "Minimize player", group: Group::View },
+    Item { act: Act::AudioJump, keys: "Ctrl+M", label: "Jump to player", group: Group::View },
+    Item { act: Act::AudioExpand, keys: "Ctrl+M", label: "Big player", group: Group::View },
+    Item { act: Act::AudioClose, keys: "X", label: "Close player", group: Group::View },
+    Item { act: Act::AudioFocus, keys: "Tab", label: "Panel or player", group: Group::View },
+    Item { act: Act::AudioSend, keys: "Ctrl+P", label: "Send and replace music in player", group: Group::View },
+    Item { act: Act::AudioAdd, keys: "Ctrl+Shift+P", label: "Add to current playlist", group: Group::View },
+    Item { act: Act::AudioExternal, keys: "Ctrl+Enter", label: "Open In External Player", group: Group::View },
     Item { act: Act::CopyDir, keys: "Alt+Shift+C", label: "Copy dir path", group: Group::Clipboard },
     Item { act: Act::Filter, keys: "Ctrl+S", label: "Filter", group: Group::View },
     Item { act: Act::Search, keys: "Ctrl+Shift+S", label: "Search", group: Group::View },
@@ -481,6 +574,8 @@ pub enum RowAct {
     Trash,
     CopyPath,
     Properties,
+    PlayerSend,
+    PlayerAdd,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -495,8 +590,9 @@ fn row_item(act: RowAct, keys: &'static str, label: &'static str, group: u8) -> 
     RowItem { act, keys, label, group }
 }
 
-/// `parent` is the `..` row. A directory is not an archive and not an image.
-pub fn row_menu(parent: bool, dir: bool, archive: bool, image: bool) -> Vec<RowItem> {
+/// `parent` is the `..` row. A directory is not an archive and not an image. `music` is a song, or a marked
+/// row whose marks may hold songs, which brings the two player items.
+pub fn row_menu(parent: bool, dir: bool, archive: bool, image: bool, music: bool) -> Vec<RowItem> {
     if parent {
         return vec![row_item(RowAct::Open, "Enter", "Open", 0)];
     }
@@ -506,6 +602,10 @@ pub fn row_menu(parent: bool, dir: bool, archive: bool, image: bool) -> Vec<RowI
         if !image && !archive {
             rows.push(row_item(RowAct::QuickEdit, "Ctrl+E", "Quick edit", 0));
         }
+    }
+    if music {
+        rows.push(row_item(RowAct::PlayerSend, "Ctrl+P", "Send and replace music in player", 5));
+        rows.push(row_item(RowAct::PlayerAdd, "Ctrl+Shift+P", "Add to current playlist", 5));
     }
     rows.push(row_item(RowAct::Copy, "F5", "Copy", 1));
     rows.push(row_item(RowAct::Move, "F6", "Move", 1));
@@ -535,6 +635,106 @@ mod tests {
         for act in Act::ALL {
             assert_eq!(catalog().iter().filter(|item| item.act == act).count(), 1, "{act:?}");
         }
+    }
+
+    #[test]
+    fn the_music_player_puts_play_and_pause_first() {
+        let ranked = rank(&cue(|cue| {
+            cue.audio = true;
+            cue.file = true;
+            cue.quick_view = true;
+        }));
+        assert_eq!(ranked[0], Act::AudioToggle);
+        assert_eq!(ranked.last(), Some(&Act::QuickView));
+        assert!(hint_label(Act::AudioToggle, "right").contains("Play or pause"));
+        // Off the player, none of its keys are on offer.
+        assert!(!rank(&cue(|cue| cue.file = true)).contains(&Act::AudioToggle));
+        for act in [Act::AudioToggle, Act::AudioSeek, Act::AudioVolume, Act::AudioMute] {
+            assert!(applies(act, &cue(|cue| cue.audio = true)), "{act:?}");
+            assert!(!applies(act, &cue(|cue| cue.file = true)), "{act:?}");
+        }
+    }
+
+    #[test]
+    fn a_player_with_the_keys_offers_next_and_previous_and_one_without_offers_a_way_in() {
+        // The big player has the keyboard.
+        let big = cue(|cue| {
+            cue.audio = true;
+            cue.player = true;
+            cue.file = true;
+            cue.quick_view = true;
+        });
+        let ranked = rank(&big);
+        assert_eq!(&ranked[..4], &[Act::AudioToggle, Act::AudioNext, Act::AudioPrev, Act::AudioMinimize]);
+        assert!(!ranked.contains(&Act::AudioJump) && !ranked.contains(&Act::AudioFocus));
+        for act in [Act::AudioNext, Act::AudioPrev, Act::AudioShuffle, Act::AudioRepeat, Act::AudioMinimize, Act::AudioExternal] {
+            assert!(applies(act, &big), "{act:?}");
+        }
+        // The big player is up, but the list has the keys: Tab is the way in, and it comes first.
+        let list_has_keys = cue(|cue| {
+            cue.player = true;
+            cue.file = true;
+            cue.quick_view = true;
+        });
+        let ranked = rank(&list_has_keys);
+        assert_eq!(ranked[0], Act::AudioFocus);
+        assert!(!ranked.contains(&Act::AudioToggle));
+        assert!(applies(Act::AudioMinimize, &list_has_keys));
+        // The small player: Ctrl+M jumps to it. Next and previous wait until it has the keys.
+        let small = cue(|cue| {
+            cue.player = true;
+            cue.mini = true;
+            cue.file = true;
+        });
+        let ranked = rank(&small);
+        assert_eq!(ranked[0], Act::AudioJump);
+        assert!(!ranked.contains(&Act::AudioNext) && !ranked.contains(&Act::AudioFocus));
+        assert!(applies(Act::AudioExternal, &small));
+        assert!(!applies(Act::AudioMinimize, &small));
+        assert!(!applies(Act::AudioJump, &list_has_keys));
+        // The small player has the keys: Ctrl+M makes it big again, so that is on offer instead of the jump.
+        let small_keys = cue(|cue| {
+            cue.player = true;
+            cue.mini = true;
+            cue.audio = true;
+            cue.file = true;
+        });
+        let ranked = rank(&small_keys);
+        assert_eq!(&ranked[..4], &[Act::AudioToggle, Act::AudioNext, Act::AudioPrev, Act::AudioExpand]);
+        assert!(!applies(Act::AudioJump, &small_keys) && !applies(Act::AudioMinimize, &small_keys));
+        assert!(!applies(Act::AudioExpand, &small) && !applies(Act::AudioExpand, &big));
+        // Closing is offered to the small player once it has the keys, and nowhere else.
+        assert!(applies(Act::AudioClose, &small_keys) && rank(&small_keys).contains(&Act::AudioClose));
+        assert!(!applies(Act::AudioClose, &small) && !applies(Act::AudioClose, &big) && !applies(Act::AudioClose, &list_has_keys));
+        assert!(hint_label(Act::AudioClose, "right").contains("Close player"));
+        // Nothing plays: none of it is on offer.
+        for act in [Act::AudioNext, Act::AudioJump, Act::AudioMinimize, Act::AudioClose, Act::AudioFocus, Act::AudioAdd] {
+            assert!(!applies(act, &cue(|cue| cue.file = true)), "{act:?}");
+        }
+    }
+
+    #[test]
+    fn songs_can_be_sent_to_the_player_and_added_once_one_plays() {
+        let on_song = cue(|cue| {
+            cue.file = true;
+            cue.song = true;
+        });
+        assert!(applies(Act::AudioSend, &on_song));
+        // Adding needs a playlist to add to.
+        assert!(!applies(Act::AudioAdd, &on_song));
+        assert!(rank(&on_song).contains(&Act::AudioSend));
+        let playing = cue(|cue| {
+            cue.file = true;
+            cue.song = true;
+            cue.player = true;
+        });
+        assert!(applies(Act::AudioAdd, &playing));
+        assert!(rank(&playing).contains(&Act::AudioAdd));
+        // Marks count too, and a text file with nothing marked is not a song.
+        assert!(applies(Act::AudioSend, &cue(|cue| cue.marks = 2)));
+        assert!(!applies(Act::AudioSend, &cue(|cue| cue.file = true)));
+        assert!(hint_label(Act::AudioSend, "right").contains("Send to player"));
+        assert!(catalog().iter().any(|item| item.act == Act::AudioSend && item.label == "Send and replace music in player"));
     }
 
     #[test]
@@ -682,12 +882,12 @@ mod tests {
 
     #[test]
     fn parent_row_only_opens() {
-        assert_eq!(acts(&row_menu(true, true, false, false)), vec![RowAct::Open]);
+        assert_eq!(acts(&row_menu(true, true, false, false, false)), vec![RowAct::Open]);
     }
 
     #[test]
     fn directory_row_skips_view_and_unpack() {
-        let rows = row_menu(false, true, false, false);
+        let rows = row_menu(false, true, false, false, false);
         assert_eq!(
             acts(&rows),
             vec![
@@ -710,7 +910,7 @@ mod tests {
 
     #[test]
     fn file_row_offers_quick_view_and_edit() {
-        let rows = row_menu(false, false, false, false);
+        let rows = row_menu(false, false, false, false, false);
         assert!(acts(&rows).contains(&RowAct::QuickView));
         assert!(acts(&rows).contains(&RowAct::QuickEdit));
         assert!(!acts(&rows).contains(&RowAct::Unpack));
@@ -718,14 +918,31 @@ mod tests {
 
     #[test]
     fn image_row_skips_quick_edit() {
-        let rows = row_menu(false, false, false, true);
+        let rows = row_menu(false, false, false, true, false);
         assert!(acts(&rows).contains(&RowAct::QuickView));
         assert!(!acts(&rows).contains(&RowAct::QuickEdit));
     }
 
     #[test]
+    fn a_song_row_offers_the_player_items_and_a_plain_row_does_not() {
+        let rows = row_menu(false, false, false, false, true);
+        let send = rows.iter().position(|row| row.act == RowAct::PlayerSend).expect("send item");
+        let add = rows.iter().position(|row| row.act == RowAct::PlayerAdd).expect("add item");
+        assert_eq!(add, send + 1);
+        assert_eq!(rows[send].label, "Send and replace music in player");
+        assert_eq!(rows[add].label, "Add to current playlist");
+        assert_eq!(rows[send].keys, "Ctrl+P");
+        assert_eq!(rows[add].keys, "Ctrl+Shift+P");
+        // They sit in a group of their own, so a separator sets them apart.
+        assert!(rows[send].group != rows[send - 1].group && rows[send].group != rows[send + 2].group);
+        for plain in [row_menu(false, false, false, false, false), row_menu(true, true, false, false, false), row_menu(false, true, false, false, false)] {
+            assert!(!acts(&plain).contains(&RowAct::PlayerSend) && !acts(&plain).contains(&RowAct::PlayerAdd));
+        }
+    }
+
+    #[test]
     fn archive_row_offers_unpack() {
-        let rows = row_menu(false, false, true, false);
+        let rows = row_menu(false, false, true, false, false);
         assert!(acts(&rows).contains(&RowAct::Unpack));
         assert_eq!(rows.iter().find(|row| row.act == RowAct::Unpack).unwrap().keys, "Alt+F9");
     }

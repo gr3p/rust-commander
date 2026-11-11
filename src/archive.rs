@@ -100,15 +100,24 @@ pub fn is_archive(path: &Path) -> bool {
     }
 }
 
+pub fn is_seven_zip(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("7z"))
+}
+
 pub fn is_testable(path: &Path) -> bool {
-    is_archive(path) || path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("7z"))
+    is_archive(path) || is_seven_zip(path)
 }
 
 pub fn list(path: &Path, password: Option<&str>) -> Result<Listed, Fail> {
+    list_until(path, password, &AtomicBool::new(false))
+}
+
+/// Like `list`, but `cancel` stops it between members with `Fail::Cancelled`. A large tgz is read to the end.
+pub fn list_until(path: &Path, password: Option<&str>, cancel: &AtomicBool) -> Result<Listed, Fail> {
     match extension(path) {
-        Some("zip") => list_zip(path, password),
-        Some("rar") => list_rar(path, password),
-        Some("tar" | "tgz") => list_tar(path),
+        Some("zip") => list_zip(path, password, cancel),
+        Some("rar") => list_rar(path, password, cancel),
+        Some("tar" | "tgz") => list_tar(path, cancel),
         _ => Err(Fail::Message("Not an archive".into())),
     }
 }
@@ -177,11 +186,14 @@ fn extension(path: &Path) -> Option<&str> {
     }
 }
 
-fn list_zip(path: &Path, password: Option<&str>) -> Result<Listed, Fail> {
+fn list_zip(path: &Path, password: Option<&str>, cancel: &AtomicBool) -> Result<Listed, Fail> {
     let mut archive = zip::ZipArchive::new(File::open(path)?)?;
     let mut listed = Listed { members: Vec::new(), needs_password: false };
     let mut verified = false;
     for index in 0..archive.len() {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Fail::Cancelled);
+        }
         // Raw access reads metadata only; decrypting AES costs a key derivation per entry.
         let file = archive.by_index_raw(index)?;
         let encrypted = file.encrypted();
@@ -386,10 +398,13 @@ fn classify(entry: &tar::Entry<Box<dyn Read>>) -> Result<Option<Seen>, Fail> {
     }))
 }
 
-fn list_tar(path: &Path) -> Result<Listed, Fail> {
+fn list_tar(path: &Path, cancel: &AtomicBool) -> Result<Listed, Fail> {
     let mut archive = open_tar(path)?;
     let mut listed = Listed { members: Vec::new(), needs_password: false };
     for entry in archive.entries()? {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Fail::Cancelled);
+        }
         match classify(&entry?)? {
             Some(Seen::File { name, size }) => listed.members.push(Member { name, size, dir: false }),
             Some(Seen::Dir { name }) => listed.members.push(Member { name, size: 0, dir: true }),
@@ -506,11 +521,14 @@ fn skipped_report(files: u64, skipped: Vec<String>) -> Result<Report, Fail> {
     Err(Fail::Message(text))
 }
 
-fn list_rar(path: &Path, password: Option<&str>) -> Result<Listed, Fail> {
+fn list_rar(path: &Path, password: Option<&str>, cancel: &AtomicBool) -> Result<Listed, Fail> {
     let owned = rar_path(path);
     let opened = open_rar(&owned, password).open_for_listing().map_err(|err| in_volume(err.into(), &volume_label(&owned)))?;
     let mut listed = Listed { members: Vec::new(), needs_password: false };
     for item in opened {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Fail::Cancelled);
+        }
         let header = item.map_err(|err| in_volume(err.into(), &volume_label(&owned)))?;
         if header.is_encrypted() {
             listed.needs_password = true;
@@ -714,7 +732,7 @@ fn extract_rar(
     conflict: &mut dyn FnMut(&Path, &Path) -> Choice,
 ) -> Result<Report, Fail> {
     let owned = rar_path(path);
-    let listed = list_rar(&owned, password)?;
+    let listed = list_rar(&owned, password, cancel)?;
     if listed.needs_password && password.is_none() {
         return Err(Fail::NeedPassword);
     }
@@ -1246,7 +1264,7 @@ fn report_test(done: u64, sent: &mut u64, total: u64, current: &Path, progress: 
 
 fn test_rar(path: &Path, password: Option<&str>, cancel: &AtomicBool, progress: &mut dyn FnMut(&Progress)) -> Result<Report, Fail> {
     let owned = rar_path(path);
-    let listed = list_rar(&owned, password)?;
+    let listed = list_rar(&owned, password, cancel)?;
     if listed.needs_password && password.is_none() {
         return Err(Fail::NeedPassword);
     }
@@ -1472,6 +1490,287 @@ fn trailing_percent(buf: &[u8]) -> Option<u64> {
     (pct <= 100).then_some(pct)
 }
 
+pub fn list_seven(path: &Path, password: Option<&str>, bin: Option<&Path>, cancel: &AtomicBool) -> Result<Listed, Fail> {
+    let Some(bin) = bin else {
+        return Err(Fail::Message(crate::pack::SEVEN_ZIP_UNPACK.into()));
+    };
+    let (status, out, err) = run_7z(bin, &[path.as_os_str()], &["l", "-slt", "-y"], password, cancel)?;
+    if !status.success() {
+        return Err(seven_fail(status, &out, &err));
+    }
+    Ok(parse_slt(&String::from_utf8_lossy(&out)))
+}
+
+pub fn extract_seven(
+    path: &Path,
+    dest: &Path,
+    names: Option<&HashSet<String>>,
+    password: Option<&str>,
+    bin: Option<&Path>,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(&Progress),
+    conflict: &mut dyn FnMut(&Path, &Path) -> Choice,
+) -> Result<Report, Fail> {
+    let Some(bin) = bin else {
+        return Err(Fail::Message(crate::pack::SEVEN_ZIP_UNPACK.into()));
+    };
+    let real = fs::canonicalize(dest).ok();
+    let dest = real.as_deref().unwrap_or(dest);
+    let listed = list_seven(path, password, Some(bin), cancel)?;
+    if listed.needs_password && password.is_none() {
+        return Err(Fail::NeedPassword);
+    }
+    let chosen: Vec<&Member> = listed.members.iter().filter(|member| names.is_none_or(|set| set.contains(&member.name))).collect();
+    let total = chosen.iter().filter(|member| !member.dir).map(|member| member.size).sum();
+    let file_total = chosen.iter().filter(|member| !member.dir).count() as u64;
+    ensure_room(dest, total)?;
+    let mut written = 0u64;
+    let mut files = 0u64;
+    let mut file_index = 0u64;
+    let mut policy = Policy::Ask;
+    for member in chosen {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(Report { cancelled: true, files });
+        }
+        let rel = PathBuf::from(&member.name);
+        let place = located(dest, &rel)?;
+        if member.dir {
+            ensure_dir(&place)?;
+            continue;
+        }
+        let output = crate::ops::Target::new(&place)?;
+        match keep(&place, &rel, &mut policy, conflict)? {
+            Keep::Skip => continue,
+            Keep::Cancel => return Ok(Report { cancelled: true, files }),
+            Keep::Write => {}
+        }
+        file_index += 1;
+        let note = format!("{}\n{}", volume_label(path), file_line(file_index, file_total, &member.name));
+        match write_7z_member(bin, path, &member.name, &place, &output, member.size, &mut written, total, &note, password, cancel, progress) {
+            Ok(()) => files += 1,
+            Err(Fail::Cancelled) => return Ok(Report { cancelled: true, files }),
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(Report { cancelled: false, files })
+}
+
+fn write_7z_member(
+    bin: &Path,
+    archive: &Path,
+    name: &str,
+    place: &Path,
+    output: &crate::ops::Target,
+    size: u64,
+    written: &mut u64,
+    total: u64,
+    note: &str,
+    password: Option<&str>,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(&Progress),
+) -> Result<(), Fail> {
+    let mut child = spawn_7z(bin, &[std::ffi::OsStr::new("x"), std::ffi::OsStr::new("-so"), std::ffi::OsStr::new("-y"), std::ffi::OsStr::new("-bso0"), std::ffi::OsStr::new("-bsp0"), archive.as_os_str(), std::ffi::OsStr::new(name)], password)?;
+    let mut input = child.stdout.take().ok_or_else(|| Fail::Message("7z produced no output".into()))?;
+    let (err_tx, err_rx) = mpsc::channel();
+    if let Some(mut pipe) = child.stderr.take() {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            let _ = err_tx.send(buf);
+        });
+    } else {
+        let _ = err_tx.send(Vec::new());
+    }
+    let mut temp = crate::ops::temporary_file(place, 0o644)?;
+    let read = (|| {
+        let file = temp.as_file_mut();
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut got = 0u64;
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(Fail::Cancelled);
+            }
+            let n = input.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            got += n as u64;
+            if got > size {
+                return Err(oversized(Path::new(name)));
+            }
+            file.write_all(&buf[..n])?;
+            *written += n as u64;
+            progress(&Progress { done: *written, total, current: place.to_path_buf(), note: note.into() });
+        }
+        file.sync_all()?;
+        Ok(got)
+    })();
+    let got = match read {
+        Ok(got) => got,
+        Err(err) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(err);
+        }
+    };
+    let status = child.wait()?;
+    let err = err_rx.recv().unwrap_or_default();
+    if !status.success() {
+        return Err(seven_fail(status, &[], &err));
+    }
+    if got != size {
+        return Err(Fail::Message(format!("{name} unpacked {got}, archive says {size}")));
+    }
+    output.commit(temp.path())?;
+    Ok(())
+}
+
+fn run_7z(bin: &Path, paths: &[&std::ffi::OsStr], switches: &[&str], password: Option<&str>, cancel: &AtomicBool) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), Fail> {
+    let mut args: Vec<&std::ffi::OsStr> = switches.iter().map(|item| std::ffi::OsStr::new(item)).collect();
+    args.extend(paths);
+    let mut child = spawn_7z(bin, &args, password)?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let (out_tx, out_rx) = mpsc::channel();
+    let (err_tx, err_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stdout {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        let _ = out_tx.send(buf);
+    });
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stderr {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        let _ = err_tx.send(buf);
+    });
+    let status = loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Fail::Cancelled);
+        }
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    };
+    let out = out_rx.recv().unwrap_or_default();
+    let err = err_rx.recv().unwrap_or_default();
+    Ok((status, out, err))
+}
+
+fn spawn_7z(bin: &Path, args: &[&std::ffi::OsStr], password: Option<&str>) -> Result<std::process::Child, Fail> {
+    if password.is_some_and(|text| text.contains(['\n', '\r', '\0'])) {
+        return Err(Fail::Message("Password cannot contain line breaks".into()));
+    }
+    let mut cmd = Command::new(bin);
+    cmd.args(args);
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| if libc::setsid() < 0 { Err(io::Error::last_os_error()) } else { Ok(()) });
+    }
+    cmd.stdin(if password.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|err| Fail::Message(err.to_string()))?;
+    if let (Some(password), Some(mut input)) = (password, child.stdin.take()) {
+        let _ = writeln!(input, "{password}");
+    }
+    Ok(child)
+}
+
+fn seven_fail(status: std::process::ExitStatus, out: &[u8], err: &[u8]) -> Fail {
+    let err_text = String::from_utf8_lossy(err);
+    let both = format!("{err_text}\n{}", String::from_utf8_lossy(out)).to_lowercase();
+    if both.contains("wrong password") {
+        return Fail::BadPassword;
+    }
+    if both.contains("enter password") || both.contains("cannot open encrypted") || both.contains("can not open encrypted") {
+        return Fail::NeedPassword;
+    }
+    let tail: String = err_text.chars().take(400).collect();
+    if tail.trim().is_empty() {
+        Fail::Message(format!("7z failed ({})", status.code().unwrap_or(-1)))
+    } else {
+        Fail::Message(tail)
+    }
+}
+
+struct SevenRec {
+    path: String,
+    size: u64,
+    folder: bool,
+    encrypted: bool,
+    symlink: bool,
+    typed: bool,
+}
+
+fn parse_slt(text: &str) -> Listed {
+    let mut members = Vec::new();
+    let mut needs_password = false;
+    let mut current: Option<SevenRec> = None;
+    for line in text.lines() {
+        if line.is_empty() {
+            take_slt(current.take(), &mut members, &mut needs_password);
+            continue;
+        }
+        let Some((key, value)) = line.split_once(" = ") else { continue };
+        match key {
+            "Path" => {
+                take_slt(current.take(), &mut members, &mut needs_password);
+                current = Some(SevenRec { path: value.to_string(), size: 0, folder: false, encrypted: false, symlink: false, typed: false });
+            }
+            "Size" => {
+                if let Some(rec) = &mut current {
+                    rec.size = value.parse().unwrap_or(0);
+                }
+            }
+            "Folder" => {
+                if let Some(rec) = &mut current {
+                    rec.folder = value == "+";
+                }
+            }
+            "Encrypted" => {
+                if let Some(rec) = &mut current {
+                    rec.encrypted = value == "+";
+                }
+            }
+            "Attributes" => {
+                if let Some(rec) = &mut current {
+                    // "D drwxr-xr-x": the D marks a folder. The second word is the Unix mode, and lrwxrwxrwx is a link.
+                    rec.folder = rec.folder || value.starts_with('D');
+                    rec.symlink = value.split_whitespace().nth(1).is_some_and(|mode| mode.starts_with('l'));
+                }
+            }
+            "Type" => {
+                if let Some(rec) = &mut current {
+                    rec.typed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    take_slt(current.take(), &mut members, &mut needs_password);
+    Listed { members, needs_password }
+}
+
+fn take_slt(current: Option<SevenRec>, members: &mut Vec<Member>, needs_password: &mut bool) {
+    let Some(rec) = current else { return };
+    if rec.typed {
+        return;
+    }
+    if rec.encrypted {
+        *needs_password = true;
+    }
+    if rec.symlink {
+        return;
+    }
+    let Some(name) = slash(&rec.path) else { return };
+    members.push(Member { name, size: rec.size, dir: rec.folder });
+}
+
 fn hit_zip(path: &Path, name_needle: &str, text_needle: &str, case_sensitive: bool, cancel: &dyn Fn() -> bool) -> Result<bool, Fail> {
     let mut archive = zip::ZipArchive::new(File::open(path)?)?;
     for index in 0..archive.len() {
@@ -1535,7 +1834,7 @@ fn hit_tar(path: &Path, name_needle: &str, text_needle: &str, case_sensitive: bo
 
 fn hit_rar(path: &Path, name_needle: &str, text_needle: &str, case_sensitive: bool, cancel: &dyn Fn() -> bool) -> Result<bool, Fail> {
     let owned = rar_path(path);
-    let listed = list_rar(&owned, None)?;
+    let listed = list_rar(&owned, None, &AtomicBool::new(false))?;
     if listed.needs_password {
         return Err(Fail::NeedPassword);
     }
@@ -1701,6 +2000,26 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn listing_stops_when_cancelled() {
+        let dir = tmp("list-cancel");
+        let zip = zip_with(&dir, &[("a.txt", "a"), ("b.txt", "b")], None);
+        assert_eq!(list_until(&zip, None, &AtomicBool::new(false)).unwrap().members.len(), 2);
+        assert!(matches!(list_until(&zip, None, &AtomicBool::new(true)), Err(Fail::Cancelled)));
+        let tar = dir.join("sample.tar");
+        let mut builder = tar::Builder::new(File::create(&tar).unwrap());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(1);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append_data(&mut header, "c.txt", &b"c"[..]).unwrap();
+        builder.finish().unwrap();
+        drop(builder);
+        assert_eq!(list_until(&tar, None, &AtomicBool::new(false)).unwrap().members.len(), 1);
+        assert!(matches!(list_until(&tar, None, &AtomicBool::new(true)), Err(Fail::Cancelled)));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn zip_with(dir: &Path, files: &[(&str, &str)], link: Option<(&str, &str)>) -> PathBuf {
@@ -2151,6 +2470,67 @@ mod tests {
         assert!(text.contains("             5  a.txt\n") && text.contains("sub/b.txt"));
         assert!(text.contains("             7  2 files, 0 folders"));
         assert!(contents(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/version.rar")).contains("version"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_7z_list_and_skips_the_archive_record_and_links() {
+        let listed = parse_slt(
+            "\
+Path = sample.7z
+Type = 7z
+
+Path = sub
+Size = 0
+Attributes = D drwxrwxr-x
+Encrypted = -
+
+Path = sub/a.txt
+Folder = -
+Size = 6
+Attributes = A -rw-rw-r--
+Encrypted = +
+
+Path = sub/link
+Folder = -
+Size = 1
+Attributes = A lrwxrwxrwx
+Encrypted = -
+",
+        );
+        assert!(listed.needs_password);
+        assert_eq!(listed.members.len(), 2);
+        assert_eq!(listed.members[0].name, "sub");
+        assert!(listed.members[0].dir);
+        assert_eq!(listed.members[1].name, "sub/a.txt");
+        assert_eq!(listed.members[1].size, 6);
+    }
+
+    #[test]
+    fn seven_zip_unpack_asks_for_settings_when_the_program_is_missing() {
+        let err = extract_seven(Path::new("x.7z"), Path::new("out"), None, None, None, &AtomicBool::new(false), &mut |_| {}, &mut |_, _| Choice::Cancel)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Settings"), "{err}");
+        assert!(err.contains("7zip"), "{err}");
+    }
+
+    #[test]
+    fn unpacks_7z_when_present() {
+        let Some(bin) = crate::pack::find_program("", crate::pack::names(crate::pack::Format::SevenZ)) else { return };
+        let dir = tmp("7zunpack");
+        fs::create_dir(dir.join("sub")).unwrap();
+        fs::write(dir.join("sub/a.txt"), b"hello").unwrap();
+        let archive = dir.join("sample.7z");
+        let packed = Command::new(&bin).current_dir(&dir).args(["a", "-y", "sample.7z", "sub"]).status().unwrap();
+        assert!(packed.success());
+        let cancel = AtomicBool::new(false);
+        let listed = list_seven(&archive, None, Some(&bin), &cancel).unwrap();
+        assert!(listed.members.iter().any(|member| member.name == "sub/a.txt" && member.size == 5), "{:?}", listed.members);
+        let dest = dir.join("out");
+        fs::create_dir(&dest).unwrap();
+        extract_seven(&archive, &dest, None, None, Some(bin.as_path()), &cancel, &mut |_| {}, &mut |_, _| Choice::Overwrite).unwrap();
+        assert_eq!(fs::read(dest.join("sub/a.txt")).unwrap(), b"hello");
         let _ = fs::remove_dir_all(&dir);
     }
 }

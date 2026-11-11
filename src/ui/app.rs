@@ -2,14 +2,14 @@ use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+use relm4::RelmWidgetExt;
 use relm4::gtk;
 use relm4::gtk::gdk::{Key, ModifierType};
 use relm4::gtk::prelude::*;
 use relm4::prelude::*;
-use relm4::RelmWidgetExt;
 
 use rust_commander::config::{self, Bookmark, Config};
 use rust_commander::entry::Entry;
@@ -24,10 +24,13 @@ static SIZING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 use super::row::{self, EntryObject};
 use super::shell::{self, Shell};
 
+mod audio;
+mod audio_smoke;
 mod commands;
 mod disk;
-mod mount;
 mod jobs;
+mod mount;
+mod music;
 mod props;
 mod queue;
 mod search;
@@ -115,6 +118,8 @@ struct Job {
     done_rx: mpsc::Receiver<Result<Report, String>>,
     started: Instant,
     conflict_open: bool,
+    // Title for the progress window when the status line would not say what is going on.
+    caption: Option<&'static str>,
 }
 
 struct ListerUi {
@@ -177,9 +182,11 @@ struct SettingsUi {
     icon_pack: gtk::DropDown,
     icon_pack_ids: Rc<RefCell<Vec<String>>>,
     icon_pack_guard: Rc<Cell<bool>>,
+    music: music::MusicUi,
 }
 
 pub struct App {
+    audio: audio::AudioState,
     state: AppState,
     shell: Shell,
     cfg: Config,
@@ -191,7 +198,12 @@ pub struct App {
     dialog: Option<gtk::Window>,
     mount_ui: Option<mount::MountUi>,
     mount_gen: u64,
-    progress: Option<(gtk::Window, gtk::Label, gtk::ProgressBar, Option<(gtk::Label, gtk::TextView)>)>,
+    progress: Option<(
+        gtk::Window,
+        gtk::Label,
+        gtk::ProgressBar,
+        Option<(gtk::Label, gtk::TextView)>,
+    )>,
     meter: Option<f64>,
     pending: Option<PendingUnpack>,
     queued: Option<Queued>,
@@ -199,6 +211,10 @@ pub struct App {
     lister: Option<ListerUi>,
     lister_wait: bool,
     archive_wait: bool,
+    // The archive being read before unpack: its cancel flag and when it began. A late answer for an older
+    // generation is dropped.
+    list_wait: Option<(Arc<std::sync::atomic::AtomicBool>, Instant)>,
+    list_gen: u64,
     lister_gen: u64,
     lister_draw: u64,
     image: Option<ImageUi>,
@@ -212,6 +228,8 @@ pub struct App {
     preview: lister::PreviewSlot,
     preview_sent: u64,
     preview_shown: [u64; 2],
+    /// The panes have been painted once, so a later change of the accent border may blink.
+    accent_painted: bool,
     quick_fit: bool,
     edit_quiet: Rc<Cell<bool>>,
     syntax_on: Rc<Cell<bool>>,
@@ -223,12 +241,15 @@ pub struct App {
     row_target: Option<PathBuf>,
     loads: Vec<(u64, Arc<AtomicBool>)>,
     watches: [Option<watch::DirWatch>; 2],
+    dir_poll: Instant,
+    dir_busy: bool,
     search: Option<search::SearchUi>,
     search_gen: u64,
     search_target: Option<(PaneId, usize, u64, String)>,
     settings: Option<SettingsUi>,
     command_list: Option<gtk::Window>,
     smoke: bool,
+    tx: relm4::Sender<Msg>,
 }
 
 pub fn run(smoke: bool) {
@@ -290,6 +311,8 @@ impl SimpleComponent for App {
         let cfg = config::load();
         let shell = shell::build(&root, sender.input_sender(), &cfg.icon_pack);
         shell::set_flash_enabled(cfg.flash_feedback);
+        shell::set_blink_speed(cfg.blink_speed);
+        shell::set_blink_count(cfg.blink_count);
         shell.mode_bar.set_visible(cfg.command_bar);
         let (left, right) = if smoke {
             smoke_dirs()
@@ -342,6 +365,7 @@ impl SimpleComponent for App {
             gtk::glib::Propagation::Proceed
         });
         let mut model = App {
+            audio: audio::AudioState::new(),
             state,
             shell,
             cfg,
@@ -356,6 +380,8 @@ impl SimpleComponent for App {
             progress: None,
             lister_wait: false,
             archive_wait: false,
+            list_wait: None,
+            list_gen: 0,
             meter: None,
             pending: None,
             queued: None,
@@ -374,6 +400,7 @@ impl SimpleComponent for App {
             preview: lister::PreviewSlot::default(),
             preview_sent: 0,
             preview_shown: [0, 0],
+            accent_painted: false,
             quick_fit: true,
             edit_quiet,
             syntax_on,
@@ -385,12 +412,15 @@ impl SimpleComponent for App {
             row_target: None,
             loads: Vec::new(),
             watches: [None, None],
+            dir_poll: Instant::now(),
+            dir_busy: false,
             search: None,
             search_gen: 0,
             search_target: None,
             settings: None,
             command_list: None,
             smoke,
+            tx: sender.input_sender().clone(),
         };
         model.apply_css(&theme::load_named(&theme::active_name(
             &model.cfg.theme,
@@ -433,8 +463,12 @@ impl SimpleComponent for App {
     fn update(&mut self, msg: Msg, sender: ComponentSender<Self>) {
         let idle_poll = matches!(msg, Msg::Poll);
         self.on_msg(msg, &sender);
-        self.arm_watches(&sender);
+        self.arm_watches();
         self.kick_preview(&sender);
+        // Finding the file under the cursor sorts the folder, so an idle poll leaves it be.
+        if !idle_poll || self.dirty.iter().any(|pane| *pane) {
+            self.reconcile_audio(&sender);
+        }
         if !(idle_poll && self.job.is_none() && !self.dirty.iter().any(|pane| *pane)) {
             self.sync();
         }
@@ -446,7 +480,9 @@ impl App {
         match msg {
             Msg::Key(key, mods) => self.on_key(key, mods, sender),
             Msg::FKey(n, shift) => self.on_fkey(n, shift, sender),
-            Msg::Listed(pane, tab, token, result) => self.on_listed(pane, tab, token, result),
+            Msg::Listed(pane, tab, token, result, stamp) => {
+                self.on_listed(pane, tab, token, result, stamp)
+            }
             Msg::Cursor(pane, pos) => {
                 let id = PaneId::from_index(pane);
                 // The hotlist popup can move the cursor in the left list while it is open.
@@ -471,9 +507,13 @@ impl App {
                 self.set_sort(key);
             }
             Msg::FilterChanged(pane, text) => {
-                self.state.pane_mut(PaneId::from_index(pane)).filter = text;
-                self.state.tab_mut(PaneId::from_index(pane)).cursor = 0;
-                self.touch(PaneId::from_index(pane));
+                let id = PaneId::from_index(pane);
+                // A filter that the program itself cleared comes back here as the same text. The cursor stays.
+                if self.state.pane(id).filter != text {
+                    self.state.tab_mut(id).cursor = 0;
+                }
+                self.state.pane_mut(id).filter = text;
+                self.touch(id);
             }
             Msg::PathGo(pane, text) => self.go_typed_path(pane, &text, sender),
             Msg::CopyShownPath(pane) => self.copy_shown_path(pane),
@@ -492,7 +532,10 @@ impl App {
             }
             Msg::Conflict(choice) => {
                 // A late answer from a closed dialog must not answer the next question.
-                let open = self.job.as_mut().is_some_and(|job| std::mem::replace(&mut job.conflict_open, false));
+                let open = self
+                    .job
+                    .as_mut()
+                    .is_some_and(|job| std::mem::replace(&mut job.conflict_open, false));
                 if open {
                     if let Some(job) = &self.job {
                         let _ = job.answer_tx.send(choice);
@@ -502,8 +545,41 @@ impl App {
             }
             Msg::Poll => {
                 self.poll_job(sender);
+                self.poll_archive_list();
                 self.poll_queue(sender);
+                self.tick_audio();
+                self.poll_dirs(sender);
             }
+            Msg::AudioEvent(event) => self.on_audio_event(event, sender),
+            Msg::AudioCover {
+                generation,
+                image,
+                key,
+            } => self.on_audio_cover(generation, image, key),
+            Msg::AudioSeek(fraction) => self.audio_seek_to(fraction),
+            Msg::AudioVolume(volume) => self.audio_set_volume(volume as f32),
+            Msg::AudioToggle => self.audio_toggle(sender),
+            Msg::AudioMute => self.audio_toggle_mute(),
+            Msg::AudioPrev => self.audio_prev(sender),
+            Msg::AudioNext => self.audio_next(sender),
+            Msg::AudioShuffle => self.audio_toggle_shuffle(),
+            Msg::AudioRepeat => self.audio_cycle_repeat(),
+            Msg::AudioMinimize => self.audio_minimize(sender),
+            Msg::AudioExpand => self.audio_expand(sender),
+            Msg::AudioClose => self.audio_close(),
+            Msg::AudioVisualOn(on) => self.audio_set_visual_on(on),
+            Msg::AudioVisualToggle => self.audio_set_visual_on(!self.cfg.player_visual_on),
+            Msg::AudioVisualStyle(style) => self.audio_set_visual_style(style),
+            Msg::AudioVisualStrength(value) => {
+                self.audio_set_visual_knob(value, |cfg| &mut cfg.player_visual_strength)
+            }
+            Msg::AudioVisualSmooth(value) => {
+                self.audio_set_visual_knob(value, |cfg| &mut cfg.player_visual_smooth)
+            }
+            Msg::AudioVisualDensity(value) => {
+                self.audio_set_visual_knob(value, |cfg| &mut cfg.player_visual_density)
+            }
+            Msg::AudioRepeatSet(repeat) => self.audio_set_repeat(repeat),
             Msg::Enqueue(text) => self.enqueue(&text, sender),
             Msg::QueuePause => self.toggle_queue_pause(),
             Msg::QueueRemove => self.remove_queued(),
@@ -518,7 +594,9 @@ impl App {
                 }
             }
             Msg::ImageReady { generation, body } => self.show_image(generation, body),
-            Msg::ListerOpened { generation, opened } => self.show_lister(generation, opened, sender),
+            Msg::ListerOpened { generation, opened } => {
+                self.show_lister(generation, opened, sender)
+            }
             Msg::ListerText { generation, text } => self.show_lister_text(generation, text),
             Msg::ImageClosed(token) => {
                 if self.image.as_ref().is_some_and(|ui| ui.token == token) {
@@ -584,7 +662,9 @@ impl App {
                 self.refresh_active(sender);
             }
             Msg::RefreshActive => self.refresh_active(sender),
-            Msg::PreviewImageCopied { generation, image } => self.finish_image_copy(generation, image),
+            Msg::PreviewImageCopied { generation, image } => {
+                self.finish_image_copy(generation, image)
+            }
             Msg::ShellExited(id) => self.on_shell_exited(id),
             Msg::SelectShell(id) => self.select_shell(id),
             Msg::CloseWindow => {
@@ -605,10 +685,14 @@ impl App {
             Msg::CursorTextColor(color) => self.set_cursor_text_color(color),
             Msg::MarkColor(color) => self.set_mark_color(color),
             Msg::BlinkColor(color) => self.set_blink_color(color),
+            Msg::BlinkSpeed(speed) => self.set_blink_speed(speed),
+            Msg::BlinkCount(count) => self.set_blink_count(count),
             Msg::CursorAlpha(alpha) => self.set_cursor_alpha(alpha),
             Msg::ToggleCursorFrame => self.toggle_cursor_frame(),
             Msg::CloseSettings => self.close_settings(),
-            Msg::ArchiveListed(result) => self.on_archive_listed(result, sender),
+            Msg::ArchiveListed(generation, result) => {
+                self.on_archive_listed(generation, result, sender)
+            }
             Msg::UnpackPick(dest, names) => self.on_unpack_pick(dest, names, sender),
             Msg::PackPick(dest, opts) => {
                 self.close_dialog();
@@ -629,25 +713,39 @@ impl App {
             Msg::HotlistAdd => self.hot_add(sender),
             Msg::HotlistRemove => self.hot_remove(sender),
             Msg::HotlistConfigure => self.hot_configure(sender),
-            Msg::HotlistAdded(title, path, with_target) => self.hot_added(title, path, with_target, sender),
+            Msg::HotlistAdded(title, path, with_target) => {
+                self.hot_added(title, path, with_target, sender)
+            }
             Msg::HotlistStored(marks) => self.hot_stored(marks),
             Msg::FocusPane(pane) => {
                 // The hotlist takes focus, and GTK then focuses the left list.
                 if self.hot.is_some() {
                     return;
                 }
+                self.audio_unfocus();
                 // A click in the quick editor must not make its pane active and hide the editor.
-                if self.quick_edit.as_ref().is_some_and(|edit| edit.pane == pane) {
+                if self
+                    .quick_edit
+                    .as_ref()
+                    .is_some_and(|edit| edit.pane == pane)
+                {
                     self.shell.active.set(self.state.active.index());
                 } else {
+                    let switched = self.state.active.index() != pane;
                     self.shell.active.set(pane);
                     self.state.active = PaneId::from_index(pane);
+                    if switched {
+                        self.dirs_soon();
+                    }
                 }
             }
             Msg::Mount(pane, path) => self.goto_mount(pane, path, sender),
             Msg::DiskInfo(path) => self.show_disk_info(path),
             Msg::DrivesChanged => self.refresh_drives(sender),
             Msg::DriveStatus(text) => self.status = text,
+            Msg::Status(text) => self.status = text,
+            Msg::FilmChecked { path, film } => self.film_checked(path, film, sender),
+            Msg::WatchReady(pane, path) => self.watch_ready(pane, &path),
             Msg::MountVolume(pane, id) => {
                 self.status = format!("Mounting {id}");
                 let tx = sender.input_sender().clone();
@@ -661,30 +759,56 @@ impl App {
             Msg::EjectVolume(id) => {
                 let tx = sender.input_sender().clone();
                 let name = id.clone();
-                super::drives::eject_volume(&id, move |result| tx.emit(Msg::DriveStatus(released(&name, result))));
+                super::drives::eject_volume(&id, move |result| {
+                    tx.emit(Msg::DriveStatus(released(&name, result)))
+                });
             }
             Msg::Unmount(path, eject) => {
                 let tx = sender.input_sender().clone();
                 let name = path.display().to_string();
-                super::drives::release(&path, eject, move |result| tx.emit(Msg::DriveStatus(released(&name, result))));
+                let path_done = path.clone();
+                super::drives::release(&path, eject, move |result| {
+                    let ok = result.is_ok();
+                    tx.emit(Msg::DriveStatus(released(&name, result)));
+                    if ok {
+                        tx.emit(Msg::ForgetMount(path_done));
+                    }
+                });
+            }
+            Msg::ForgetMount(path) => {
+                self.shell.released.push(path);
+                self.refresh_drives(sender);
             }
             Msg::MountClosed(generation) => {
                 if self.mount_gen == generation {
                     self.mount_ui = None;
                 }
             }
-            Msg::MountFinished { generation, point, open, error } => self.mount_finished(generation, point, open, error, sender),
+            Msg::MountFinished {
+                generation,
+                point,
+                open,
+                error,
+            } => self.mount_finished(generation, point, open, error, sender),
             Msg::Smoke => self.run_smoke(sender),
             Msg::DirChanged(pane, path) => self.reload_watched(pane, &path, sender),
+            Msg::DirStamp(stamps) => self.apply_dir_stamps(stamps, sender),
             Msg::SearchFeed => self.show_search_feed(sender),
-            Msg::MakeLink { symbolic, target, link } => self.make_link(symbolic, target, link, sender),
+            Msg::MakeLink {
+                symbolic,
+                target,
+                link,
+            } => self.make_link(symbolic, target, link, sender),
             Msg::SumKind(kind) => self.begin_checksum(kind, sender),
             Msg::EncodePick { decode, codec } => self.begin_encode(decode, codec, sender),
         }
     }
 
     fn on_key(&mut self, key: Key, mods: ModifierType, sender: &ComponentSender<Self>) {
-        if key == Key::F12 && !mods.contains(ModifierType::CONTROL_MASK) && !mods.contains(ModifierType::ALT_MASK) {
+        if key == Key::F12
+            && !mods.contains(ModifierType::CONTROL_MASK)
+            && !mods.contains(ModifierType::ALT_MASK)
+        {
             self.toggle_settings(sender);
             return;
         }
@@ -761,6 +885,9 @@ impl App {
         if ctrl && alt {
             return;
         }
+        if self.audio_focused() && self.audio_focus_key(key, mods, sender) {
+            return;
+        }
         if ctrl {
             if let Some(slot) = drive_slot(key) {
                 self.pick_drive(slot, sender);
@@ -782,7 +909,8 @@ impl App {
                 Key::F6 => self.set_sort(rust_commander::listing::SortKey::Size),
                 Key::F7 if shift => self.ask_encode(sender),
                 Key::F7 => self.set_sort(rust_commander::listing::SortKey::Attr),
-                Key::Delete | Key::KP_Delete if !shift => self.ask_shred(sender),
+                Key::Delete | Key::KP_Delete if shift => self.ask_shred(sender),
+                Key::Delete | Key::KP_Delete => self.on_fkey(8, true, sender),
                 Key::F9 if shift => self.start_verify(sender),
                 Key::F9 => self.new_shell(sender),
                 Key::s | Key::S => {
@@ -797,8 +925,14 @@ impl App {
                 Key::m | Key::M if shift => {
                     let tx = sender.input_sender().clone();
                     let button = self.shell.mount_button.clone();
-                    shell::blink_then(button.upcast_ref(), move || tx.emit(Msg::Run(rust_commander::commands::Act::Mount)));
+                    shell::blink_then(button.upcast_ref(), move || {
+                        tx.emit(Msg::Run(rust_commander::commands::Act::Mount))
+                    });
                 }
+                Key::m | Key::M => self.audio_jump(sender),
+                Key::Return | Key::KP_Enter => self.audio_open_external(),
+                Key::p | Key::P if shift => self.audio_add(false, sender),
+                Key::p | Key::P => self.audio_send(false, sender),
                 Key::l | Key::L => self.focus_path(),
                 Key::y | Key::Y => self.toggle_syntax(),
                 Key::t | Key::T => self.open_new_tab(sender),
@@ -830,8 +964,12 @@ impl App {
                     self.touch(id);
                     self.note_preview_target();
                 }
-                Key::Left | Key::KP_Left if self.state.active == PaneId::Right => self.show_active_on_other(sender),
-                Key::Right | Key::KP_Right if self.state.active == PaneId::Left => self.show_active_on_other(sender),
+                Key::Left | Key::KP_Left if self.state.active == PaneId::Right => {
+                    self.show_active_on_other(sender)
+                }
+                Key::Right | Key::KP_Right if self.state.active == PaneId::Left => {
+                    self.show_active_on_other(sender)
+                }
                 _ => {}
             }
             return;
@@ -867,7 +1005,11 @@ impl App {
             Key::F8 | Key::Delete => self.on_fkey(8, shift, sender),
             Key::F9 if shift => self.ask_checksum(sender),
             Key::F9 => self.toggle_panel_terminal(sender),
-            Key::ISO_Left_Tab | Key::Tab if self.shell.editing.get() || self.state.quick_view => {}
+            Key::ISO_Left_Tab | Key::Tab if self.shell.editing.get() => {}
+            Key::ISO_Left_Tab | Key::Tab if self.audio_alive() && !self.state.panel_terminal => {
+                self.audio_tab(key == Key::ISO_Left_Tab || shift);
+            }
+            Key::ISO_Left_Tab | Key::Tab if self.state.quick_view => {}
             Key::ISO_Left_Tab | Key::Tab if self.state.panel_terminal => self.focus_across_shell(),
             Key::ISO_Left_Tab | Key::Tab => {
                 self.state.active = self.state.active.other();
@@ -880,6 +1022,10 @@ impl App {
                 self.paint_mark(self.state.active, index);
                 self.focus_list();
             }
+            Key::AudioPlay | Key::AudioPause if self.audio_alive() => self.audio_toggle(sender),
+            Key::AudioStop if self.audio_alive() => self.audio_stop(),
+            Key::AudioNext if self.audio_alive() => self.audio_next(sender),
+            Key::AudioPrev if self.audio_alive() => self.audio_prev(sender),
             Key::space | Key::KP_Space => {
                 let index = self.state.tab(self.state.active).cursor;
                 self.state.toggle_mark_stay();
@@ -906,8 +1052,12 @@ impl App {
             }
             Key::a | Key::A if self.state.quick_view => self.set_charset(Charset::Ansi, sender),
             Key::j | Key::J if self.state.quick_view => self.set_charset(Charset::Json, sender),
-            Key::s | Key::S if self.state.quick_view && self.cursor_is_image() => self.toggle_quick_scale(),
-            Key::s | Key::S | Key::d | Key::D if self.state.quick_view => self.set_charset(Charset::Ascii, sender),
+            Key::s | Key::S if self.state.quick_view && self.cursor_is_image() => {
+                self.toggle_quick_scale()
+            }
+            Key::s | Key::S | Key::d | Key::D if self.state.quick_view => {
+                self.set_charset(Charset::Ascii, sender)
+            }
             Key::Escape if self.path_focused() => self.cancel_path_edit(),
             Key::Escape if self.shell.editing.get() => {
                 self.leave_quick_edit(sender);
@@ -944,7 +1094,12 @@ impl App {
                     return;
                 }
                 self.ask = Some(Ask::Copy(sources.clone()));
-                let dest = self.state.tab(self.state.active.other()).path.display().to_string();
+                let dest = self
+                    .state
+                    .tab(self.state.active.other())
+                    .path
+                    .display()
+                    .to_string();
                 self.ask_text(&format!("Copy {} to", describe(&sources)), &dest, tx);
             }
             6 if shift => {
@@ -963,7 +1118,12 @@ impl App {
                     return;
                 }
                 self.ask = Some(Ask::Move(sources.clone()));
-                let dest = self.state.tab(self.state.active.other()).path.display().to_string();
+                let dest = self
+                    .state
+                    .tab(self.state.active.other())
+                    .path
+                    .display()
+                    .to_string();
                 self.ask_text(&format!("Move {} to", describe(&sources)), &dest, tx);
             }
             7 => {
@@ -977,12 +1137,23 @@ impl App {
                         self.status = "Nothing selected".into();
                         return;
                     }
-                    [one] => one.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
+                    [one] => one
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
                     many => format!("{} items", many.len()),
                 };
                 let trash = !shift && paths.iter().all(|path| ops::on_home_disk(path));
-                let title = if trash { format!("Move {what} to trash?") } else { format!("Delete {what} permanently?") };
-                self.ask = Some(if trash { Ask::Trash(paths) } else { Ask::Permanent(paths) });
+                let title = if trash {
+                    format!("Move {what} to trash?")
+                } else {
+                    format!("Delete {what} permanently?")
+                };
+                self.ask = Some(if trash {
+                    Ask::Trash(paths)
+                } else {
+                    Ask::Permanent(paths)
+                });
                 self.ask_confirm(&title, tx);
             }
             _ => {}
@@ -1006,12 +1177,10 @@ impl App {
                 let dest = src.parent().unwrap_or(Path::new(".")).join(text.trim());
                 self.spawn_transfer(vec![(src, dest)], Kind::Copy, sender);
             }
-            Some(Ask::Rename(path)) => {
-                match ops::rename_in_place(&path, text.trim()) {
-                    Ok(_) => self.refresh_active(sender),
-                    Err(err) => self.status = err.to_string(),
-                }
-            }
+            Some(Ask::Rename(path)) => match ops::rename_in_place(&path, text.trim()) {
+                Ok(_) => self.refresh_active(sender),
+                Err(err) => self.status = err.to_string(),
+            },
             Some(Ask::Mkdir) => {
                 let parent = self.state.tab(self.state.active).path.clone();
                 let name = text.trim();
@@ -1022,7 +1191,10 @@ impl App {
                     }
                     Err(err) => {
                         rust_commander::log::error(&format!("mkdir {name}: {err}"));
-                        self.show_error("New folder", &format!("Could not create {name} in {}: {err}", parent.display()));
+                        self.show_error(
+                            "New folder",
+                            &format!("Could not create {name} in {}: {err}", parent.display()),
+                        );
                     }
                 }
             }
@@ -1049,17 +1221,31 @@ impl App {
         }
     }
 
-    fn on_listed(&mut self, pane: usize, tab: usize, token: u64, result: Result<Vec<Entry>, String>) {
+    fn on_listed(
+        &mut self,
+        pane: usize,
+        tab: usize,
+        token: u64,
+        result: Result<Vec<Entry>, String>,
+        stamp: Option<std::time::SystemTime>,
+    ) {
         // Timed out or replaced loads have left `loads`, so their late answer is dropped here.
-        let Some(at) = self.loads.iter().position(|(live, _)| *live == token) else { return };
+        let Some(at) = self.loads.iter().position(|(live, _)| *live == token) else {
+            return;
+        };
         self.loads.remove(at).1.store(true, Ordering::Relaxed);
         let id = PaneId::from_index(pane);
         match result {
             Ok(entries) => {
                 if self.state.apply_listing(id, tab, token, entries) {
+                    if let Some(stamp) = stamp {
+                        self.remember_dir(pane, stamp);
+                    }
                     self.drop_filter_box(id);
                     self.touch(id);
-                    if let Some((target_id, target_tab, target_token, name)) = self.search_target.take() {
+                    if let Some((target_id, target_tab, target_token, name)) =
+                        self.search_target.take()
+                    {
                         if (id, tab, token) == (target_id, target_tab, target_token) {
                             self.point_at(id, &name);
                             self.focus_list();
@@ -1075,7 +1261,7 @@ impl App {
             Err(err) => {
                 self.state.cancel_load(id, token);
                 rust_commander::log::error(&format!("list pane={pane}: {err}"));
-                self.status = err;
+                self.status = self.unreachable_note(&err).unwrap_or(err);
             }
         }
     }
@@ -1084,7 +1270,14 @@ impl App {
         row::set_dot_spin(&self.shell.wait, self.lister_wait || self.archive_wait);
     }
 
-    fn spawn_load(&mut self, sender: &ComponentSender<Self>, id: PaneId, tab: usize, path: PathBuf, token: u64) {
+    fn spawn_load(
+        &mut self,
+        sender: &ComponentSender<Self>,
+        id: PaneId,
+        tab: usize,
+        path: PathBuf,
+        token: u64,
+    ) {
         rust_commander::log::info(&format!("read {}", path.display()));
         let tx = sender.input_sender().clone();
         let pane = id.index();
@@ -1104,21 +1297,39 @@ impl App {
         let seen = Arc::new(AtomicU64::new(0));
         watch_load(&tx, pane, tab, token, &path, &stop, &seen);
         std::thread::spawn(move || {
+            // Taken before the names, so a file that arrives during the read shows up on the next check.
+            let stamp = std::fs::metadata(&path).and_then(|meta| meta.modified()).ok();
             let result = rust_commander::listing::read_dir_while(&path, || {
                 seen.fetch_add(1, Ordering::Relaxed);
                 stop.load(Ordering::Relaxed)
             });
-            if result.as_ref().is_err_and(|err| err.kind() == std::io::ErrorKind::Interrupted) && stop.load(Ordering::Relaxed) {
+            if result
+                .as_ref()
+                .is_err_and(|err| err.kind() == std::io::ErrorKind::Interrupted)
+                && stop.load(Ordering::Relaxed)
+            {
                 return;
             }
-            tx.emit(Msg::Listed(pane, tab, token, result.map_err(|e| format!("{}: {e}", path.display()))));
+            tx.emit(Msg::Listed(
+                pane,
+                tab,
+                token,
+                result.map_err(|e| format!("{}: {e}", path.display())),
+                stamp,
+            ));
         });
     }
 
     fn cursor_path(&self) -> Option<PathBuf> {
         let id = self.state.active;
-        let entry = self.state.cursor_entry(id).filter(|entry| entry.name.as_ref() != "..")?;
-        Some(rust_commander::listing::entry_path(&self.state.tab(id).path, entry))
+        let entry = self
+            .state
+            .cursor_entry(id)
+            .filter(|entry| entry.name.as_ref() != "..")?;
+        Some(rust_commander::listing::entry_path(
+            &self.state.tab(id).path,
+            entry,
+        ))
     }
 
     // A relative target is taken from the active folder, not from the process working directory.
@@ -1142,7 +1353,9 @@ impl App {
     }
 
     fn go_up(&mut self, sender: &ComponentSender<Self>) {
-        let Some((id, path, token)) = self.state.up() else { return };
+        let Some((id, path, token)) = self.state.up() else {
+            return;
+        };
         let tab = self.state.pane(id).active;
         self.spawn_load(sender, id, tab, path, token);
     }
@@ -1152,21 +1365,34 @@ impl App {
             self.open_feed_hit(sender);
             return;
         }
-        if self.file_under_cursor().is_some_and(|path| jobs::is_check_file(&path)) {
+        if self
+            .file_under_cursor()
+            .is_some_and(|path| jobs::is_check_file(&path))
+        {
             self.start_verify(sender);
+            return;
+        }
+        // A song plays in the built-in player. Ctrl+Enter is the way to the external one.
+        if self.audio_enter(sender) {
             return;
         }
         if let Some((id, path, token)) = self.state.enter() {
             let tab = self.state.pane(id).active;
             self.spawn_load(sender, id, tab, path, token);
         } else {
+            // The default player takes over, so the built-in one steps aside.
+            self.audio_pause_for_external();
             self.open_external(true);
         }
     }
 
     fn history(&mut self, back: bool, sender: &ComponentSender<Self>) {
         let id = self.state.active;
-        let step = if back { self.state.go_back(id) } else { self.state.go_forward(id) };
+        let step = if back {
+            self.state.go_back(id)
+        } else {
+            self.state.go_forward(id)
+        };
         if let Some((path, token)) = step {
             let tab = self.state.pane(id).active;
             self.spawn_load(sender, id, tab, path, token);
@@ -1206,15 +1432,26 @@ impl App {
         let titles = ["Name", "Ext", "Size", "Date", "Attr"];
         for (i, pane) in self.shell.panes.iter().enumerate() {
             let sort = self.state.panes[i].sort;
-            let arrow = if self.state.panes[i].ascending { "↑" } else { "↓" };
+            let arrow = if self.state.panes[i].ascending {
+                "↑"
+            } else {
+                "↓"
+            };
             let cols = pane.list.columns();
             let mut data = 0;
             for col_i in 0..cols.n_items() {
-                let Some(col) = cols.item(col_i).and_then(|obj| obj.downcast::<gtk::ColumnViewColumn>().ok()) else { continue };
+                let Some(col) = cols
+                    .item(col_i)
+                    .and_then(|obj| obj.downcast::<gtk::ColumnViewColumn>().ok())
+                else {
+                    continue;
+                };
                 if col.title().map(|title| title.is_empty()).unwrap_or(true) {
                     continue;
                 }
-                let Some(title) = titles.get(data) else { continue };
+                let Some(title) = titles.get(data) else {
+                    continue;
+                };
                 let text = if keys[data] == sort {
                     format!("{title} {arrow}")
                 } else {
@@ -1229,30 +1466,45 @@ impl App {
     }
 
     fn current_name(&self) -> Option<String> {
-        self.state.cursor_entry(self.state.active).map(|e| e.name.to_string())
+        self.state
+            .cursor_entry(self.state.active)
+            .map(|e| e.name.to_string())
     }
-
 
     fn open_external(&mut self, viewer: bool) {
         let Some(path) = self.file_under_cursor().or_else(|| {
             self.state.cursor_entry(self.state.active).map(|e| {
                 rust_commander::listing::entry_path(&self.state.tab(self.state.active).path, e)
             })
-        }) else { return };
+        }) else {
+            return;
+        };
         if viewer && self.cfg.viewer.trim().is_empty() {
-            if let Err(err) = launch_default(&path) {
-                rust_commander::log::error(&err);
-                self.status = err;
-            }
+            // The type lookup reads the file, which can stall on a dead mount.
+            let tx = self.tx.clone();
+            std::thread::spawn(move || {
+                if let Err(err) = launch_default(&path) {
+                    rust_commander::log::error(&err);
+                    tx.emit(Msg::Status(err));
+                }
+            });
             return;
         }
         let argv = if viewer {
             rust_commander::external::viewer_argv(&self.cfg.viewer, &path)
         } else {
-            rust_commander::external::editor_argv(&self.cfg.editor, std::env::var("EDITOR").ok().as_deref(), &path)
+            rust_commander::external::editor_argv(
+                &self.cfg.editor,
+                std::env::var("EDITOR").ok().as_deref(),
+                &path,
+            )
         };
         if argv.is_empty() {
-            self.status = if viewer { "No viewer found".into() } else { "No editor found".into() };
+            self.status = if viewer {
+                "No viewer found".into()
+            } else {
+                "No editor found".into()
+            };
             return;
         }
         if let Err(err) = spawn_argv(&argv) {
@@ -1267,7 +1519,11 @@ impl App {
         let places = rust_commander::places::places(&home_dir(), &self.cfg.bookmarks);
         self.close_dialog();
         let win = gtk::Window::new();
-        win.set_title(Some(if pane == 0 { "Left places" } else { "Right places" }));
+        win.set_title(Some(if pane == 0 {
+            "Left places"
+        } else {
+            "Right places"
+        }));
         win.set_modal(true);
         win.set_transient_for(Some(&self.shell.window));
         win.set_default_width(420);
@@ -1344,7 +1600,9 @@ impl App {
     }
 
     fn hot_go(&mut self, index: usize, sender: &ComponentSender<Self>) {
-        let Some(mark) = self.cfg.bookmarks.get(index).cloned() else { return };
+        let Some(mark) = self.cfg.bookmarks.get(index).cloned() else {
+            return;
+        };
         if !rust_commander::hotlist::is_dir(&mark) || mark.path.as_os_str().is_empty() {
             return;
         }
@@ -1376,12 +1634,23 @@ impl App {
             .unwrap_or_else(|| path.display().to_string());
         let path_text = path.display().to_string();
         self.close_dialog();
-        let win = super::hotlist::add_dialog(&self.shell.window, &title, &path_text, sender.input_sender());
+        let win = super::hotlist::add_dialog(
+            &self.shell.window,
+            &title,
+            &path_text,
+            sender.input_sender(),
+        );
         win.present();
         self.dialog = Some(win);
     }
 
-    fn hot_added(&mut self, title: String, path: String, with_target: bool, sender: &ComponentSender<Self>) {
+    fn hot_added(
+        &mut self,
+        title: String,
+        path: String,
+        with_target: bool,
+        sender: &ComponentSender<Self>,
+    ) {
         self.close_dialog();
         let title = title.trim().to_string();
         let path = PathBuf::from(path.trim());
@@ -1393,7 +1662,12 @@ impl App {
         } else {
             std::path::PathBuf::new()
         };
-        self.cfg.bookmarks.push(Bookmark { name: title, path, target, kind: String::new() });
+        self.cfg.bookmarks.push(Bookmark {
+            name: title,
+            path,
+            target,
+            kind: String::new(),
+        });
         let _ = config::save(&self.cfg);
         if self.hot_stack.is_empty() {
             self.hot_stack = vec![None];
@@ -1403,7 +1677,9 @@ impl App {
 
     fn hot_remove(&mut self, sender: &ComponentSender<Self>) {
         let path = self.state.tab(self.state.active).path.clone();
-        let Some(index) = rust_commander::hotlist::dir_index(&self.cfg.bookmarks, &path) else { return };
+        let Some(index) = rust_commander::hotlist::dir_index(&self.cfg.bookmarks, &path) else {
+            return;
+        };
         self.cfg.bookmarks.remove(index);
         let _ = config::save(&self.cfg);
         for slot in &mut self.hot_stack {
@@ -1423,7 +1699,11 @@ impl App {
     fn hot_configure(&mut self, sender: &ComponentSender<Self>) {
         self.close_hot();
         self.close_dialog();
-        let win = super::hotlist::configure(&self.shell.window, self.cfg.bookmarks.clone(), sender.input_sender());
+        let win = super::hotlist::configure(
+            &self.shell.window,
+            self.cfg.bookmarks.clone(),
+            sender.input_sender(),
+        );
         win.present();
         self.dialog = Some(win);
     }
@@ -1434,7 +1714,6 @@ impl App {
         self.close_dialog();
     }
 
-
     fn sync(&mut self) {
         SYNCING.store(true, Ordering::Relaxed);
         if self.state.panel_terminal {
@@ -1443,7 +1722,8 @@ impl App {
         self.restamp_shells();
         let mut pending: [Option<Vec<Entry>>; 2] = [None, None];
         // First sync only paints the accent. A later focus change blinks that border, then it stays.
-        let focused_before = self.shell.panes.iter().any(|ui| ui.frame.has_css_class("pane-active"));
+        // That includes the keys coming back from the player, when no list had the accent.
+        let focused_before = self.accent_painted;
         for pane in 0..2 {
             let id = PaneId::from_index(pane);
             let active = self.state.active == id;
@@ -1452,36 +1732,59 @@ impl App {
             let path = self.state.tab(id).path.display().to_string();
             let cursor = self.state.tab(id).cursor;
             let filter_on = !self.state.pane(id).filter.is_empty();
-            let tab_titles: Vec<String> = self.state.pane(id).tabs.iter().map(|t| {
-                t.path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "/".into())
-            }).collect();
+            let tab_titles: Vec<String> = self
+                .state
+                .pane(id)
+                .tabs
+                .iter()
+                .map(|t| {
+                    t.path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "/".into())
+                })
+                .collect();
             let tab_active = self.state.pane(id).active;
             let pane_dirty = self.dirty[pane];
             let rows: Vec<(Entry, bool)> = if pane_dirty {
                 let vis = self.state.visible(id);
                 let dir = self.state.tab(id).path.clone();
                 let marked = self.state.tab(id).marked.clone();
-                vis.iter().map(|&i| {
-                    let entry = self.state.tab(id).entries[i].clone();
-                    let path = rust_commander::listing::entry_path(&dir, &entry);
-                    (entry, marked.contains(&path))
-                }).collect()
+                vis.iter()
+                    .map(|&i| {
+                        let entry = self.state.tab(id).entries[i].clone();
+                        let path = rust_commander::listing::entry_path(&dir, &entry);
+                        (entry, marked.contains(&path))
+                    })
+                    .collect()
             } else {
                 Vec::new()
             };
             let ui = &self.shell.panes[pane];
-            row::set_loading(&ui.list, self.loads.iter().any(|(live, _)| *live == self.state.tab(id).token));
-            let class = if active { "pane-active" } else { "pane" };
+            row::set_loading(
+                &ui.list,
+                self.loads
+                    .iter()
+                    .any(|(live, _)| *live == self.state.tab(id).token),
+            );
+            // While the small player has the keys, no list looks like the one they go to.
+            let class = if active && !self.audio_focused() {
+                "pane-active"
+            } else {
+                "pane"
+            };
             if !ui.frame.has_css_class(class) {
                 ui.frame.set_css_classes(&[class]);
-                if active && focused_before {
+                if class == "pane-active" && focused_before {
                     shell::blink_frame(&ui.frame, pane, true);
                 }
             }
             if !self.focus_inside(&ui.path) && ui.path.text().as_str() != path {
                 ui.path.set_text(&path);
             }
-            let show_filter = filter_on || ui.filter.has_focus() || gtk::prelude::WidgetExt::is_visible(&ui.filter);
+            let show_filter = filter_on
+                || ui.filter.has_focus()
+                || gtk::prelude::WidgetExt::is_visible(&ui.filter);
             if gtk::prelude::WidgetExt::is_visible(&ui.filter) != show_filter {
                 ui.filter.set_visible(show_filter);
             }
@@ -1500,9 +1803,17 @@ impl App {
             }
             if show_preview && !self.shell.editing.get() {
                 let (syntax, name) = self.preview_syntax();
-                if let Some(rev) = view::show_slot(ui, &self.preview, self.preview_shown[pane], self.quick_fit, syntax, &name) {
+                if let Some(rev) = view::show_slot(
+                    ui,
+                    &self.preview,
+                    self.preview_shown[pane],
+                    self.quick_fit,
+                    syntax,
+                    &name,
+                ) {
                     self.preview_shown[pane] = rev;
                 }
+                self.paint_audio();
             }
             let labels = tab_labels(&tab_titles, tab_active);
             if tabs_current(&ui.tabs) != labels {
@@ -1566,7 +1877,18 @@ impl App {
         self.sync_hints();
         self.paint_mode_bar();
         self.mark_drives();
+        self.accent_painted = true;
         SYNCING.store(false, Ordering::Relaxed);
+    }
+
+    // The music player on real files, through the real engine and ALSA's null device.
+    fn smoke_music(&mut self, errors: &mut Vec<String>, sender: &ComponentSender<Self>) {
+        if !rust_commander::audio::alsa_available() {
+            println!("SMOKE_MUSIC skipped: no ALSA library");
+            return;
+        }
+        self.smoke_player(errors, sender);
+        println!("SMOKE_MUSIC ran");
     }
 
     fn run_smoke(&mut self, sender: &ComponentSender<Self>) {
@@ -1574,7 +1896,15 @@ impl App {
             return;
         }
         let mut errors = Vec::new();
-        let want = ["F3 View", "F4 Edit", "F5 Copy", "F6 Move", "F7 Mkdir", "F8 Delete", "F12 Settings"];
+        let want = [
+            "F3 View",
+            "F4 Edit",
+            "F5 Copy",
+            "F6 Move",
+            "F7 Mkdir",
+            "F8 Delete",
+            "F12 Settings",
+        ];
         for label in want {
             if !self.shell.f_labels.iter().any(|have| have == label) {
                 errors.push(format!("missing {label}"));
@@ -1605,7 +1935,12 @@ impl App {
             let mut titles = Vec::new();
             let mut date_resizable = false;
             for i in 0..cols.n_items() {
-                let Some(col) = cols.item(i).and_then(|obj| obj.downcast::<gtk::ColumnViewColumn>().ok()) else { continue };
+                let Some(col) = cols
+                    .item(i)
+                    .and_then(|obj| obj.downcast::<gtk::ColumnViewColumn>().ok())
+                else {
+                    continue;
+                };
                 if let Some(title) = col.title() {
                     if title.contains("Date") {
                         date_resizable = col.is_resizable();
@@ -1633,14 +1968,22 @@ impl App {
             errors.push("arrow cursor".into());
         }
         for page in ["thumbs", "list"] {
-            self.on_key(Key::F1, ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK, sender);
-            if self.shell.panes[0].stack.visible_child_name().as_deref() != Some(page) || self.shell.panes[1].stack.visible_child_name().as_deref() != Some("list") {
+            self.on_key(
+                Key::F1,
+                ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK,
+                sender,
+            );
+            if self.shell.panes[0].stack.visible_child_name().as_deref() != Some(page)
+                || self.shell.panes[1].stack.visible_child_name().as_deref() != Some("list")
+            {
                 errors.push(format!("thumbnail toggle {page}"));
             }
         }
         self.state.active = PaneId::Right;
         self.sync();
-        if !self.shell.panes[1].frame.has_css_class("pane-active") || self.shell.panes[0].frame.has_css_class("pane-active") {
+        if !self.shell.panes[1].frame.has_css_class("pane-active")
+            || self.shell.panes[0].frame.has_css_class("pane-active")
+        {
             errors.push("tab frame".into());
         }
         self.state.active = PaneId::Left;
@@ -1658,8 +2001,14 @@ impl App {
         }
         self.state.navigate(PaneId::Left, left.clone(), true);
         self.reload_pane(PaneId::Left);
-        self.state.tab_mut(PaneId::Left).marked.insert(left.join("note.txt"));
-        self.state.tab_mut(PaneId::Left).marked.insert(left.join("sub"));
+        self.state
+            .tab_mut(PaneId::Left)
+            .marked
+            .insert(left.join("note.txt"));
+        self.state
+            .tab_mut(PaneId::Left)
+            .marked
+            .insert(left.join("sub"));
         self.sync();
         if !super::shell::shows(&self.shell.hints, rust_commander::commands::Act::Pack)
             || !super::shell::shows(&self.shell.hints, rust_commander::commands::Act::PackHere)
@@ -1676,20 +2025,38 @@ impl App {
             errors.push("Alt+F5 pack dialog".into());
         }
         self.close_dialog();
-        self.on_key(Key::F5, ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK, sender);
+        self.on_key(
+            Key::F5,
+            ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK,
+            sender,
+        );
         if self.dialog.is_none() {
             errors.push("Ctrl+Shift+F5 pack dialog".into());
         }
         self.close_dialog();
         let packed = right.join("smoke.zip");
-        self.confirm_pack(packed.clone(), rust_commander::pack::Options { level: 9, password: Some("smoke".into()), volume: None }, sender);
-        if !self.wait_job(sender) || !rust_commander::archive::list(&packed, None).is_ok_and(|listed| listed.needs_password) {
+        self.confirm_pack(
+            packed.clone(),
+            rust_commander::pack::Options {
+                level: 9,
+                password: Some("smoke".into()),
+                volume: None,
+            },
+            sender,
+        );
+        if !self.wait_job(sender)
+            || !rust_commander::archive::list(&packed, None)
+                .is_ok_and(|listed| listed.needs_password)
+        {
             errors.push("pack failed".into());
         }
         let _ = std::fs::remove_file(&packed);
         self.on_fkey(5, false, sender);
         self.on_submit(&right.display().to_string(), sender);
-        if !self.wait_job(sender) || !right.join("note.txt").is_file() || !right.join("sub/b.txt").is_file() {
+        if !self.wait_job(sender)
+            || !right.join("note.txt").is_file()
+            || !right.join("sub/b.txt").is_file()
+        {
             errors.push("copy failed".into());
         }
         self.reload_pane(PaneId::Left);
@@ -1706,7 +2073,10 @@ impl App {
         }
         self.on_fkey(6, false, sender);
         self.on_submit(&right.display().to_string(), sender);
-        if !self.wait_job(sender) || left.join("move-me.txt").exists() || !right.join("move-me.txt").is_file() {
+        if !self.wait_job(sender)
+            || left.join("move-me.txt").exists()
+            || !right.join("move-me.txt").is_file()
+        {
             errors.push("move failed".into());
         }
         self.reload_pane(PaneId::Right);
@@ -1726,7 +2096,10 @@ impl App {
         }
         self.on_fkey(5, false, sender);
         self.enqueue(&right.join("queued").display().to_string(), sender);
-        if !self.wait_job(sender) || !right.join("queued/move-me.txt").is_file() || !left.join("move-me.txt").is_file() {
+        if !self.wait_job(sender)
+            || !right.join("queued/move-me.txt").is_file()
+            || !left.join("move-me.txt").is_file()
+        {
             errors.push("queued copy failed".into());
         }
 
@@ -1765,37 +2138,57 @@ impl App {
             errors.push("missing note".into());
         }
         if let Some(path) = self.file_under_cursor() {
-            self.show_lister(self.lister_gen, view::read_lister(&path, self.charset), sender);
+            self.show_lister(
+                self.lister_gen,
+                view::read_lister(&path, self.charset),
+                sender,
+            );
         }
         let lister_text = self.lister.as_ref().map(|ui| {
             let buf = ui.view.buffer();
-            buf.text(&buf.start_iter(), &buf.end_iter(), false).to_string()
+            buf.text(&buf.start_iter(), &buf.end_iter(), false)
+                .to_string()
         });
-        if !lister_text.unwrap_or_default().contains("hello rust-commander") {
+        if !lister_text
+            .unwrap_or_default()
+            .contains("hello rust-commander")
+        {
             errors.push("lister text".into());
         }
-        let lister_refs = self.lister.as_ref().map(|ui| (ui.view.downgrade(), ui.view.buffer().downgrade()));
+        let lister_refs = self
+            .lister
+            .as_ref()
+            .map(|ui| (ui.view.downgrade(), ui.view.buffer().downgrade()));
         self.close_lister();
-        if lister_refs.is_some_and(|(view, buffer)| view.upgrade().is_some() || buffer.upgrade().is_some()) {
+        if lister_refs
+            .is_some_and(|(view, buffer)| view.upgrade().is_some() || buffer.upgrade().is_some())
+        {
             errors.push("lister view or buffer leaked after close".into());
         }
 
         self.state.quick_view = true;
         self.preview.generation = self.state.preview_gen;
-        self.preview.set_body(PreviewBody::Text("hello rust-commander\n".into()));
+        self.preview
+            .set_body(PreviewBody::Text("hello rust-commander\n".into()));
         self.sync();
         if self.shell.panes[1].stack.visible_child_name().as_deref() != Some("preview") {
             errors.push("quick view hidden".into());
         }
         let preview = self.shell.panes[1].preview.buffer();
-        if !preview.text(&preview.start_iter(), &preview.end_iter(), false).contains("hello rust-commander") {
+        if !preview
+            .text(&preview.start_iter(), &preview.end_iter(), false)
+            .contains("hello rust-commander")
+        {
             errors.push("quick view text".into());
         }
         let stale_gen = self.state.preview_gen;
         if !self.point_at(PaneId::Left, "move-me.txt") {
             errors.push("missing preview target".into());
         }
-        let mut slot = lister::PreviewSlot { generation: self.state.preview_gen, ..lister::PreviewSlot::default() };
+        let mut slot = lister::PreviewSlot {
+            generation: self.state.preview_gen,
+            ..lister::PreviewSlot::default()
+        };
         if lister::apply_preview(&mut slot, stale_gen, PreviewBody::Text("stale".into())) {
             errors.push("stale preview applied".into());
         }
@@ -1803,7 +2196,10 @@ impl App {
         self.preview.set_body(PreviewBody::Text("move\n".into()));
         self.sync();
         let preview = self.shell.panes[1].preview.buffer();
-        if !preview.text(&preview.start_iter(), &preview.end_iter(), false).contains("move") {
+        if !preview
+            .text(&preview.start_iter(), &preview.end_iter(), false)
+            .contains("move")
+        {
             errors.push("quick view follow".into());
         }
         self.state.quick_view = false;
@@ -1811,13 +2207,20 @@ impl App {
         if self.shell.panes[1].stack.visible_child_name().as_deref() != Some("list") {
             errors.push("quick view stayed".into());
         }
+        self.smoke_music(&mut errors, sender);
 
         self.toggle_settings(sender);
-        let shown = self.settings.as_ref().map(|ui| ui.columns.text().to_string());
+        let shown = self
+            .settings
+            .as_ref()
+            .map(|ui| ui.columns.text().to_string());
         if shown.as_deref() != Some("on") {
             errors.push("settings".into());
         }
-        let hidden = self.settings.as_ref().map(|ui| ui.hidden.text().to_string());
+        let hidden = self
+            .settings
+            .as_ref()
+            .map(|ui| ui.hidden.text().to_string());
         if hidden.as_deref() != Some("off") {
             errors.push("hidden files".into());
         }
@@ -1835,16 +2238,27 @@ impl App {
         }
         self.close_settings();
 
-        self.on_key(Key::S, ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK, sender);
+        self.on_key(
+            Key::S,
+            ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK,
+            sender,
+        );
         if self.search.is_none() {
             errors.push("search shortcut".into());
         }
-        self.on_search_event(self.search_gen, rust_commander::search::Event::Matches(vec![left.join("note.txt")]));
+        self.on_search_event(
+            self.search_gen,
+            rust_commander::search::Event::Matches(vec![left.join("note.txt")]),
+        );
         self.close_search();
         if self.search_state() != Some((false, 1)) {
             errors.push("closed search lost its results".into());
         }
-        self.on_key(Key::S, ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK, sender);
+        self.on_key(
+            Key::S,
+            ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK,
+            sender,
+        );
         if self.search_state() != Some((true, 1)) {
             errors.push("reopened search lost its results".into());
         }
@@ -1860,9 +2274,17 @@ impl App {
         filter.set_text("note");
         self.on_msg(Msg::FilterChanged(0, "note".into()), sender);
         self.sync();
-        if self.state.visible(PaneId::Left).iter().filter(|&&index| {
-            self.state.tab(PaneId::Left).entries[index].name.as_ref() == "note.txt"
-        }).count() != 1 || self.state.visible(PaneId::Left).len() != 2 {
+        if self
+            .state
+            .visible(PaneId::Left)
+            .iter()
+            .filter(|&&index| {
+                self.state.tab(PaneId::Left).entries[index].name.as_ref() == "note.txt"
+            })
+            .count()
+            != 1
+            || self.state.visible(PaneId::Left).len() != 2
+        {
             errors.push("quick filter matches".into());
         }
 
@@ -1896,7 +2318,9 @@ impl App {
 
     fn reload_pane(&mut self, id: PaneId) {
         let (path, token) = self.state.refresh(id);
-        let Ok(entries) = rust_commander::listing::read_dir(&path) else { return };
+        let Ok(entries) = rust_commander::listing::read_dir(&path) else {
+            return;
+        };
         let tab = self.state.pane(id).active;
         self.state.apply_listing(id, tab, token, entries);
         self.touch(id);
@@ -1999,10 +2423,14 @@ impl App {
         }
         ui.filter.set_visible(true);
         ui.filter.grab_focus();
+        self.dirs_soon();
     }
 
     fn focused_filter(&self) -> Option<usize> {
-        self.shell.panes.iter().position(|ui| self.focus_inside(&ui.filter))
+        self.shell
+            .panes
+            .iter()
+            .position(|ui| self.focus_inside(&ui.filter))
     }
 
     fn focus_path(&mut self) {
@@ -2011,11 +2439,16 @@ impl App {
     }
 
     fn path_focused(&self) -> bool {
-        self.shell.panes.iter().any(|ui| self.focus_inside(&ui.path))
+        self.shell
+            .panes
+            .iter()
+            .any(|ui| self.focus_inside(&ui.path))
     }
 
     fn focus_inside(&self, ancestor: &impl IsA<gtk::Widget>) -> bool {
-        let Some(focus) = gtk::prelude::GtkWindowExt::focus(&self.shell.window) else { return false };
+        let Some(focus) = gtk::prelude::GtkWindowExt::focus(&self.shell.window) else {
+            return false;
+        };
         let ancestor = ancestor.clone().upcast::<gtk::Widget>();
         let mut current: Option<gtk::Widget> = Some(focus);
         while let Some(widget) = current {
@@ -2028,7 +2461,12 @@ impl App {
     }
 
     fn complete_focused_path(&mut self) -> bool {
-        let Some(pane) = self.shell.panes.iter().position(|ui| self.focus_inside(&ui.path)) else {
+        let Some(pane) = self
+            .shell
+            .panes
+            .iter()
+            .position(|ui| self.focus_inside(&ui.path))
+        else {
             return false;
         };
         let text = self.shell.panes[pane].path.text().to_string();
@@ -2049,14 +2487,36 @@ impl App {
         for pane in 0..2 {
             let ui = &self.shell.panes[pane];
             if self.focus_inside(&ui.path) {
-                let shown = self.state.tab(PaneId::from_index(pane)).path.display().to_string();
+                let shown = self
+                    .state
+                    .tab(PaneId::from_index(pane))
+                    .path
+                    .display()
+                    .to_string();
                 ui.path.set_text(&shown);
             }
         }
         self.focus_list();
     }
 
+    fn unreachable_note(&self, err: &str) -> Option<String> {
+        let mut mounts: Vec<_> = self.shell.drive_snapshot.0.iter().filter(|mount| mount.network).collect();
+        mounts.extend(self.shell.down.iter());
+        mounts.sort_by_key(|mount| std::cmp::Reverse(mount.path.as_os_str().len()));
+        mounts
+            .into_iter()
+            .find(|mount| rust_commander::places::link_lost(err, &mount.path))
+            .map(|mount| unreachable(&mount.label))
+    }
+
     fn goto_mount(&mut self, pane: usize, path: PathBuf, sender: &ComponentSender<Self>) {
+        if let Some(label) = self.shell.down.iter().find(|mount| mount.path == path).map(|mount| mount.label.clone()) {
+            self.status = unreachable(&label);
+            if let Some((_, button)) = self.shell.drives.iter().find(|(mount, _)| mount == &path) {
+                shell::blink_drive(button);
+            }
+            return;
+        }
         let id = PaneId::from_index(pane);
         self.state.active = id;
         self.shell.active.set(pane);
@@ -2070,9 +2530,17 @@ impl App {
     }
 
     fn refresh_drives(&mut self, sender: &ComponentSender<Self>) {
-        let Some(gone) = shell::rebuild_drives(&mut self.shell, sender.input_sender(), &self.cfg.icon_pack) else {
+        let known: Vec<std::path::PathBuf> = self.shell.down.iter().map(|mount| mount.path.clone()).collect();
+        let Some(gone) =
+            shell::rebuild_drives(&mut self.shell, sender.input_sender(), &self.cfg.icon_pack)
+        else {
             return;
         };
+        for mount in &self.shell.down {
+            if !known.iter().any(|path| path == &mount.path) {
+                self.status = unreachable(&mount.label);
+            }
+        }
         // A pane left on a vanished mount would show a dead folder.
         for id in [PaneId::Left, PaneId::Right] {
             let path = self.state.tab(id).path.clone();
@@ -2087,7 +2555,12 @@ impl App {
 
     fn mark_drives(&self) {
         let dir = &self.state.tab(self.state.active).path;
-        let mounts: Vec<&Path> = self.shell.drives.iter().map(|(path, _)| path.as_path()).collect();
+        let mounts: Vec<&Path> = self
+            .shell
+            .drives
+            .iter()
+            .map(|(path, _)| path.as_path())
+            .collect();
         let hit = rust_commander::places::current_mount(&mounts, dir);
         for (index, (_, button)) in self.shell.drives.iter().enumerate() {
             let on = hit == Some(index);
@@ -2113,8 +2586,14 @@ impl App {
         let (dest, path, token) = self.state.mirror_to_other();
         let tab = self.state.pane(dest).active;
         self.spawn_load(sender, dest, tab, path, token);
-        // The other pane has no accent, so the blink must not require pane-active.
-        shell::blink_frame(&self.shell.panes[dest.index()].frame, dest.index(), false);
+        // Quick view keeps the other pane as its preview, so focus stays put there.
+        if self.state.quick_view {
+            shell::blink_frame(&self.shell.panes[dest.index()].frame, dest.index(), false);
+            return;
+        }
+        // The keys point at the other pane, so focus follows. Sync blinks the pane as it takes the accent.
+        self.state.active = dest;
+        self.focus_list();
     }
 
     fn move_list(&mut self, delta: isize) {
@@ -2142,7 +2621,11 @@ impl App {
             return if page { 20 } else { 1 };
         }
         let (cols, rows) = row::grid_shape(&self.shell.panes[self.state.active.index()].grid);
-        (if page { cols * rows.saturating_sub(1).max(1) } else { cols }) as isize
+        (if page {
+            cols * rows.saturating_sub(1).max(1)
+        } else {
+            cols
+        }) as isize
     }
 
     fn toggle_thumbs(&mut self) {
@@ -2169,11 +2652,14 @@ impl App {
     }
 }
 
-
 fn launch_default(path: &Path) -> Result<(), String> {
     let file = gtk::gio::File::for_path(path);
     let mime = file
-        .query_info("standard::content-type", gtk::gio::FileQueryInfoFlags::NONE, gtk::gio::Cancellable::NONE)
+        .query_info(
+            "standard::content-type",
+            gtk::gio::FileQueryInfoFlags::NONE,
+            gtk::gio::Cancellable::NONE,
+        )
         .ok()
         .and_then(|info| info.content_type().map(|kind| kind.to_string()));
     let Some(mime) = mime else {
@@ -2182,7 +2668,10 @@ fn launch_default(path: &Path) -> Result<(), String> {
     let Some(app) = gtk::gio::AppInfo::default_for_type(&mime, false) else {
         return spawn_argv(&rust_commander::external::viewer_argv("", path));
     };
-    let line = app.commandline().map(|cmd| cmd.to_string_lossy().into_owned()).unwrap_or_default();
+    let line = app
+        .commandline()
+        .map(|cmd| cmd.to_string_lossy().into_owned())
+        .unwrap_or_default();
     if line.contains("--started-from-file") {
         let argv = rust_commander::external::desktop_argv(&line, path);
         if !argv.is_empty() {
@@ -2202,7 +2691,9 @@ fn spawn_argv(argv: &[std::ffi::OsString]) -> Result<(), String> {
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::null());
-    let mut child = cmd.spawn().map_err(|err| format!("Cannot start {}: {err}", argv[0].to_string_lossy()))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|err| format!("Cannot start {}: {err}", argv[0].to_string_lossy()))?;
     // Reap the child so it does not stay as a zombie until we exit.
     std::thread::spawn(move || {
         let _ = child.wait();
@@ -2210,12 +2701,24 @@ fn spawn_argv(argv: &[std::ffi::OsString]) -> Result<(), String> {
     Ok(())
 }
 
+fn unreachable(label: &str) -> String {
+    format!("{label} is not reachable")
+}
+
 // Rows live in the inner list, which owns list.scroll-to-item.
 // Gives up when no new name arrived for this long. A slow read that still moves keeps going.
 const STALL: Duration = Duration::from_secs(20);
 
 // A read blocked in the kernel cannot be killed. The thread is left behind and its answer is dropped.
-fn watch_load(tx: &relm4::Sender<Msg>, pane: usize, tab: usize, token: u64, path: &Path, stop: &Arc<AtomicBool>, seen: &Arc<AtomicU64>) {
+fn watch_load(
+    tx: &relm4::Sender<Msg>,
+    pane: usize,
+    tab: usize,
+    token: u64,
+    path: &Path,
+    stop: &Arc<AtomicBool>,
+    seen: &Arc<AtomicU64>,
+) {
     let (tx, stop, seen) = (tx.clone(), Arc::clone(stop), Arc::clone(seen));
     let shown = path.display().to_string();
     let mut last = 0;
@@ -2226,7 +2729,7 @@ fn watch_load(tx: &relm4::Sender<Msg>, pane: usize, tab: usize, token: u64, path
         let now = seen.load(Ordering::Relaxed);
         if now == last {
             let err = format!("No answer from {shown} in {}s, gave up", STALL.as_secs());
-            tx.emit(Msg::Listed(pane, tab, token, Err(err)));
+            tx.emit(Msg::Listed(pane, tab, token, Err(err), None));
             return gtk::glib::ControlFlow::Break;
         }
         last = now;
@@ -2252,13 +2755,15 @@ fn reveal_row(list: &gtk::ColumnView, pos: u32) {
     let arg = gtk::glib::Variant::from(pos);
     let mut child = list.first_child();
     while let Some(widget) = child {
-        if widget.activate_action("list.scroll-to-item", Some(&arg)).is_ok() {
+        if widget
+            .activate_action("list.scroll-to-item", Some(&arg))
+            .is_ok()
+        {
             return;
         }
         child = widget.next_sibling();
     }
 }
-
 
 // Tab fills the next directory name. One match is finished with a slash. Several matches share their prefix, or the names are shown.
 fn complete_path(current: &Path, text: &str) -> Result<String, String> {
@@ -2312,9 +2817,17 @@ fn listing_dir(current: &Path, base: &str) -> Result<PathBuf, String> {
         home_dir().join(rest)
     } else {
         let raw = PathBuf::from(trimmed);
-        if raw.is_absolute() { raw } else { current.join(raw) }
+        if raw.is_absolute() {
+            raw
+        } else {
+            current.join(raw)
+        }
     };
-    if raw.is_dir() { Ok(raw) } else { Err("No match".into()) }
+    if raw.is_dir() {
+        Ok(raw)
+    } else {
+        Err("No match".into())
+    }
 }
 
 fn dir_names(dir: &Path, prefix: &str) -> Result<Vec<String>, String> {
@@ -2339,7 +2852,11 @@ fn common_prefix(names: &[String]) -> String {
     let mut prefix: Vec<char> = names[0].chars().collect();
     for name in &names[1..] {
         let chars: Vec<char> = name.chars().collect();
-        let len = prefix.iter().zip(chars.iter()).take_while(|(a, b)| a == b).count();
+        let len = prefix
+            .iter()
+            .zip(chars.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
         prefix.truncate(len);
     }
     prefix.into_iter().collect()
@@ -2358,7 +2875,11 @@ fn typed_dir(current: &Path, text: &str) -> Result<PathBuf, String> {
     } else {
         PathBuf::from(text)
     };
-    let path = if raw.is_absolute() { raw } else { current.join(&raw) };
+    let path = if raw.is_absolute() {
+        raw
+    } else {
+        current.join(&raw)
+    };
     let path = std::fs::canonicalize(&path).map_err(|_| format!("Not a directory: {text}"))?;
     if path.is_dir() {
         Ok(path)
@@ -2371,7 +2892,13 @@ fn tab_labels(titles: &[String], active: usize) -> Vec<String> {
     titles
         .iter()
         .enumerate()
-        .map(|(i, title)| if i == active { format!("[{title}]") } else { title.clone() })
+        .map(|(i, title)| {
+            if i == active {
+                format!("[{title}]")
+            } else {
+                title.clone()
+            }
+        })
         .collect()
 }
 
@@ -2387,11 +2914,13 @@ fn tabs_current(tabs: &gtk::Box) -> Vec<String> {
     out
 }
 
-
 // What a copy or move acts on, as a short name for dialog headings.
 fn describe(paths: &[PathBuf]) -> String {
     match paths {
-        [one] => one.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
+        [one] => one
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
         many => format!("{} items", many.len()),
     }
 }
@@ -2408,13 +2937,21 @@ fn on_usr1(_: i32) {
 
 // Omarchy swaps its theme directory and then rewrites theme.name, so watch the parent.
 fn watch_omarchy_theme() {
-    let Some(dir) = theme::omarchy_current() else { return };
+    let Some(dir) = theme::omarchy_current() else {
+        return;
+    };
     let file = gtk::gio::File::for_path(dir);
-    let Ok(monitor) = file.monitor_directory(gtk::gio::FileMonitorFlags::NONE, gtk::gio::Cancellable::NONE) else {
+    let Ok(monitor) = file.monitor_directory(
+        gtk::gio::FileMonitorFlags::NONE,
+        gtk::gio::Cancellable::NONE,
+    ) else {
         return;
     };
     monitor.connect_changed(|_, changed, _, _| {
-        if changed.basename().is_some_and(|name| name.to_str() == Some("theme.name")) {
+        if changed
+            .basename()
+            .is_some_and(|name| name.to_str() == Some("theme.name"))
+        {
             USR1.store(true, Ordering::Relaxed);
         }
     });
@@ -2451,7 +2988,10 @@ fn released(name: &str, result: Result<(), String>) -> String {
 }
 
 fn home_dir() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).filter(|p| p.exists()).unwrap_or_else(|| PathBuf::from("/"))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 fn smoke_dirs() -> (PathBuf, PathBuf) {
@@ -2464,7 +3004,38 @@ fn smoke_dirs() -> (PathBuf, PathBuf) {
     let _ = std::fs::write(left.join("note.txt"), "hello rust-commander\n");
     let _ = std::fs::write(left.join("sub").join("b.txt"), "nested\n");
     let _ = std::fs::write(left.join("move-me.txt"), "move\n");
+    let _ = std::fs::write(left.join("tone.wav"), tone_wav(1));
+    let _ = std::fs::write(left.join("tone2.wav"), tone_wav(20));
+    let _ = std::fs::write(left.join("tone3.wav"), tone_wav(20));
+    let _ = std::fs::write(left.join("sub").join("other.wav"), tone_wav(20));
+    let _ = std::fs::write(left.join("sub").join("other2.wav"), tone_wav(20));
     (left, right)
+}
+
+// Tenths of a second of 440 Hz as a mono 8 kHz WAV, for the music smoke test.
+fn tone_wav(tenths: u32) -> Vec<u8> {
+    let rate = 8000u32;
+    let samples: Vec<u8> = (0..rate / 10 * tenths)
+        .flat_map(|i| {
+            (((i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 8000.0) as i16)
+                .to_le_bytes()
+        })
+        .collect();
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + samples.len() as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&rate.to_le_bytes());
+    wav.extend_from_slice(&(rate * 2).to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&samples);
+    wav
 }
 
 #[cfg(test)]
@@ -2474,7 +3045,10 @@ mod path_complete {
     use std::path::PathBuf;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("rust-commander-complete-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "rust-commander-complete-{name}-{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("Documents")).unwrap();
         fs::create_dir_all(dir.join("Downloads")).unwrap();

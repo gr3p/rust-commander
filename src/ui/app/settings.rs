@@ -334,6 +334,38 @@ impl App {
         let (mark_row, mark_color) = color_picker("Mark color (Space)", &palette.mark, &self.cfg.mark_color, Msg::MarkColor, tx.clone());
         let blink_theme = theme::blink_color(&palette);
         let (blink_row, blink_color) = color_picker("Blink color", &blink_theme, &self.cfg.blink_color, Msg::BlinkColor, tx.clone());
+        let blink_speed_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        blink_speed_row.add_css_class("settings-row");
+        let blink_speed_name = gtk::Label::new(Some("Blink speed"));
+        blink_speed_name.set_xalign(0.0);
+        blink_speed_name.set_tooltip_text(Some("50 is the original speed. Higher is faster."));
+        let blink_speed = gtk::Scale::with_range(gtk::Orientation::Horizontal, 10.0, 100.0, 1.0);
+        blink_speed.set_value(f64::from(self.cfg.blink_speed.clamp(10, 100)));
+        blink_speed.set_digits(0);
+        blink_speed.set_hexpand(true);
+        blink_speed.set_draw_value(true);
+        blink_speed.set_value_pos(gtk::PositionType::Right);
+        blink_speed.set_tooltip_text(Some("50 is the original speed. Higher is faster."));
+        let tx_blink_speed = tx.clone();
+        blink_speed.connect_value_changed(move |scale| tx_blink_speed.emit(Msg::BlinkSpeed(scale.value().round() as u8)));
+        blink_speed_row.append(&blink_speed_name);
+        blink_speed_row.append(&blink_speed);
+        let blink_count_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        blink_count_row.add_css_class("settings-row");
+        let blink_count_name = gtk::Label::new(Some("Blinks"));
+        blink_count_name.set_xalign(0.0);
+        blink_count_name.set_tooltip_text(Some("3 is the original."));
+        let blink_count = gtk::Scale::with_range(gtk::Orientation::Horizontal, 1.0, 8.0, 1.0);
+        blink_count.set_value(f64::from(self.cfg.blink_count.clamp(1, 8)));
+        blink_count.set_digits(0);
+        blink_count.set_hexpand(true);
+        blink_count.set_draw_value(true);
+        blink_count.set_value_pos(gtk::PositionType::Right);
+        blink_count.set_tooltip_text(Some("3 is the original."));
+        let tx_blink_count = tx.clone();
+        blink_count.connect_value_changed(move |scale| tx_blink_count.emit(Msg::BlinkCount(scale.value().round() as u8)));
+        blink_count_row.append(&blink_count_name);
+        blink_count_row.append(&blink_count);
         let (cursor_text_row, cursor_text_color) =
             color_picker("Cursor text color", &palette.cursor_text, &self.cfg.cursor_text_color, Msg::CursorTextColor, tx.clone());
         let cursor_alpha_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -356,6 +388,8 @@ impl App {
         look.append(&cursor_text_row);
         look.append(&mark_row);
         look.append(&blink_row);
+        look.append(&blink_speed_row);
+        look.append(&blink_count_row);
         look.append(&section("Style"));
         look.append(&icon_row);
         look.append(&image_row);
@@ -367,8 +401,9 @@ impl App {
         column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         column.append(&commands_row(tx.clone()));
         let about = about_page();
+        let (music, music_ui) = super::music::music_page(&self.cfg, &tx);
         let tabs = gtk::Notebook::new();
-        for (title, page) in [("General", &column), ("Theme and colors", &look), ("About", &about)] {
+        for (title, page) in [("General", &column), ("Theme and colors", &look), ("Music", &music), ("About", &about)] {
             let label = gtk::Label::new(Some(title));
             let flash = label.clone();
             let click = gtk::GestureClick::new();
@@ -386,10 +421,11 @@ impl App {
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let keys_win = win.clone();
-        keys.connect_key_pressed(move |_, key, _, _| {
+        keys.connect_key_pressed(move |_, key, _, mods| {
             let on_control = focused_control(&keys_win);
             match key {
                 Key::F1 => tx.emit(Msg::ShowCommands),
+                Key::F12 if crate::ui::shell::claim_f12(key, mods) => return gtk::glib::Propagation::Stop,
                 Key::Escape | Key::F12 => tx.emit(Msg::CloseSettings),
                 Key::Return | Key::KP_Enter | Key::space | Key::KP_Space if !on_control => tx.emit(Msg::ToggleAutoColumns),
                 Key::h | Key::H if !on_control => tx.emit(Msg::ToggleHidden),
@@ -399,6 +435,7 @@ impl App {
             }
             gtk::glib::Propagation::Stop
         });
+        keys.connect_key_released(|_, key, _, _| crate::ui::shell::release_f12(key));
         win.add_controller(keys);
         win.present();
         win.grab_focus();
@@ -432,6 +469,7 @@ impl App {
             icon_pack,
             icon_pack_ids,
             icon_pack_guard,
+            music: music_ui,
         });
     }
 
@@ -777,6 +815,26 @@ impl App {
         self.colors_changed();
     }
 
+    pub(in crate::ui::app) fn set_blink_speed(&mut self, speed: u8) {
+        let speed = speed.clamp(10, 100);
+        if self.cfg.blink_speed == speed {
+            return;
+        }
+        self.cfg.blink_speed = speed;
+        let _ = config::save(&self.cfg);
+        crate::ui::shell::set_blink_speed(speed);
+    }
+
+    pub(in crate::ui::app) fn set_blink_count(&mut self, count: u8) {
+        let count = count.clamp(1, 8);
+        if self.cfg.blink_count == count {
+            return;
+        }
+        self.cfg.blink_count = count;
+        let _ = config::save(&self.cfg);
+        crate::ui::shell::set_blink_count(count);
+    }
+
     fn colors_changed(&self) {
         let _ = config::save(&self.cfg);
         self.restyle();
@@ -841,7 +899,7 @@ fn overrides_text(cfg: &config::Config) -> String {
     if own.is_empty() { "No custom colors. Everything follows the theme.".into() } else { format!("Your own colors on top of the theme: {}.", own.join(", ")) }
 }
 
-fn note(text: &str) -> gtk::Label {
+pub(in crate::ui::app) fn note(text: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(text));
     label.set_wrap(true);
     label.set_xalign(0.0);
@@ -884,7 +942,7 @@ fn about_page() -> gtk::Box {
     page
 }
 
-fn section(title: &str) -> gtk::Label {
+pub(in crate::ui::app) fn section(title: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(title));
     label.add_css_class("dialog-title");
     label.set_xalign(0.0);

@@ -480,6 +480,8 @@ const CP437: &str = "\u{00c7}\u{00fc}\u{00e9}\u{00e2}\u{00e4}\u{00e0}\u{00e5}\u{
 pub enum PreviewBody {
     Text(String),
     Image { width: u32, height: u32, pixels: Vec<u8> },
+    /// The music player fills the preview pane.
+    Audio,
 }
 
 impl Default for PreviewBody {
@@ -504,7 +506,7 @@ impl PreviewSlot {
     pub fn text(&self) -> &str {
         match &self.body {
             PreviewBody::Text(text) => text,
-            PreviewBody::Image { .. } => "",
+            PreviewBody::Image { .. } | PreviewBody::Audio => "",
         }
     }
 }

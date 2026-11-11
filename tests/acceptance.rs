@@ -10,9 +10,13 @@ use rust_commander::external;
 use rust_commander::imageview;
 use rust_commander::lister::{self, Charset, PreviewBody, ViewMode};
 use rust_commander::listing::{self, SortKey};
+use rust_commander::mount;
 use rust_commander::ops::{self, Choice, Kind};
 use rust_commander::search::{self, Event, Options};
+use rust_commander::sfv;
+use rust_commander::sizes;
 use rust_commander::state::{AppState, PaneId};
+use rust_commander::sum;
 use rust_commander::theme;
 
 fn main() {
@@ -130,9 +134,13 @@ const MEMORY: &[(&str, fn() -> Result<(), String>)] = &[
     ("image_step_stops_at_end", image_step_stops_at_end),
     ("image_decode_png_and_scales", image_decode_png_and_scales),
     ("heic_container_says_no_decoder", heic_container_says_no_decoder),
+    ("psd_container_says_no_decoder", psd_container_says_no_decoder),
     ("lister_ansi_and_ascii", lister_ansi_and_ascii),
     ("lister_pretty_json", lister_pretty_json),
     ("hotlist_accel_submenu", hotlist_accel_submenu),
+    ("mount_point_only_under_mnt", mount_point_only_under_mnt),
+    ("mount_names_refuse_tricks", mount_names_refuse_tricks),
+    ("point_name_is_always_valid", point_name_is_always_valid),
 ];
 
 const FS: &[&str] = &[
@@ -165,6 +173,14 @@ const FS: &[&str] = &[
     "non_utf8_name_is_kept",
     "cancelled_folder_copy_stays_private",
     "unreadable_entry_keeps_listing",
+    "delete_symlink_keeps_target",
+    "delete_tree_keeps_outside_and_siblings",
+    "new_names_are_checked",
+    "folder_bytes_skips_symlinks",
+    "checksum_detects_change_and_missing",
+    "checksum_refuses_paths_outside_folder",
+    "sfv_roundtrip_and_symlink_outside",
+    "atomic_write_keeps_mode_and_link",
 ];
 
 fn dispatch(name: &str, dir: &Path) -> Result<(), String> {
@@ -198,6 +214,14 @@ fn dispatch(name: &str, dir: &Path) -> Result<(), String> {
         "non_utf8_name_is_kept" => non_utf8_name_is_kept(dir),
         "cancelled_folder_copy_stays_private" => cancelled_folder_copy_stays_private(dir),
         "unreadable_entry_keeps_listing" => unreadable_entry_keeps_listing(dir),
+        "delete_symlink_keeps_target" => delete_symlink_keeps_target(dir),
+        "delete_tree_keeps_outside_and_siblings" => delete_tree_keeps_outside_and_siblings(dir),
+        "new_names_are_checked" => new_names_are_checked(dir),
+        "folder_bytes_skips_symlinks" => folder_bytes_skips_symlinks(dir),
+        "checksum_detects_change_and_missing" => checksum_detects_change_and_missing(dir),
+        "checksum_refuses_paths_outside_folder" => checksum_refuses_paths_outside_folder(dir),
+        "sfv_roundtrip_and_symlink_outside" => sfv_roundtrip_and_symlink_outside(dir),
+        "atomic_write_keeps_mode_and_link" => atomic_write_keeps_mode_and_link(dir),
         other => Err(format!("unknown case {other}")),
     }
 }
@@ -260,6 +284,8 @@ fn file_icons_by_kind() -> Result<(), String> {
     eq(imageview::is_image("shot.JFIF"), true, "jfif image")?;
     eq(imageview::is_image("photo.heic"), true, "heic image")?;
     eq(listing::file_icon("photo.heic", false, false), "image-x-generic-symbolic", "heic icon")?;
+    eq(imageview::is_image("layer.psd"), true, "psd image")?;
+    eq(listing::file_icon("layer.psb", false, false), "image-x-generic-symbolic", "psb icon")?;
     eq(listing::file_icon("doc.pdf", false, false), "application-pdf", "pdf")?;
     eq(listing::is_pdf("doc.PDF"), true, "pdf kind")?;
     eq(listing::file_icon("data.bin", false, false), "text-x-generic-symbolic", "other")
@@ -930,6 +956,28 @@ fn heic_container_says_no_decoder() -> Result<(), String> {
         return Err(junk_err);
     }
     Ok(())
+}
+
+fn psd_container_says_no_decoder() -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("rust-commander-psd-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).map_err(s)?;
+    let psd = dir.join("flat.jpg");
+    // Mislabeled Photoshop document. Version 1 is PSD.
+    fs::write(&psd, b"8BPS\x00\x01rest-of-header").map_err(s)?;
+    let err = match imageview::decode(&psd, imageview::MAX_EDGE) {
+        Err(err) => err,
+        Ok(_) => return Err("psd decoded".into()),
+    };
+    let psb = dir.join("big.psb");
+    fs::write(&psb, b"8BPS\x00\x02rest-of-header").map_err(s)?;
+    let psb_err = match imageview::decode(&psb, imageview::MAX_EDGE) {
+        Err(err) => err,
+        Ok(_) => return Err("psb decoded".into()),
+    };
+    let _ = fs::remove_dir_all(&dir);
+    eq(err, "PSD image, no decoder".into(), "psd message")?;
+    eq(psb_err, "PSB image, no decoder".into(), "psb message")
 }
 
 fn image_decode_png_and_scales() -> Result<(), String> {
@@ -1608,6 +1656,231 @@ fn unreadable_entry_keeps_listing(dir: &Path) -> Result<(), String> {
         .collect();
     names.sort();
     eq(names, vec![("note".into(), false), ("sub".into(), true)], "entries")
+}
+
+fn delete_symlink_keeps_target(dir: &Path) -> Result<(), String> {
+    let target = dir.join("target");
+    fs::create_dir(&target).map_err(s)?;
+    fs::write(target.join("keep.txt"), b"keep").map_err(s)?;
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&target, &link).map_err(s)?;
+    let dangling = dir.join("dangling");
+    std::os::unix::fs::symlink(dir.join("nowhere"), &dangling).map_err(s)?;
+    ops::remove_paths(&[link.clone(), dangling.clone()], &AtomicBool::new(false), &mut |_| {}).map_err(s)?;
+    if fs::symlink_metadata(&link).is_ok() || fs::symlink_metadata(&dangling).is_ok() {
+        return Err("link remains".into());
+    }
+    eq(fs::read(target.join("keep.txt")).map_err(s)?, b"keep".to_vec(), "target file")
+}
+
+fn delete_tree_keeps_outside_and_siblings(dir: &Path) -> Result<(), String> {
+    let outside = dir.join("outside");
+    fs::create_dir(&outside).map_err(s)?;
+    fs::write(outside.join("keep.txt"), b"outside").map_err(s)?;
+    fs::write(dir.join("sibling.txt"), b"sibling").map_err(s)?;
+    let tree = dir.join("tree");
+    fs::create_dir_all(tree.join("deep/er")).map_err(s)?;
+    fs::write(tree.join("deep/er/f.txt"), b"gone").map_err(s)?;
+    std::os::unix::fs::symlink(&outside, tree.join("deep/to_outside")).map_err(s)?;
+    let report = ops::remove_paths(&[tree.clone()], &AtomicBool::new(false), &mut |_| {}).map_err(s)?;
+    if report.cancelled || tree.exists() {
+        return Err("tree remains".into());
+    }
+    eq(fs::read(outside.join("keep.txt")).map_err(s)?, b"outside".to_vec(), "outside file")?;
+    eq(fs::read(dir.join("sibling.txt")).map_err(s)?, b"sibling".to_vec(), "sibling")
+}
+
+fn new_names_are_checked(dir: &Path) -> Result<(), String> {
+    let sub = dir.join("sub");
+    fs::create_dir(&sub).map_err(s)?;
+    for bad in ["", ".", "..", "a/b", "../escape", "a\\b"] {
+        if ops::make_file(&sub, bad).is_ok() {
+            return Err(format!("make_file accepted {bad:?}"));
+        }
+    }
+    for bad in ["..", "../escape", "a/b"] {
+        if ops::make_dir(&sub, bad).is_ok() {
+            return Err(format!("make_dir accepted {bad:?}"));
+        }
+    }
+    if dir.join("escape").exists() || fs::read_dir(&sub).map_err(s)?.next().is_some() {
+        return Err("a rejected name created something".into());
+    }
+    let file = ops::make_file(&sub, "f.txt").map_err(s)?;
+    fs::write(&file, b"keep").map_err(s)?;
+    let folder = ops::make_dir(&sub, "d").map_err(s)?;
+    fs::write(folder.join("inner"), b"keep").map_err(s)?;
+    if ops::make_file(&sub, "f.txt").is_ok() || ops::make_dir(&sub, "d").is_ok() || ops::make_dir(&sub, "f.txt").is_ok() {
+        return Err("existing name accepted".into());
+    }
+    eq(fs::read(&file).map_err(s)?, b"keep".to_vec(), "file")?;
+    eq(fs::read(folder.join("inner")).map_err(s)?, b"keep".to_vec(), "folder file")
+}
+
+fn folder_bytes_skips_symlinks(dir: &Path) -> Result<(), String> {
+    let none = AtomicBool::new(false);
+    let outside = dir.join("outside");
+    fs::create_dir(&outside).map_err(s)?;
+    fs::write(outside.join("big"), vec![0u8; 100]).map_err(s)?;
+    let tree = dir.join("tree");
+    fs::create_dir_all(tree.join("sub")).map_err(s)?;
+    fs::write(tree.join("a"), b"123").map_err(s)?;
+    fs::write(tree.join("sub/b"), b"4567").map_err(s)?;
+    std::os::unix::fs::symlink(&outside, tree.join("link")).map_err(s)?;
+    eq(sizes::folder_bytes(&tree, &none).map_err(s)?, 7, "tree")?;
+    eq(sizes::folder_bytes(&tree.join("a"), &none).map_err(s)?, 3, "file")?;
+    if sizes::folder_bytes(&tree.join("link"), &none).is_ok() {
+        return Err("symlink root accepted".into());
+    }
+    if sizes::folder_bytes(&tree, &AtomicBool::new(true)).is_ok() {
+        return Err("cancel ignored".into());
+    }
+    Ok(())
+}
+
+const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+fn checksum_detects_change_and_missing(dir: &Path) -> Result<(), String> {
+    let none = AtomicBool::new(false);
+    fs::write(dir.join("a.txt"), b"abc").map_err(s)?;
+    fs::create_dir(dir.join("sub")).map_err(s)?;
+    fs::write(dir.join("sub/b.txt"), b"def").map_err(s)?;
+    let sums = dir.join("SUMS.sha256");
+    let sources = [dir.join("a.txt"), dir.join("sub")];
+    let made = sum::create(sum::Kind::Sha256, dir, &sources, &sums, &none, &mut |_| {}).map_err(|e| e.to_string())?;
+    eq(made.files, 2, "files hashed")?;
+    let text = fs::read_to_string(&sums).map_err(s)?;
+    if !text.contains(&format!("{ABC_SHA256}  a.txt\n")) || !text.contains("  sub/b.txt\n") {
+        return Err(format!("checksum file: {text:?}"));
+    }
+    let checked = sum::verify(&sums, &none, &mut |_| {}).map_err(|e| e.to_string())?;
+    eq(checked.files, 2, "files verified")?;
+    fs::write(dir.join("a.txt"), b"abd").map_err(s)?;
+    let err = sum::verify(&sums, &none, &mut |_| {}).err().ok_or("changed file passed")?.to_string();
+    if !err.contains("mismatch  a.txt") {
+        return Err(format!("mismatch message: {err}"));
+    }
+    fs::remove_file(dir.join("sub/b.txt")).map_err(s)?;
+    let err = sum::verify(&sums, &none, &mut |_| {}).err().ok_or("missing file passed")?.to_string();
+    if !err.contains("missing  sub/b.txt") {
+        return Err(format!("missing message: {err}"));
+    }
+    fs::write(&sums, b"not a checksum line\n").map_err(s)?;
+    if sum::verify(&sums, &none, &mut |_| {}).is_ok() {
+        return Err("garbage file passed".into());
+    }
+    Ok(())
+}
+
+fn checksum_refuses_paths_outside_folder(dir: &Path) -> Result<(), String> {
+    let none = AtomicBool::new(false);
+    let inner = dir.join("inner");
+    fs::create_dir(&inner).map_err(s)?;
+    fs::write(dir.join("secret.txt"), b"abc").map_err(s)?;
+    std::os::unix::fs::symlink(dir.join("secret.txt"), inner.join("link")).map_err(s)?;
+    for name in ["../secret.txt", "link", dir.join("secret.txt").to_str().ok_or("path")?] {
+        let sums = inner.join("x.sha256");
+        fs::write(&sums, format!("{ABC_SHA256}  {name}\n")).map_err(s)?;
+        if let Ok(report) = sum::verify(&sums, &none, &mut |_| {}) {
+            return Err(format!("{name} was read: {report:?}"));
+        }
+    }
+    for name in ["../secret.txt", "link"] {
+        let sfv_file = inner.join("x.sfv");
+        fs::write(&sfv_file, format!("{name} 352441C2\n")).map_err(s)?;
+        if let Ok(report) = sfv::verify(&sfv_file, &none, &mut |_| {}) {
+            return Err(format!("sfv {name} was read: {report:?}"));
+        }
+    }
+    Ok(())
+}
+
+fn sfv_roundtrip_and_symlink_outside(dir: &Path) -> Result<(), String> {
+    let none = AtomicBool::new(false);
+    fs::write(dir.join("a.txt"), b"abc").map_err(s)?;
+    let list = dir.join("files.sfv");
+    let made = sfv::create(dir, &[dir.join("a.txt")], &list, &none, &mut |_| {}).map_err(|e| e.to_string())?;
+    eq(made.files, 1, "files hashed")?;
+    let text = fs::read_to_string(&list).map_err(s)?;
+    if !text.contains("a.txt 352441C2\n") {
+        return Err(format!("sfv text: {text:?}"));
+    }
+    eq(sfv::verify(&list, &none, &mut |_| {}).map_err(|e| e.to_string())?.files, 1, "verified")?;
+    fs::write(dir.join("a.txt"), b"abd").map_err(s)?;
+    let err = sfv::verify(&list, &none, &mut |_| {}).err().ok_or("changed file passed")?.to_string();
+    if !err.contains("CRC mismatch  a.txt") {
+        return Err(format!("mismatch message: {err}"));
+    }
+    let root = dir.join("root");
+    fs::create_dir(&root).map_err(s)?;
+    std::os::unix::fs::symlink(dir.join("a.txt"), root.join("link")).map_err(s)?;
+    let out = root.join("out.sfv");
+    if sfv::create(&root, &[root.join("link")], &out, &none, &mut |_| {}).is_ok() || out.exists() {
+        return Err("symlink outside the folder was hashed".into());
+    }
+    Ok(())
+}
+
+fn atomic_write_keeps_mode_and_link(dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let file = dir.join("f");
+    fs::write(&file, b"old").map_err(s)?;
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).map_err(s)?;
+    ops::write_atomic(&file, b"new").map_err(s)?;
+    eq(fs::read(&file).map_err(s)?, b"new".to_vec(), "content")?;
+    eq(fs::metadata(&file).map_err(s)?.permissions().mode() & 0o7777, 0o640, "mode")?;
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&file, &link).map_err(s)?;
+    ops::write_atomic(&link, b"via link").map_err(s)?;
+    if !fs::symlink_metadata(&link).map_err(s)?.file_type().is_symlink() {
+        return Err("link was replaced by a file".into());
+    }
+    eq(fs::read(&file).map_err(s)?, b"via link".to_vec(), "target content")?;
+    ops::write_atomic(&dir.join("fresh"), b"created").map_err(s)?;
+    let mut names: Vec<String> = fs::read_dir(dir).map_err(s)?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    eq(names, vec!["f".to_string(), "fresh".into(), "link".into()], "no temp files left")
+}
+
+fn mount_point_only_under_mnt() -> Result<(), String> {
+    for good in ["/mnt/disk", " /mnt/usb-1 ", "/mnt/a.b_c"] {
+        if mount::check_point(good).is_err() {
+            return Err(format!("{good:?} refused"));
+        }
+    }
+    for bad in ["", "/", "/mnt", "/mnt/", "/etc", "/home/x", "mnt/disk", "/mnt/a/b", "/mnt/..", "/mnt/../etc", "/mnt/.hidden", "/mnt/a b", "/mnt/a;b"] {
+        if let Ok(path) = mount::check_point(bad) {
+            return Err(format!("{bad:?} accepted as {}", path.display()));
+        }
+    }
+    Ok(())
+}
+
+fn mount_names_refuse_tricks() -> Result<(), String> {
+    eq(mount::check_unc(" nas.local ", "share"), Ok("//nas.local/share".to_string()), "unc")?;
+    eq(mount::check_nfs("nas", "/data/x"), Ok("nas:/data/x".to_string()), "nfs")?;
+    for (server, share) in [("", "s"), ("nas", ""), ("nas;reboot", "s"), ("-oevil", "s"), ("a..b", "s"), ("nas", ".."), ("nas", "a/b"), ("nas", "a\\b"), ("nas", "a\nb")] {
+        if mount::check_unc(server, share).is_ok() {
+            return Err(format!("unc accepted {server:?} {share:?}"));
+        }
+    }
+    for (server, export) in [("", "/d"), ("nas", ""), ("nas", "data"), ("nas", "/a/../b"), ("nas", "/a\nb"), ("nas host", "/d"), ("-oevil", "/d")] {
+        if mount::check_nfs(server, export).is_ok() {
+            return Err(format!("nfs accepted {server:?} {export:?}"));
+        }
+    }
+    Ok(())
+}
+
+fn point_name_is_always_valid() -> Result<(), String> {
+    let long = "x".repeat(300);
+    for raw in ["My Disk (2)", "../../etc", "", "   ", "a/b", ".hidden", "ÅÄÖ", "..", "a;rm -rf /", long.as_str()] {
+        let name = mount::point_name(raw);
+        if mount::check_point(&format!("/mnt/{name}")).is_err() {
+            return Err(format!("{raw:?} gave unusable {name:?}"));
+        }
+    }
+    eq(mount::point_name("").as_str(), "disk", "empty name")
 }
 
 fn copy(items: &[(PathBuf, PathBuf)]) -> Result<(), String> {

@@ -243,7 +243,7 @@ pub fn file_icon(name: &str, is_dir: bool, is_link: bool) -> &'static str {
     }
     match extension(name).to_ascii_lowercase().as_str() {
         "txt" | "md" | "log" => "text-x-generic-symbolic",
-        "jpg" | "jpeg" | "jfif" | "png" | "gif" | "webp" | "heic" | "heif" => "image-x-generic-symbolic",
+        "jpg" | "jpeg" | "jfif" | "png" | "gif" | "webp" | "heic" | "heif" | "psd" | "psb" => "image-x-generic-symbolic",
         "zip" | "7z" | "rar" | "tar" | "gz" => "package-x-generic-symbolic",
         "pdf" => "application-pdf",
         "rs" | "py" | "js" | "ts" | "go" | "c" | "h" => "text-x-generic-symbolic",

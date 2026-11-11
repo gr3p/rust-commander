@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::time::Duration;
 
 use relm4::gtk;
@@ -17,14 +17,35 @@ use rust_commander::listing::SortKey;
 
 use super::iconpack;
 
+use super::mini::MiniPlayer;
+use super::player::PlayerView;
 use super::row::{self, EntryObject};
 
 static FLASH_ENABLED: AtomicBool = AtomicBool::new(true);
 static PANE_BLINK: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
-/// Classic Mac menu flash: invert every 3 ticks (80 ms), three times.
-const BLINK_STEP: Duration = Duration::from_millis(80);
-const BLINK_PHASES: u8 = 6;
-pub const BLINK_LEN: Duration = Duration::from_millis(300);
+/// Tick and wait at speed 50 with 3 flashes: 80 ms per phase, action after 300 ms.
+static BLINK_SPEED: AtomicU8 = AtomicU8::new(50);
+static BLINK_COUNT: AtomicU8 = AtomicU8::new(3);
+static BLINK_STEP_MS: AtomicU64 = AtomicU64::new(80);
+static BLINK_LEN_MS: AtomicU64 = AtomicU64::new(300);
+
+thread_local! {
+    static F12_HELD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// True when this F12 repeats a key that is already down, so Settings does not open and close on one press.
+pub(crate) fn claim_f12(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
+    if key != gtk::gdk::Key::F12 || mods.contains(gtk::gdk::ModifierType::CONTROL_MASK) || mods.contains(gtk::gdk::ModifierType::ALT_MASK) {
+        return false;
+    }
+    F12_HELD.with(|held| held.replace(true))
+}
+
+pub(crate) fn release_f12(key: gtk::gdk::Key) {
+    if key == gtk::gdk::Key::F12 {
+        F12_HELD.with(|held| held.set(false));
+    }
+}
 
 pub struct PaneUi {
     pub frame: gtk::Frame,
@@ -40,6 +61,8 @@ pub struct PaneUi {
     pub picture: gtk::Picture,
     pub picture_scroll: gtk::ScrolledWindow,
     pub preview_kind: gtk::Stack,
+    pub player: PlayerView,
+    pub mini: MiniPlayer,
     pub preview_wait: gtk::DrawingArea,
     pub terminal_slot: gtk::Box,
 }
@@ -61,6 +84,10 @@ pub struct Shell {
     pub idle_drives: Vec<gtk::Button>,
     pub mount_button: gtk::Button,
     pub drive_snapshot: DriveSnapshot,
+    // Network mounts that dropped, kept so a lost VPN does not clear the button.
+    pub down: Vec<rust_commander::places::Mount>,
+    // Mounts the user asked to release. Cleared once they leave the live list.
+    pub released: Vec<PathBuf>,
     pub edit_button: gtk::Button,
     pub save_button: gtk::Button,
     pub discard_button: gtk::Button,
@@ -232,6 +259,17 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
     let win = window.clone();
     let editing_keys = Rc::clone(&editing);
     keys.connect_key_pressed(move |controller, key, _, mods| {
+        if claim_f12(key, mods) {
+            return gtk::glib::Propagation::Stop;
+        }
+        if let Some(maximize) = window_size_key(key, mods) {
+            if maximize {
+                win.maximize();
+            } else if win.is_maximized() {
+                win.unmaximize();
+            }
+            return gtk::glib::Propagation::Stop;
+        }
         let focused = relm4::gtk::prelude::GtkWindowExt::focus(&win);
         let typing = focused.as_ref().is_some_and(|widget| {
             let mut current = Some(widget.clone());
@@ -280,6 +318,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
         tx.emit(super::msg::Msg::Key(key, mods));
         gtk::glib::Propagation::Stop
     });
+    keys.connect_key_released(|_, key, _, _| release_f12(key));
     window.add_controller(keys);
 
     Shell {
@@ -299,6 +338,8 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
         idle_drives,
         mount_button,
         drive_snapshot,
+        down: Vec::new(),
+        released: Vec::new(),
         edit_button,
         save_button,
         discard_button,
@@ -391,8 +432,9 @@ fn drive_bar(
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
     bar.add_css_class("drives");
     bar.set_margin_top(2);
+    bar.set_margin_bottom(2);
     let snapshot = (rust_commander::places::mounts(), super::drives::idle_volumes());
-    let (drives, idle) = drive_buttons(sender, active, icon_pack, &snapshot);
+    let (drives, idle) = drive_buttons(sender, active, icon_pack, &snapshot, &[]);
     for button in drives.iter().map(|(_, button)| button).chain(idle.iter()) {
         bar.append(button);
     }
@@ -421,7 +463,9 @@ pub fn rebuild_drives(
     icon_pack: &str,
 ) -> Option<Vec<PathBuf>> {
     let snapshot = (rust_commander::places::mounts(), super::drives::idle_volumes());
-    if snapshot == shell.drive_snapshot {
+    let down = rust_commander::places::keep_down(&shell.drive_snapshot.0, &snapshot.0, &shell.down, &shell.released);
+    shell.released.retain(|path| snapshot.0.iter().any(|mount| &mount.path == path));
+    if snapshot == shell.drive_snapshot && down == shell.down {
         return None;
     }
     let gone = shell
@@ -429,12 +473,13 @@ pub fn rebuild_drives(
         .0
         .iter()
         .filter(|old| !snapshot.0.iter().any(|new| new.path == old.path))
+        .filter(|old| !down.iter().any(|kept| kept.path == old.path))
         .map(|old| old.path.clone())
         .collect();
     for button in shell.drives.drain(..).map(|(_, button)| button).chain(shell.idle_drives.drain(..)) {
         shell.shell_bar.remove(&button);
     }
-    let (drives, idle) = drive_buttons(sender, &shell.active, &iconpack::active(icon_pack), &snapshot);
+    let (drives, idle) = drive_buttons(sender, &shell.active, &iconpack::active(icon_pack), &snapshot, &down);
     let mut prev: Option<gtk::Widget> = None;
     for button in drives.iter().map(|(_, button)| button).chain(idle.iter()) {
         shell.shell_bar.insert_child_after(button, prev.as_ref());
@@ -443,6 +488,7 @@ pub fn rebuild_drives(
     shell.drives = drives;
     shell.idle_drives = idle;
     shell.drive_snapshot = snapshot;
+    shell.down = down;
     Some(gone)
 }
 
@@ -451,10 +497,16 @@ fn drive_buttons(
     active: &Rc<Cell<usize>>,
     icon_pack: &str,
     (mounts, idle): &DriveSnapshot,
+    down: &[rust_commander::places::Mount],
 ) -> (Vec<(PathBuf, gtk::Button)>, Vec<gtk::Button>) {
     use super::msg::Msg;
     let mut drives = Vec::new();
-    for (index, mount) in mounts.iter().enumerate() {
+    let rows: Vec<(&rust_commander::places::Mount, bool)> = mounts
+        .iter()
+        .map(|mount| (mount, true))
+        .chain(down.iter().map(|mount| (mount, false)))
+        .collect();
+    for (index, (mount, up)) in rows.into_iter().enumerate() {
         let button = gtk::Button::new();
         button.add_css_class("drive");
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -470,46 +522,62 @@ fn drive_buttons(
         caption.set_max_width_chars(10);
         row.append(&caption);
         button.set_child(Some(&row));
+        if !up {
+            button.add_css_class("idle");
+        }
         let shortcut = if index < 9 {
             rust_commander::commands::format_keys(&format!("Ctrl+{}", index + 1))
         } else {
             String::new()
         };
-        let tip = if shortcut.is_empty() {
+        let tip = if !up {
+            format!("Not reachable  {}  {}", mount.device, mount.path.display())
+        } else if shortcut.is_empty() {
             format!("{}  {}", mount.device, mount.path.display())
         } else {
             format!("{shortcut}  {}  {}", mount.device, mount.path.display())
         };
-        // Free space changes while the program runs, so it is read each time the tip opens.
-        button.set_has_tooltip(true);
-        let mount_path = mount.path.clone();
-        button.connect_query_tooltip(move |_, _, _, _, tooltip| {
-            let space = rust_commander::places::disk_info(&mount_path)
-                .map(|info| rust_commander::places::summary(&info))
-                .unwrap_or_default();
-            tooltip.set_text(Some(&format!("{tip}\n{space}")));
-            true
-        });
         let menu_click = gtk::GestureClick::new();
         menu_click.set_button(gtk::gdk::BUTTON_SECONDARY);
         let tx_menu = sender.clone();
         let menu_path = mount.path.clone();
-        menu_click.connect_pressed(move |gesture, _, _, _| {
-            let Some(button) = gesture.widget() else { return };
-            let can = super::drives::actions(&menu_path);
-            let mut items: Vec<(&str, Box<dyn Fn()>)> = Vec::new();
-            let (tx, path) = (tx_menu.clone(), menu_path.clone());
-            items.push(("Properties", Box::new(move || tx.emit(Msg::DiskInfo(Some(path.clone()))))));
-            if can.unmount {
+        if up {
+            // Free space changes while the program runs, so it is read each time the tip opens.
+            button.set_has_tooltip(true);
+            let mount_path = mount.path.clone();
+            button.connect_query_tooltip(move |_, _, _, _, tooltip| {
+                let space = rust_commander::places::disk_info(&mount_path)
+                    .map(|info| rust_commander::places::summary(&info))
+                    .unwrap_or_default();
+                tooltip.set_text(Some(&format!("{tip}\n{space}")));
+                true
+            });
+            menu_click.connect_pressed(move |gesture, _, _, _| {
+                let Some(button) = gesture.widget() else { return };
+                let can = super::drives::actions(&menu_path);
+                let mut items: Vec<(&str, Box<dyn Fn()>)> = Vec::new();
                 let (tx, path) = (tx_menu.clone(), menu_path.clone());
-                items.push(("Unmount", Box::new(move || tx.emit(Msg::Unmount(path.clone(), false)))));
-            }
-            if can.eject {
+                items.push(("Properties", Box::new(move || tx.emit(Msg::DiskInfo(Some(path.clone()))))));
+                if can.unmount {
+                    let (tx, path) = (tx_menu.clone(), menu_path.clone());
+                    items.push(("Unmount", Box::new(move || tx.emit(Msg::Unmount(path.clone(), false)))));
+                }
+                if can.eject {
+                    let (tx, path) = (tx_menu.clone(), menu_path.clone());
+                    items.push(("Eject", Box::new(move || tx.emit(Msg::Unmount(path.clone(), true)))));
+                }
+                popup_menu(&button, items);
+            });
+        } else {
+            button.set_tooltip_text(Some(&tip));
+            menu_click.connect_pressed(move |gesture, _, _, _| {
+                let Some(button) = gesture.widget() else { return };
                 let (tx, path) = (tx_menu.clone(), menu_path.clone());
-                items.push(("Eject", Box::new(move || tx.emit(Msg::Unmount(path.clone(), true)))));
-            }
-            popup_menu(&button, items);
-        });
+                let items: Vec<(&str, Box<dyn Fn()>)> =
+                    vec![("Remove", Box::new(move || tx.emit(Msg::ForgetMount(path.clone()))))];
+                popup_menu(&button, items);
+            });
+        }
         button.add_controller(menu_click);
         button.set_focus_on_click(false);
         let tx = sender.clone();
@@ -689,7 +757,7 @@ pub fn on_click(button: &gtk::Button, action: impl Fn() + 'static) {
         }
         blink_button(button);
         let (action, pending, button) = (Rc::clone(&action), Rc::clone(&pending), button.downgrade());
-        gtk::glib::timeout_add_local_once(BLINK_LEN, move || {
+        gtk::glib::timeout_add_local_once(blink_len(), move || {
             pending.set(false);
             if button.upgrade().is_some_and(|button| button.is_mapped()) {
                 action();
@@ -709,7 +777,7 @@ pub fn blink_then(widget: &gtk::Widget, action: impl FnOnce() + 'static) {
         return;
     }
     blink_widget(widget);
-    gtk::glib::timeout_add_local_once(BLINK_LEN, action);
+    gtk::glib::timeout_add_local_once(blink_len(), action);
 }
 
 /// A notebook tab is a gizmo around the label. Flashing the label only covers the text.
@@ -725,10 +793,12 @@ pub fn blink_widget(widget: &gtk::Widget) {
     let widget = widget.clone();
     widget.add_css_class("flash");
     let step = Cell::new(0u8);
-    gtk::glib::timeout_add_local(BLINK_STEP, move || {
+    let pace = blink_step();
+    let phases = blink_phases();
+    gtk::glib::timeout_add_local(pace, move || {
         let n = step.get() + 1;
         step.set(n);
-        if n >= BLINK_PHASES {
+        if n >= phases {
             widget.remove_css_class("flash");
             return gtk::glib::ControlFlow::Break;
         }
@@ -749,13 +819,15 @@ pub fn blink_frame(frame: &gtk::Frame, pane: usize, only_while_active: bool) {
     let frame = frame.clone();
     frame.add_css_class("pane-blink");
     let step = Cell::new(0u8);
-    gtk::glib::timeout_add_local(BLINK_STEP, move || {
+    let pace = blink_step();
+    let phases = blink_phases();
+    gtk::glib::timeout_add_local(pace, move || {
         if PANE_BLINK[pane].load(Ordering::Relaxed) != token {
             return gtk::glib::ControlFlow::Break;
         }
         let n = step.get() + 1;
         step.set(n);
-        if n >= BLINK_PHASES {
+        if n >= phases {
             frame.remove_css_class("pane-blink");
             return gtk::glib::ControlFlow::Break;
         }
@@ -772,6 +844,37 @@ pub fn blink_frame(frame: &gtk::Frame, pane: usize, only_while_active: bool) {
 
 pub fn set_flash_enabled(enabled: bool) {
     FLASH_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+/// `speed` 50 is the original pace. Higher is faster. The running blink keeps the pace it started with.
+pub fn set_blink_speed(speed: u8) {
+    BLINK_SPEED.store(speed.clamp(10, 100), Ordering::Relaxed);
+    apply_blink_pace();
+}
+
+/// How many times the ring comes on. 3 is the original. The running blink keeps the count it started with.
+pub fn set_blink_count(count: u8) {
+    BLINK_COUNT.store(count.clamp(1, 8), Ordering::Relaxed);
+    apply_blink_pace();
+}
+
+fn apply_blink_pace() {
+    let speed = u64::from(BLINK_SPEED.load(Ordering::Relaxed));
+    let count = u64::from(BLINK_COUNT.load(Ordering::Relaxed));
+    BLINK_STEP_MS.store(4_000 / speed, Ordering::Relaxed);
+    BLINK_LEN_MS.store(5_000 * count / speed, Ordering::Relaxed);
+}
+
+fn blink_step() -> Duration {
+    Duration::from_millis(BLINK_STEP_MS.load(Ordering::Relaxed))
+}
+
+fn blink_phases() -> u8 {
+    BLINK_COUNT.load(Ordering::Relaxed).saturating_mul(2)
+}
+
+pub fn blink_len() -> Duration {
+    Duration::from_millis(BLINK_LEN_MS.load(Ordering::Relaxed))
 }
 
 pub(crate) const LOGO_PNG: &[u8] = include_bytes!("../../img/rust-commander.png");
@@ -1040,6 +1143,21 @@ fn entry_input(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
         || (ctrl && !alt && matches!(key, Key::a | Key::A | Key::c | Key::C | Key::v | Key::V | Key::x | Key::X | Key::z | Key::Z))
 }
 
+// Super+Up maximizes the window and Super+Down restores it, as in other GNOME windows. When the window manager has
+// no binding for them the keys arrive here, and would otherwise only move the cursor.
+// Some(true) maximizes, Some(false) restores.
+fn window_size_key(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> Option<bool> {
+    use gtk::gdk::{Key, ModifierType};
+    if !mods.contains(ModifierType::SUPER_MASK) || mods.intersects(ModifierType::ALT_MASK | ModifierType::SHIFT_MASK) {
+        return None;
+    }
+    match key {
+        Key::Up | Key::KP_Up => Some(true),
+        Key::Down | Key::KP_Down => Some(false),
+        _ => None,
+    }
+}
+
 fn is_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
     use gtk::gdk::Key;
     let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
@@ -1278,7 +1396,10 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     let preview_kind = gtk::Stack::new();
     preview_kind.add_named(&preview_scroll, Some("text"));
     preview_kind.add_named(&picture_scroll, Some("image"));
+    let player = PlayerView::new(sender);
+    preview_kind.add_named(&player.root, Some("player"));
     preview_kind.set_vexpand(true);
+    let mini = MiniPlayer::new(sender);
     let preview_wait = row::dot_spin();
     let preview_overlay = gtk::Overlay::new();
     preview_overlay.set_child(Some(&preview_kind));
@@ -1296,6 +1417,7 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     let frame_hit = frame.clone();
     let preview_root: gtk::Widget = preview_kind.clone().upcast();
     let terminal_root: gtk::Widget = terminal_slot.clone().upcast();
+    let mini_root: gtk::Widget = mini.root.clone().upcast();
     let picture_focus = picture.clone();
     let preview_page = preview_kind.clone();
     watch.connect_event(move |_, event| {
@@ -1314,6 +1436,10 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
         };
         // A click in the shell may select text. It must not activate that pane, or the shell moves.
         if hit(&terminal_root) {
+            return gtk::glib::Propagation::Proceed;
+        }
+        // The mini player is not a file pane either. Its buttons must not move the active pane.
+        if hit(&mini_root) {
             return gtk::glib::Propagation::Proceed;
         }
         // The preview is not a file pane. A click there must not hide it.
@@ -1348,6 +1474,7 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     column.append(&path_row);
     column.append(&filter);
     column.append(&stack);
+    column.append(&mini.root);
     frame.set_child(Some(&column));
     frame.add_css_class("pane");
     PaneUi {
@@ -1364,6 +1491,8 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
         picture,
         picture_scroll,
         preview_kind,
+        player,
+        mini,
         preview_wait,
         terminal_slot,
     }
@@ -1391,8 +1520,23 @@ pub fn paint_terminal(term: &Terminal, theme: &rust_commander::theme::TerminalTh
 
 #[cfg(test)]
 mod tests {
-    use super::{clipboard_edit, edit_command, entry_input};
+    use super::{clipboard_edit, edit_command, entry_input, window_size_key};
     use relm4::gtk::gdk::{Key, ModifierType};
+
+    #[test]
+    fn super_arrows_size_the_window_and_nothing_else_does() {
+        assert_eq!(window_size_key(Key::Up, ModifierType::SUPER_MASK), Some(true));
+        assert_eq!(window_size_key(Key::KP_Up, ModifierType::SUPER_MASK), Some(true));
+        assert_eq!(window_size_key(Key::Down, ModifierType::SUPER_MASK), Some(false));
+        // Num Lock and Caps Lock do not change it.
+        assert_eq!(window_size_key(Key::Up, ModifierType::SUPER_MASK | ModifierType::LOCK_MASK), Some(true));
+        // Plain arrows move the cursor, and the other modifiers keep their own meaning.
+        assert_eq!(window_size_key(Key::Up, ModifierType::empty()), None);
+        assert_eq!(window_size_key(Key::Up, ModifierType::CONTROL_MASK), None);
+        assert_eq!(window_size_key(Key::Up, ModifierType::SUPER_MASK | ModifierType::ALT_MASK), None);
+        assert_eq!(window_size_key(Key::Up, ModifierType::SUPER_MASK | ModifierType::SHIFT_MASK), None);
+        assert_eq!(window_size_key(Key::Left, ModifierType::SUPER_MASK), None);
+    }
 
     #[test]
     fn filter_entry_receives_text_but_not_search_shortcuts() {

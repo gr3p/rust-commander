@@ -1,7 +1,7 @@
 # Maintainer: Marcus Wallén <sysopt@protonmail.com>
-# Tag v0.1.0 unpacks as rust-commander-0.1.0.
+# CI rewrites pkgver and sha256sums. The tarball is packed next to this file.
 pkgname=rust-commander
-pkgver=0.1.0
+pkgver=0.2.111
 pkgrel=1
 pkgdesc='Dual-pane file manager'
 arch=('x86_64')
@@ -9,30 +9,24 @@ url='https://github.com/gr3p/rust-commander'
 license=('MIT')
 depends=('gtk4' 'vte4' 'hicolor-icon-theme')
 makedepends=('cargo' 'pkgconf')
-optdepends=('p7zip: 7z archives' 'rar: rar archives')
-options=('!lto')
-source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('6d97ca4a1d92ed12ca082cd7f2d768b6a436db9ef9507b7267604944bc617a96')
-
-prepare() {
-	cd "$pkgname-$pkgver"
-	export RUSTUP_TOOLCHAIN=stable
-	cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
-}
+optdepends=(
+	'p7zip: 7z archives'
+	'rar: rar archives'
+	'alsa-lib: play music'
+	'opus: play Opus files'
+	'pipewire-alsa: music through PipeWire'
+)
+options=('!lto' '!debug')
+install=rust-commander.install
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
 
 build() {
 	cd "$pkgname-$pkgver"
+	# No .git in the release tarball, so the package version wins over the dirname guess.
+	export RC_PKG_VERSION=$pkgver
 	export RUSTUP_TOOLCHAIN=stable
-	export CARGO_TARGET_DIR=target
-	cargo build --frozen --release
-}
-
-check() {
-	cd "$pkgname-$pkgver"
-	export RUSTUP_TOOLCHAIN=stable
-	export CARGO_TARGET_DIR=target
-	# The acceptance harness needs the sandbox script.
-	cargo test --frozen --release --lib
+	cargo build --locked --release
 }
 
 package() {
@@ -42,4 +36,5 @@ package() {
 		"$pkgdir/usr/share/applications/se.rustcommander.RustCommander.desktop"
 	install -Dm644 img/rust-commander.png \
 		"$pkgdir/usr/share/icons/hicolor/512x512/apps/$pkgname.png"
+	install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname/"
 }

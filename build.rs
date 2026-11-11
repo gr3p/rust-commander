@@ -8,7 +8,7 @@ fn main() {
 }
 
 fn display_version() -> String {
-    let base = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.1.0".into());
+    let base = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.2.1".into());
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
     watch_git(&manifest);
     println!("cargo:rerun-if-env-changed=RC_PKG_VERSION");

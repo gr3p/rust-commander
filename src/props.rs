@@ -239,6 +239,57 @@ fn is_unix_fs(kind: &str) -> bool {
     matches!(kind, "ext2" | "ext3" | "ext4" | "xfs" | "btrfs" | "tmpfs" | "bcachefs" | "f2fs" | "zfs")
 }
 
+/// Why a delete was refused when the mode in the panel is not the server's.
+pub fn delete_why(path: &Path, err: &io::Error) -> Option<String> {
+    if !matches!(err.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem) {
+        return None;
+    }
+    let text = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    delete_why_on(path, &parse_mountinfo(&text))
+}
+
+fn delete_why_on(path: &Path, mounts: &[MountInfo]) -> Option<String> {
+    let mount = covering(mounts, path)?;
+    if is_read_only(mount) {
+        return Some("The filesystem is mounted read-only, so nothing on it can be deleted.".into());
+    }
+    let kind = mount.fstype.as_str();
+    if matches!(kind, "cifs" | "smb3" | "smb") {
+        return Some(smb_delete_why(mount));
+    }
+    if matches!(kind, "nfs" | "nfs4") {
+        return Some(format!(
+            "The NFS server ({}) refused the delete. An export ACL or root_squash can do that even when the mode looks writable.",
+            mount.source
+        ));
+    }
+    if matches!(kind, "vfat" | "msdos" | "exfat" | "ntfs" | "ntfs3") || kind.contains("ntfs") || kind == "fuseblk" {
+        return Some("This volume refused the delete. A read-only attribute, or a mount without write access, does that even when the mode looks writable.".into());
+    }
+    None
+}
+
+fn smb_delete_why(mount: &MountInfo) -> String {
+    let mut how = Vec::new();
+    if has_opt(&mount.opts, "nounix") {
+        how.push("nounix".to_string());
+    }
+    if has_opt(&mount.opts, "forceuid") {
+        how.push("forceuid".to_string());
+    }
+    for key in ["file_mode", "dir_mode"] {
+        if let Some(value) = opt_value(&mount.opts, key) {
+            how.push(format!("{key}={value}"));
+        }
+    }
+    let mounted = if how.is_empty() {
+        String::new()
+    } else {
+        format!(" It is mounted with {}, so the owner and mode in the panel are not the server's.", how.join(", "))
+    };
+    format!("The SMB server ({}) refused the delete.{mounted} The share can look writable and still reject it.", mount.source)
+}
+
 fn is_read_only(mount: &MountInfo) -> bool {
     has_opt(&mount.flags, "ro") || has_opt(&mount.opts, "ro")
 }
@@ -503,6 +554,12 @@ mod tests {
         assert!(smb.contains("SMB"), "{smb}");
         assert!(smb.contains("nounix"), "{smb}");
         assert!(smb.contains("file_mode=0755"), "{smb}");
+        let why = delete_why_on(Path::new("/mnt/seagate12tb/tmp/dan"), &mounts).unwrap();
+        assert!(why.contains("//smb.lan/seagate12tb"), "{why}");
+        assert!(why.contains("nounix"), "{why}");
+        assert!(why.contains("file_mode=0755"), "{why}");
+        assert!(why.contains("refused the delete"), "{why}");
+        assert!(delete_why_on(Path::new("/mnt/other/a"), &mounts).is_none());
         let dir = explain_mode(covering(&mounts, Path::new("/mnt/seagate12tb/tmp")), true, Some(0o755), 0o700);
         assert!(dir.contains("dir_mode=0755"), "{dir}");
         let fat = explain_mode(covering(&mounts, Path::new("/mnt/fat/a")), false, Some(0o755), 0o644);
