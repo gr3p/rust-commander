@@ -271,16 +271,20 @@ impl App {
                 .iter()
                 .position(|&i| rust_commander::listing::entry_path(&tab.path, &tab.entries[i]) == target)
         });
-        let Some(pos) = pos else {
-            self.status = "The file is no longer in the list".into();
-            return;
-        };
-        self.state.set_cursor(pos);
-        // A cursor move reloads quick view. Leave an open edit alone until it is closed.
-        if editing {
-            self.preview_sent = self.state.preview_gen;
+        // Paste fills the folder this pane shows. It does not use the clicked file.
+        if act != RowAct::Paste {
+            let Some(pos) = pos else {
+                self.status = "The file is no longer in the list".into();
+                return;
+            };
+            self.state.set_cursor(pos);
+            // A cursor move reloads quick view. Leave an open edit alone until it is closed.
+            if editing {
+                self.preview_sent = self.state.preview_gen;
+            }
         }
         match act {
+            RowAct::Paste => self.paste_desktop(sender),
             RowAct::Open => self.activate_cursor(sender),
             RowAct::QuickView => self.show_quick_view(sender),
             RowAct::QuickEdit => self.edit_quick_file(sender),

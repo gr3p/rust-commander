@@ -654,6 +654,7 @@ fn popup_menu(anchor: &gtk::Widget, items: Vec<(&str, Box<dyn Fn()>)>) {
 pub fn popup_rows(
     anchor: &gtk::Widget,
     items: &[rust_commander::commands::RowItem],
+    at: Option<(f64, f64)>,
     on_pick: impl Fn(rust_commander::commands::RowAct) + 'static,
 ) {
     use std::cell::RefCell;
@@ -706,6 +707,9 @@ pub fn popup_rows(
     }
     menu.set_child(Some(&column));
     menu.set_parent(anchor);
+    if let Some((x, y)) = at {
+        menu.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+    }
     let tracked = menu.clone();
     menu.connect_closed(move |menu| {
         let same = OPEN.with(|open| open.borrow().as_ref().is_some_and(|current| current == menu));
@@ -1245,6 +1249,41 @@ fn under(widget: &gtk::Widget, ancestor: &gtk::Widget) -> bool {
     false
 }
 
+// Right-click on empty list space. A file row keeps its own menu.
+fn bind_directory_menu(view: &impl IsA<gtk::Widget>, pane: usize, sender: &relm4::Sender<super::msg::Msg>) {
+    let click = gtk::GestureClick::new();
+    click.set_button(gtk::gdk::BUTTON_SECONDARY);
+    click.set_propagation_phase(gtk::PropagationPhase::Bubble);
+    let tx = sender.clone();
+    click.connect_pressed(move |gesture, _, x, y| {
+        let Some(widget) = gesture.widget() else { return };
+        if widget.pick(x, y, gtk::PickFlags::DEFAULT).is_some_and(skips_directory_menu) {
+            return;
+        }
+        let items = [rust_commander::commands::paste_row()];
+        let tx = tx.clone();
+        popup_rows(&widget, &items, Some((x, y)), move |act| {
+            tx.emit(super::msg::Msg::RowAct(pane, act));
+        });
+    });
+    view.add_controller(click);
+}
+
+fn skips_directory_menu(hit: gtk::Widget) -> bool {
+    let mut current = Some(hit);
+    while let Some(widget) = current {
+        if widget.has_css_class("file-row") {
+            return true;
+        }
+        let name = widget.type_().name();
+        if name == "GtkColumnViewTitle" || name == "GtkScrollbar" {
+            return true;
+        }
+        current = widget.parent();
+    }
+    false
+}
+
 // A file view takes the pane on click and on focus.
 fn claim_pane(view: &impl IsA<gtk::Widget>, index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<Cell<usize>>) {
     // Already-selected rows do not notify, so a click in Ext/Size/Date/Attr must still activate the pane.
@@ -1259,6 +1298,7 @@ fn claim_pane(view: &impl IsA<gtk::Widget>, index: usize, sender: &relm4::Sender
         tx.emit(super::msg::Msg::FocusPane(index));
     });
     view.add_controller(column_click);
+    bind_directory_menu(view, index, sender);
     let focus = gtk::EventControllerFocus::new();
     let tx = sender.clone();
     let focus_active = active_pane.clone();

@@ -109,6 +109,7 @@ fn size_text(entry: &Entry, skip: bool) -> String {
 fn watch_menu(item: &relm4::gtk::ListItem, pane: usize, sender: &relm4::Sender<crate::ui::msg::Msg>) {
     use relm4::gtk;
     let Some(child) = item.child() else { return };
+    child.add_css_class("file-row");
     let click = gtk::GestureClick::new();
     click.set_button(gtk::gdk::BUTTON_SECONDARY);
     // Weak: the item owns the child that owns this gesture.
@@ -135,7 +136,7 @@ fn watch_menu(item: &relm4::gtk::ListItem, pane: usize, sender: &relm4::Sender<c
         let music = file && (rust_commander::audio::can_play(&name) || obj.marked());
         let items = rust_commander::commands::row_menu(parent, dir, archive, image, music);
         let tx = tx.clone();
-        crate::ui::shell::popup_rows(&widget, &items, move |act| {
+        crate::ui::shell::popup_rows(&widget, &items, None, move |act| {
             tx.emit(crate::ui::msg::Msg::RowAct(pane, act));
         });
     });
