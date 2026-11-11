@@ -193,6 +193,12 @@ pub enum Msg {
     AudioVisualDensity(u8),
     AudioRepeatSet(rust_commander::audio::Repeat),
     Status(String),
+    // Files copied in another program. `dest` is the folder that was open when Ctrl+V was pressed.
+    DesktopPaste {
+        mime: String,
+        bytes: Vec<u8>,
+        dest: std::path::PathBuf,
+    },
     // The mp4 probe ran off the UI thread: true when the file holds a film and not only sound.
     FilmChecked {
         path: std::path::PathBuf,

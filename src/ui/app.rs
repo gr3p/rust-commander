@@ -30,6 +30,7 @@ mod commands;
 mod disk;
 mod jobs;
 mod mount;
+mod paste;
 mod music;
 mod props;
 mod queue;
@@ -744,6 +745,7 @@ impl App {
             Msg::DrivesChanged => self.refresh_drives(sender),
             Msg::DriveStatus(text) => self.status = text,
             Msg::Status(text) => self.status = text,
+            Msg::DesktopPaste { mime, bytes, dest } => self.paste_desktop_files(&mime, &bytes, &dest, sender),
             Msg::FilmChecked { path, film } => self.film_checked(path, film, sender),
             Msg::WatchReady(pane, path) => self.watch_ready(pane, &path),
             Msg::MountVolume(pane, id) => {
@@ -900,6 +902,7 @@ impl App {
                 }
                 Key::c | Key::C if shift => self.copy_selected_paths(),
                 Key::c | Key::C if self.preview_image_focused() => self.copy_preview_image(sender),
+                Key::v | Key::V if !shift => self.paste_desktop(sender),
                 Key::F1 if shift => self.toggle_thumbs(),
                 Key::F3 => self.set_sort(rust_commander::listing::SortKey::Name),
                 Key::F4 => self.set_sort(rust_commander::listing::SortKey::Ext),
