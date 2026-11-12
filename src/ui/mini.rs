@@ -76,7 +76,7 @@ impl MiniPlayer {
         let tx = sender.clone();
         expand.button.connect_clicked(move |_| tx.emit(Msg::AudioExpand));
         let close = IconButton::new(Icon::Close, 12, "media-quiet");
-        close.set_tooltip("Stop and close the player");
+        close.set_tooltip("Stop and close the player (Ctrl+Shift+Q)");
         let tx = sender.clone();
         close.button.connect_clicked(move |_| tx.emit(Msg::AudioClose));
         let ends = gtk::Box::new(gtk::Orientation::Horizontal, 0);

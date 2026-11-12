@@ -138,7 +138,7 @@ The panel with focus is the source, the other is the target. Press F1 for all co
 
 | Music (the big player in the quick view) | |
 | --- | --- |
-| Ctrl+Q on a song | The song starts playing in the other panel at once, and the playlist is the music files of that folder in the order the list shows them. Ctrl+Q again closes the quick view and stops the music |
+| Ctrl+Q on a song | The song starts playing in the other panel at once, and the playlist is the music files of that folder in the order the list shows them. Ctrl+Q again folds the player into the small one, which plays on, and the quick view shows the file under the cursor (on a song the quick view closes instead). Ctrl+Shift+Q, or the cross in the player's corner, stops the music and closes the player |
 | Enter on a song | Plays that song. With nothing playing it starts the big player, and the quick view opens with it. With the quick view on a song and nothing playing, the player waits for Enter |
 | Tab | The keys go to the player, and Tab again hands them back to the file panel. The player is outlined while it has them |
 | Space (or the media key) | Play or pause. Press it after the song has ended to play it again |
@@ -153,13 +153,13 @@ The panel with focus is the source, the other is the target. Press F1 for all co
 
 The player keys (Space, the letters, +/− and the arrows) work while the player has the keys, so Space marks files as usual while the file panel has them. The media keys work all the time.
 
-Moving the cursor never changes the song. It changes when you press Enter on another song, when you press N or P, and when a song ends. The big player keeps the quick view pane even if the cursor goes to a text file, until you press Ctrl+Q or minimize it.
+Moving the cursor never changes the song. It changes when you press Enter on another song, when you press N or P, and when a song ends. The big player keeps the quick view pane even if the cursor goes to a text file, until you press Ctrl+Q, which folds it into the small player and shows that file, or minimize it. Closing the quick view with Escape, or turning the pane into an editor or a shell, folds it too. Only Ctrl+Shift+Q and the cross stop the music.
 
 The cover is the one inside the file. Without one, the player looks for a picture in the folder called `cover`, `folder`, `front`, `albumart`, `album` or `poster` (jpg, png and so on), and shows it for every song there. `back`, `inlay` and `disc` pictures are skipped.
 
 The cover is shown square and never larger than about 38 % of the window's shorter side, and it shrinks to fit when there is little room.
 
-The visualizer plays behind the whole player and follows the sound itself. The small buttons in the top corner switch it on or off, open the cogwheel to pick a style (Bars, Wave, Radial or Ribbon) and minimize the player. The same choices are in F12 on the Music tab.
+The visualizer plays behind the whole player and follows the sound itself. The small buttons in the top corner switch it on or off, open the cogwheel to pick a style (Bars, Wave, Radial or Ribbon), minimize the player and close it. The same choices are in F12 on the Music tab.
 
 | Playlists from marked songs | |
 | --- | --- |
@@ -176,6 +176,7 @@ The songs go to the player that is open: the small one if the small player is up
 | Tab | Left panel, right panel, small player, and round again. The small player blinks when it gets the keys, and the panel blinks when they come back |
 | Ctrl+M | Jump to the small player. Ctrl+M again, with the keys in it, makes it big. In the big player Ctrl+M folds it, so Ctrl+M toggles between the two. Escape and any list key give the keys back to the list. Space, Ctrl+Left / Right, N / P (or Up / Down), R, S, + / − and M work on it while it has them |
 | X or Delete | Stops the music and closes the small player, while it has the keys |
+| Ctrl+Shift+Q | Stops the music and closes the player, big or small, whoever has the keys |
 | Expand button | Back to the big player: the list shows the folder with the cursor on the song, and the quick view opens. The X button stops the music and closes the player |
 
 | Archives and checksums | |

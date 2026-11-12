@@ -383,6 +383,8 @@ pub fn hint_label(act: Act, side: &str) -> String {
         Act::AudioSend => caption("Ctrl+P", "Send to player"),
         Act::AudioAdd => caption("Ctrl+Shift+P", "Add to playlist"),
         Act::AudioFocus => caption("Tab", "Player"),
+        // The hint is only on offer while the small player has the keys, where X is the short way.
+        Act::AudioClose => caption("X", "Close player"),
         other => CATALOG
             .iter()
             .find(|item| item.act == other)
@@ -412,7 +414,8 @@ pub fn applies(act: Act, cue: &Cue) -> bool {
         Act::AudioNext | Act::AudioPrev | Act::AudioShuffle | Act::AudioRepeat => cue.audio,
         Act::AudioMinimize => cue.player && !cue.mini,
         Act::AudioJump => cue.mini && !cue.audio,
-        Act::AudioExpand | Act::AudioClose => cue.mini && cue.audio,
+        Act::AudioExpand => cue.mini && cue.audio,
+        Act::AudioClose => cue.player,
         Act::AudioFocus => cue.player && !cue.audio,
         Act::AudioSend => cue.song || cue.marks > 0,
         Act::AudioAdd => cue.player && (cue.song || cue.marks > 0),
@@ -528,7 +531,7 @@ const CATALOG: &[Item] = &[
     Item { act: Act::AudioMinimize, keys: "Ctrl+M", label: "Minimize player", group: Group::View },
     Item { act: Act::AudioJump, keys: "Ctrl+M", label: "Jump to player", group: Group::View },
     Item { act: Act::AudioExpand, keys: "Ctrl+M", label: "Big player", group: Group::View },
-    Item { act: Act::AudioClose, keys: "X", label: "Close player", group: Group::View },
+    Item { act: Act::AudioClose, keys: "Ctrl+Shift+Q", label: "Close player", group: Group::View },
     Item { act: Act::AudioFocus, keys: "Tab", label: "Panel or player", group: Group::View },
     Item { act: Act::AudioSend, keys: "Ctrl+P", label: "Send and replace music in player", group: Group::View },
     Item { act: Act::AudioAdd, keys: "Ctrl+Shift+P", label: "Add to current playlist", group: Group::View },
@@ -703,9 +706,10 @@ mod tests {
         assert_eq!(&ranked[..4], &[Act::AudioToggle, Act::AudioNext, Act::AudioPrev, Act::AudioExpand]);
         assert!(!applies(Act::AudioJump, &small_keys) && !applies(Act::AudioMinimize, &small_keys));
         assert!(!applies(Act::AudioExpand, &small) && !applies(Act::AudioExpand, &big));
-        // Closing is offered to the small player once it has the keys, and nowhere else.
+        // Closing is on offer whenever a player is up, with Ctrl+Shift+Q. The hint bar only shows it to the small player with the keys.
         assert!(applies(Act::AudioClose, &small_keys) && rank(&small_keys).contains(&Act::AudioClose));
-        assert!(!applies(Act::AudioClose, &small) && !applies(Act::AudioClose, &big) && !applies(Act::AudioClose, &list_has_keys));
+        assert!(applies(Act::AudioClose, &small) && applies(Act::AudioClose, &big) && applies(Act::AudioClose, &list_has_keys));
+        assert!(!rank(&big).contains(&Act::AudioClose) && !rank(&small).contains(&Act::AudioClose));
         assert!(hint_label(Act::AudioClose, "right").contains("Close player"));
         // Nothing plays: none of it is on offer.
         for act in [Act::AudioNext, Act::AudioJump, Act::AudioMinimize, Act::AudioClose, Act::AudioFocus, Act::AudioAdd] {

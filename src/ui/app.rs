@@ -564,7 +564,7 @@ impl App {
             Msg::AudioRepeat => self.audio_cycle_repeat(),
             Msg::AudioMinimize => self.audio_minimize(sender),
             Msg::AudioExpand => self.audio_expand(sender),
-            Msg::AudioClose => self.audio_close(),
+            Msg::AudioClose => self.audio_close(sender),
             Msg::AudioVisualOn(on) => self.audio_set_visual_on(on),
             Msg::AudioVisualToggle => self.audio_set_visual_on(!self.cfg.player_visual_on),
             Msg::AudioVisualStyle(style) => self.audio_set_visual_style(style),
@@ -941,6 +941,13 @@ impl App {
                 }
                 Key::e | Key::E if self.state.quick_view && !self.shell.editing.get() => {
                     self.toggle_quick_edit(sender);
+                }
+                Key::q | Key::Q if shift => {
+                    if self.audio_alive() {
+                        self.audio_close(sender);
+                    } else {
+                        self.status = "No music is playing".into();
+                    }
                 }
                 Key::q | Key::Q => self.toggle_quick_view(sender),
                 Key::Tab | Key::ISO_Left_Tab if self.shell_has_focus() => self.focus_across_shell(),

@@ -538,6 +538,11 @@ impl App {
         if self.audio_quick_over_mini(sender) {
             return;
         }
+        // The big player in the pane steps aside and goes on playing, instead of being stopped with the quick view.
+        if self.audio_full() && self.state.quick_view && !self.shell.editing.get() {
+            self.audio_quick_aside(sender);
+            return;
+        }
         if self.shell.editing.get() && !self.leave_quick_edit(sender) {
             return;
         }

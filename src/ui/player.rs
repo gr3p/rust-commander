@@ -269,11 +269,15 @@ impl PlayerView {
         let minimize = IconButton::new(Icon::Minimize, 16, "media-quiet");
         minimize.set_tooltip("Minimize: keep playing in a small bar under the file list");
         click(&minimize, sender, || Msg::AudioMinimize);
+        let close = IconButton::new(Icon::Close, 16, "media-quiet");
+        close.set_tooltip("Stop and close the player (Ctrl+Shift+Q)");
+        click(&close, sender, || Msg::AudioClose);
         let corner = gtk::Box::new(gtk::Orientation::Horizontal, 2);
         corner.set_halign(gtk::Align::End);
         corner.append(&bars.button);
         corner.append(&gear.button);
         corner.append(&minimize.button);
+        corner.append(&close.button);
 
         let cover = gtk::Picture::new();
         cover.set_content_fit(gtk::ContentFit::Contain);

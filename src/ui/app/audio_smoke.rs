@@ -255,8 +255,9 @@ impl App {
 
         self.smoke_small(errors, sender);
 
-        // Ctrl+Q starts the big player on a song at once. Ctrl+Q again stops it.
-        self.audio_close();
+        // Ctrl+Q starts the big player on a song at once. Ctrl+Q on a text file folds it into the small player,
+        // which plays on while the quick view shows the file. Only Ctrl+Shift+Q stops the music.
+        self.audio_close(sender);
         if self.state.quick_view {
             ctrl(self, Key::q);
         }
@@ -265,14 +266,66 @@ impl App {
         if !self.state.quick_view || !self.audio_full() || self.smoke_track() != "tone2.wav" {
             errors.push(format!("music: ctrl+q on a song gave full {} and track {}", self.audio_full(), self.smoke_track()));
         }
+        self.point_at(PaneId::Left, "note.txt");
+        self.smoke_settle(sender);
         ctrl(self, Key::q);
         self.smoke_settle(sender);
-        if self.state.quick_view || self.audio_alive() {
-            errors.push("music: ctrl+q did not stop the big player".into());
+        if !self.audio_is_mini() || !self.state.quick_view || self.smoke_track() != "tone2.wav" {
+            errors.push(format!(
+                "music: ctrl+q on a text file gave mini {}, quick view {}, track {}",
+                self.audio_is_mini(),
+                self.state.quick_view,
+                self.smoke_track()
+            ));
+        }
+        if self.shell.panes[1].preview_kind.visible_child_name().as_deref() == Some("player") {
+            errors.push("music: the quick view still shows the player after ctrl+q on a text file".into());
+        }
+        ctrl(self, Key::q);
+        self.smoke_settle(sender);
+        if self.state.quick_view || !self.audio_is_mini() {
+            errors.push("music: the second ctrl+q did not close just the quick view".into());
+        }
+        ctrl_shift(self, Key::q);
+        self.smoke_settle(sender);
+        if self.audio_alive() {
+            errors.push("music: ctrl+shift+q did not close the small player".into());
         }
         if !wait(&mut || self.audio_player_state() == Some(State::Idle)) {
-            errors.push("music: not stopped after leaving".into());
+            errors.push("music: not stopped after ctrl+shift+q".into());
         }
+
+        // Ctrl+Q with the cursor on a song folds the big player and closes the quick view.
+        self.point_at(PaneId::Left, "tone2.wav");
+        ctrl(self, Key::q);
+        ctrl(self, Key::q);
+        self.smoke_settle(sender);
+        if self.state.quick_view || !self.audio_is_mini() {
+            errors.push("music: ctrl+q on a song did not fold the big player".into());
+        }
+        // Closing the big player, as the cross does, closes the quick view it fills.
+        self.audio_expand(sender);
+        self.smoke_settle(sender);
+        self.smoke_settle(sender);
+        if !self.audio_full() {
+            errors.push("music: expand did not make the player big".into());
+        }
+        self.on_msg(Msg::AudioClose, sender);
+        self.smoke_settle(sender);
+        if self.audio_alive() || self.state.quick_view {
+            errors.push("music: the cross did not close the big player and its quick view".into());
+        }
+        // Escape closes the quick view, and the music plays on in the small player.
+        self.point_at(PaneId::Left, "tone2.wav");
+        ctrl(self, Key::q);
+        self.smoke_settle(sender);
+        press(self, Key::Escape);
+        self.smoke_settle(sender);
+        if self.state.quick_view || !self.audio_is_mini() {
+            errors.push("music: escape stopped the big player".into());
+        }
+        self.audio_close(sender);
+        self.smoke_settle(sender);
 
         // Send goes to the player that is open. None open: the big one, and it opens the quick view.
         self.smoke_mark(PaneId::Left, &["tone2.wav", "tone3.wav"]);
@@ -281,7 +334,7 @@ impl App {
             errors.push("music: ctrl+p with nothing open did not start the big player in the quick view".into());
         }
         // Enter on a song with nothing open starts the big player too, and the quick view comes with it.
-        self.audio_close();
+        self.audio_close(sender);
         if self.state.quick_view {
             ctrl(self, Key::q);
         }
@@ -292,7 +345,7 @@ impl App {
         if !self.audio_full() || !self.state.quick_view || self.smoke_track() != "tone2.wav" {
             errors.push(format!("music: enter with nothing open gave full {}, quick view {}", self.audio_full(), self.state.quick_view));
         }
-        self.audio_close();
+        self.audio_close(sender);
         self.state.quick_view = true;
         self.smoke_settle(sender);
         ctrl(self, Key::p);
@@ -301,7 +354,7 @@ impl App {
         }
 
         // Back to how the rest of the smoke test expects things.
-        self.audio_close();
+        self.audio_close(sender);
         self.state.quick_view = false;
         self.smoke_settle(sender);
         self.state.tab_mut(PaneId::Left).marked.clear();

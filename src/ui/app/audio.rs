@@ -200,11 +200,12 @@ impl App {
     }
 
     /// Keeps the big player and the quick view together: closing the quick view, or turning the pane
-    /// into an editor or a shell, stops the big player. The cursor does not steer it.
+    /// into an editor or a shell, folds the big player into the small one. The music goes on, and only the
+    /// close button or Ctrl+Shift+Q stops it. The cursor does not steer it.
     pub(in crate::ui::app) fn reconcile_audio(&mut self, sender: &ComponentSender<Self>) {
         self.settle_expand(sender);
         if self.audio_full() && (!self.state.quick_view || self.shell.editing.get() || self.state.panel_terminal) {
-            self.end_session();
+            self.audio_fold();
         }
     }
 
@@ -838,14 +839,22 @@ impl App {
         look
     }
 
-    /// The player folds into a bar under the list it started from. Both lists work as usual again.
-    pub(in crate::ui::app) fn audio_minimize(&mut self, sender: &ComponentSender<Self>) {
-        let Some(session) = self.audio.session.as_mut() else { return };
+    /// The big player becomes the small one. False when it already was.
+    fn audio_fold(&mut self) -> bool {
+        let Some(session) = self.audio.session.as_mut() else { return false };
         if session.mode != Mode::Full {
-            return;
+            return false;
         }
         session.mode = Mode::Mini;
         self.audio.focus = false;
+        true
+    }
+
+    /// The player folds into a bar under the list it started from. Both lists work as usual again.
+    pub(in crate::ui::app) fn audio_minimize(&mut self, sender: &ComponentSender<Self>) {
+        if !self.audio_fold() {
+            return;
+        }
         if self.state.quick_view {
             self.toggle_quick_view(sender);
         }
@@ -918,10 +927,34 @@ impl App {
         }
     }
 
-    pub(in crate::ui::app) fn audio_close(&mut self) {
+    /// Ctrl+Q while the big player fills the quick view: the music goes on in the small player and the quick
+    /// view shows what the cursor is on, so a text file is there at once. On a song the quick view would only
+    /// be the player again, so it closes, as with Ctrl+M.
+    pub(in crate::ui::app) fn audio_quick_aside(&mut self, sender: &ComponentSender<Self>) {
+        let on_song = self.file_under_cursor().is_some_and(|path| path.file_name().and_then(|name| name.to_str()).is_some_and(audio::can_try));
+        if on_song {
+            self.audio_minimize(sender);
+            return;
+        }
+        if self.audio_fold() {
+            self.status = "QUICKVIEW: view".into();
+            // The player's picture must not linger in the pane while the file loads.
+            self.preview.set_body(PreviewBody::Text(String::new()));
+            self.paint_preview();
+            self.note_preview_target();
+            self.focus_list();
+        }
+    }
+
+    /// Stops the music and closes the player, the big one together with the quick view it fills.
+    pub(in crate::ui::app) fn audio_close(&mut self, sender: &ComponentSender<Self>) {
+        let was_full = self.audio_full();
         self.end_session();
-        // A quick view on a music file shows the full player again, and the cursor starts it.
-        self.note_preview_target();
+        if was_full && self.state.quick_view {
+            self.toggle_quick_view(sender);
+        } else {
+            self.note_preview_target();
+        }
         self.focus_list();
     }
 
@@ -1001,7 +1034,7 @@ impl App {
             Key::plus | Key::KP_Add | Key::equal => self.audio_volume_step(VOLUME_STEP),
             Key::minus | Key::KP_Subtract => self.audio_volume_step(-VOLUME_STEP),
             Key::m | Key::M => self.audio_toggle_mute(),
-            Key::x | Key::X | Key::Delete | Key::KP_Delete if self.audio_is_mini() => self.audio_close(),
+            Key::x | Key::X | Key::Delete | Key::KP_Delete if self.audio_is_mini() => self.audio_close(sender),
             Key::Return | Key::KP_Enter => {}
             Key::Escape => {
                 self.audio.focus = false;
