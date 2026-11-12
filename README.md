@@ -183,7 +183,7 @@ The songs go to the player that is open: the small one if the small player is up
 | Ctrl+M | Jump to the small player. Ctrl+M again, with the keys in it, makes it big. In the big player Ctrl+M folds it, so Ctrl+M toggles between the two. Escape and any list key give the keys back to the list. Space, Ctrl+Left / Right, N / P (or Up / Down), R, S, + / − and M work on it while it has them |
 | X or Delete | Stops the music and closes the small player, while it has the keys |
 | Ctrl+Shift+Q | Stops the music and closes the player, big or small, whoever has the keys |
-| Expand button | Back to the big player: the list shows the folder with the cursor on the song, and the quick view opens. The X button stops the music and closes the player |
+| Expand button | Back to the big player, in the panel you are not working in. If you are in the panel the music started from, its list shows the folder with the cursor on the song first. From the other panel nothing changes there. The X button stops the music and closes the player |
 
 | Archives and checksums | |
 | --- | --- |

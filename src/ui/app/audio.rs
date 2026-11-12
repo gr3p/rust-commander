@@ -894,7 +894,9 @@ impl App {
         self.audio_note("minimize");
     }
 
-    /// Back to the full player: the list shows the folder with the track under the cursor, and the quick view opens.
+    /// Back to the full player. Where the user works stays: with the keys in the pane the music started from, its
+    /// list shows the folder with the track under the cursor, and the quick view opens next to it. With the keys in
+    /// the other pane the big player takes the pane they are not in, and no list changes.
     pub(in crate::ui::app) fn audio_expand(&mut self, sender: &ComponentSender<Self>) {
         let Some(session) = &self.audio.session else { return };
         let Some(track) = self.audio.target.clone() else { return };
@@ -910,6 +912,14 @@ impl App {
         let folder = track.parent().map_or_else(|| session.folder.clone(), Path::to_path_buf);
         let Some(name) = track.file_name().map(|name| name.to_string_lossy().into_owned()) else { return };
         self.audio.focus = false;
+        if self.state.active != source {
+            if self.state.tab(source).path == folder {
+                self.audio_point(source, &track);
+            }
+            self.audio_make_big(sender);
+            self.focus_list();
+            return;
+        }
         self.audio.expanding = Some(Instant::now());
         if name.starts_with('.') && !self.state.show_hidden {
             self.state.show_hidden = true;
@@ -919,18 +929,27 @@ impl App {
         self.shell.panes[source.index()].filter.set_text("");
         self.touch(source);
         if self.state.tab(source).path == folder {
-            self.state.active = source;
             self.audio_point(source, &track);
             self.focus_list();
             return;
         }
         let token = self.state.navigate(source, folder.clone(), true);
         let tab = self.state.pane(source).active;
-        self.state.active = source;
-        self.shell.active.set(source.index());
         self.search_target = Some((source, tab, token, name));
         self.spawn_load(sender, source, tab, folder, token);
         self.focus_list();
+    }
+
+    /// The small player becomes the big one in the quick view, which opens if it is not already.
+    fn audio_make_big(&mut self, sender: &ComponentSender<Self>) {
+        if let Some(session) = self.audio.session.as_mut() {
+            session.mode = Mode::Full;
+        }
+        if self.state.quick_view {
+            self.note_preview_target();
+        } else {
+            self.toggle_quick_view(sender);
+        }
     }
 
     /// Finishes an expand once the cursor stands on the track.
@@ -949,14 +968,7 @@ impl App {
             return;
         }
         self.audio.expanding = None;
-        if let Some(session) = self.audio.session.as_mut() {
-            session.mode = Mode::Full;
-        }
-        if self.state.quick_view {
-            self.note_preview_target();
-        } else {
-            self.toggle_quick_view(sender);
-        }
+        self.audio_make_big(sender);
     }
 
     /// Ctrl+Q while the big player fills the quick view: the music goes on in the small player and the quick

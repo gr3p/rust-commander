@@ -585,15 +585,53 @@ impl App {
         self.reload_pane(PaneId::Right);
 
         // Expand: the list shows the folder with the cursor on the track, and the quick view opens on the big player.
+        // The user is in the left panel, so the player takes the right one and the keys stay where they were.
         self.audio_expand(sender);
         self.smoke_settle(sender);
         self.smoke_settle(sender);
         if !self.audio_full() || !self.state.quick_view || self.shell.panes[0].mini.root.is_visible() || self.shell.panes[1].mini.root.is_visible() {
             errors.push(format!("music: expand gave full {}, quick view {}", self.audio_full(), self.state.quick_view));
         }
+        if self.state.active != PaneId::Left {
+            errors.push("music: expand moved the user to another panel".into());
+        }
         let cursor = self.state.cursor_entry(PaneId::Right).map(|entry| entry.name.to_string()).unwrap_or_default();
         if cursor != "tone.wav" {
             errors.push(format!("music: expand left the cursor on {cursor}"));
+        }
+
+        // The big player takes the panel the user is not in, and no list changes. The bar is under the right list.
+        self.audio_minimize(sender);
+        self.smoke_settle(sender);
+        let sub = self.state.tab(PaneId::Left).path.join("sub");
+        self.state.navigate(PaneId::Right, sub.clone(), true);
+        self.reload_pane(PaneId::Right);
+        self.state.active = PaneId::Left;
+        self.audio_expand(sender);
+        self.smoke_settle(sender);
+        if !self.audio_full() || self.state.active != PaneId::Left || self.state.tab(PaneId::Right).path != sub {
+            errors.push(format!("music: expand from the left panel gave full {}, active {:?}", self.audio_full(), self.state.active));
+        }
+        if self.shell.panes[1].preview_kind.visible_child_name().as_deref() != Some("player") {
+            errors.push("music: expand from the left panel did not put the player in the right one".into());
+        }
+        // The music started in the left panel and the user works in the right one: the player goes left.
+        self.audio_close(sender);
+        self.state.active = PaneId::Left;
+        self.point_at(PaneId::Left, "tone.wav");
+        self.smoke_settle(sender);
+        press(self, Key::Return);
+        self.audio_minimize(sender);
+        self.smoke_settle(sender);
+        let left_path = self.state.tab(PaneId::Left).path.clone();
+        self.state.active = PaneId::Right;
+        self.audio_expand(sender);
+        self.smoke_settle(sender);
+        if !self.audio_full() || self.state.active != PaneId::Right || self.state.tab(PaneId::Left).path != left_path {
+            errors.push(format!("music: expand from the right panel gave full {}, active {:?}", self.audio_full(), self.state.active));
+        }
+        if self.shell.panes[0].preview_kind.visible_child_name().as_deref() != Some("player") {
+            errors.push("music: expand from the right panel did not put the player in the left one".into());
         }
 
         // X and Delete close the small player from the keyboard.
