@@ -328,31 +328,47 @@ fn icon_packs_cover_roles() -> Result<(), String> {
 }
 
 fn columns_fit_pane() -> Result<(), String> {
-    let wanted = [640, 80, 90, 188, 120];
-    let wide = listing::fit_columns(wanted, 1000);
-    if wide.iter().sum::<i32>() != 1000 || wide[0] <= 96 {
-        return Err(format!("wide {wide:?}"));
-    }
-    let narrow = listing::fit_columns(wanted, 500);
-    if narrow[0] != 96 || narrow[1..] != wanted[1..] {
-        return Err(format!("narrow {narrow:?}"));
-    }
-    eq(listing::fit_columns(wanted, 0), wanted, "unknown width")
+    let ideal = [300, 57, 59, 126, 91];
+    // Room to spare: the small columns keep their width and Name takes the rest.
+    eq(listing::fit_columns(ideal, 170, 1000), [667, 57, 59, 126, 91], "wide")?;
+    // Names would get less than their floor, so Attr goes first, then Ext, Date and Size.
+    eq(listing::fit_columns(ideal, 170, 450), [208, 57, 59, 126, 0], "no attr")?;
+    eq(listing::fit_columns(ideal, 170, 360), [175, 0, 59, 126, 0], "no ext")?;
+    eq(listing::fit_columns(ideal, 170, 250), [191, 0, 59, 0, 0], "no date")?;
+    // Name alone does not fit: it keeps its floor and the list scrolls.
+    eq(listing::fit_columns(ideal, 170, 150), [170, 0, 0, 0, 0], "name only")?;
+    eq(listing::fit_columns(ideal, 170, 0), ideal, "unknown width")
 }
 
 fn column_widths_follow_text() -> Result<(), String> {
-    let short = Entry { name: "a.md".into(), raw: None, size: 12, mtime: 1_700_000_000, mode: 0o100644, flags: 0 };
-    let long = Entry { name: "readme.markdown".into(), raw: None, size: 12, mtime: 1_700_000_000, mode: 0o100644, flags: 0 };
-    let a = listing::column_pixels(listing::column_chars(&[short]), 8);
-    let b = listing::column_pixels(listing::column_chars(&[long]), 8);
-    if b[0] <= a[0] {
-        return Err(format!("name {} <= {}", b[0], a[0]));
+    let file = |name: &str, size: u64, flags: u8| Entry { name: name.into(), raw: None, size, mtime: 1_700_000_000, mode: 0o100644, flags };
+    let entries = [
+        file("a.md", 12, 0),
+        file("readme.markdown", 3_000_000_000, 0),
+        file("movie.torrent", 12, 0),
+        file("a-longer-folder-name", 0, DIR),
+        file("link", 12, rust_commander::entry::LINK),
+        file("..", 0, DIR),
+    ];
+    let texts = listing::column_texts(&entries);
+    if texts.name.last().map(String::as_str) != Some("a-longer-folder-name/") || !texts.name.contains(&"link@".to_string()) {
+        return Err(format!("name {:?}", texts.name));
     }
-    if b[1] <= a[1] {
-        return Err(format!("ext {} <= {}", b[1], a[1]));
+    if texts.name.iter().any(|name| name.starts_with("..")) {
+        return Err(format!("dotdot counted: {:?}", texts.name));
     }
-    if b[3] < 16 * 8 {
-        return Err(format!("date {}", b[3]));
+    // Extensions are cut to what the Ext column makes room for.
+    eq(texts.ext.clone(), vec!["mark".to_string(), "md".to_string(), "torr".to_string()], "ext")?;
+    if !texts.size.contains(&"<DIR>".to_string()) || !texts.size.contains(&"2.8 G".to_string()) {
+        return Err(format!("size {:?}", texts.size));
+    }
+    eq(texts.date.len(), 1, "one date stands for all")?;
+    eq(texts.attr.clone(), vec!["-rw-r--r--".to_string()], "attr")?;
+    // Nothing to measure in an empty folder, or when the dates are unknown.
+    let bare = Entry { name: "x".into(), raw: None, size: 0, mtime: 0, mode: 0, flags: 0 };
+    let texts = listing::column_texts(&[bare]);
+    if !texts.date.is_empty() || !texts.attr.is_empty() || !texts.ext.is_empty() {
+        return Err(format!("bare {texts:?}"));
     }
     Ok(())
 }

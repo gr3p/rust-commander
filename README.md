@@ -211,6 +211,8 @@ The built-in editor refuses to save a file with multiple hard links or a differe
 
 Settings (F12) has two tabs: General, and Theme and colors. The log is written to `~/.local/state/rust-commander/rust-commander.log`.
 
+Auto column size is on by default and fits the columns to the panel as it is resized. Size, Date and Attr are only as wide as their text, Ext shows at most four characters, and Name gets everything that is left. When a panel is too narrow for that, the columns drop out in the order Attr, Ext, Date and Size, so names keep room. Only when names alone do not fit does the list scroll sideways. Dragging a column header turns auto sizing off and keeps your widths; switch it on again in F12.
+
 ### Themes
 
 The theme is the base for fonts and colors. The Theme dropdown starts with `omarchy`, the default, then the built-in themes, then any theme under `~/.config/omarchy/themes` or `/usr/share/omarchy/themes` (a user theme with the same name wins). Picking one saves it to `config.toml` and to `~/.config/rust-commander/active-theme`. Adding a built-in theme is one entry in `src/theme.rs`.

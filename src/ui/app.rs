@@ -193,7 +193,7 @@ pub struct App {
     cfg: Config,
     status: String,
     dirty: [bool; 2],
-    wanted_widths: [Option<[i32; 5]>; 2],
+    wanted_widths: [Option<settings::ColumnPlan>; 2],
     job: Option<Job>,
     ask: Option<Ask>,
     dialog: Option<gtk::Window>,
@@ -453,7 +453,13 @@ impl SimpleComponent for App {
         });
         if smoke {
             let tx = sender.input_sender().clone();
-            gtk::glib::idle_add_local(move || {
+            let paned = model.shell.paned.clone();
+            let waiting = Instant::now();
+            // The columns are sized from the pane, so the smoke test starts once the window has one.
+            gtk::glib::timeout_add_local(Duration::from_millis(50), move || {
+                if paned.width() <= 0 && waiting.elapsed() < Duration::from_secs(5) {
+                    return gtk::glib::ControlFlow::Continue;
+                }
                 tx.emit(Msg::Smoke);
                 gtk::glib::ControlFlow::Break
             });
@@ -2245,6 +2251,28 @@ impl App {
         self.toggle_auto_columns();
         if !self.cfg.auto_columns {
             errors.push("auto columns stayed off".into());
+        }
+        // A narrow pane drops the small columns before it cramps the names, and a wide one shows them all.
+        let total = self.shell.paned.width();
+        if total >= 800 {
+            self.relayout_columns();
+            self.shell.paned.set_position(240);
+            self.refit_columns();
+            let narrow = self.shown_columns(0);
+            self.shell.paned.set_position(total - 20);
+            self.refit_columns();
+            let wide = self.shown_columns(0);
+            if narrow.first() != Some(&true) || narrow.last() != Some(&false) {
+                errors.push(format!("narrow pane columns {narrow:?}"));
+            }
+            if wide.is_empty() || !wide.iter().all(|shown| *shown) {
+                errors.push(format!("wide pane columns {wide:?}"));
+            }
+            self.shell.paned.set_position(total / 2);
+            self.refit_columns();
+            println!("SMOKE_COLUMNS ran");
+        } else {
+            println!("SMOKE_COLUMNS skipped: window is only {total} px wide");
         }
         self.close_settings();
 

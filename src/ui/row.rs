@@ -147,10 +147,10 @@ pub fn file_columns(pane: usize, sender: &relm4::Sender<crate::ui::msg::Msg>) ->
     [
         glyph_column(pane, sender),
         column("name", "Name", false, -1, 0.0, 0, 8, true, true, pane, sender),
-        column("ext", "Ext", false, 80, 0.0, 0, 8, false, false, pane, sender),
-        column("size", "Size", false, 96, 0.0, 0, 8, false, false, pane, sender),
-        column("time", "Date", false, 188, 0.0, 0, 16, false, false, pane, sender),
-        column("attr", "Attr", false, 120, 0.0, 0, 8, false, false, pane, sender),
+        column("ext", "Ext", false, 80, 0.0, 0, 8, true, false, pane, sender),
+        column("size", "Size", false, 96, 0.0, 0, 8, true, false, pane, sender),
+        column("time", "Date", false, 188, 0.0, 0, 8, true, false, pane, sender),
+        column("attr", "Attr", false, 120, 0.0, 0, 8, true, false, pane, sender),
     ]
 }
 

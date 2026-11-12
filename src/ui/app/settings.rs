@@ -17,6 +17,34 @@ use crate::ui::msg::Msg;
 
 use super::{App, SettingsUi, SIZING, home_dir};
 
+// What a cell needs beyond its text: the label's end margin, what the column adds around its cell, and a pixel of slack.
+const CELL_EXTRA: i32 = 8 + 13 + 2;
+// The file icon in front of a name.
+const ICON_WIDTH: i32 = 20;
+// A header button's padding and the room the column keeps beside it.
+const HEADER_EXTRA: i32 = 33;
+// The arrow of the column the list is sorted by.
+const SORT_ARROW: i32 = 16;
+// Names never get less than this many characters before the list scrolls sideways.
+const NAME_FLOOR_CHARS: usize = 18;
+const PANE_FRAME: i32 = 2;
+const SCROLLBAR: i32 = 16;
+const GLYPH_COLUMN: i32 = 12;
+const PANED_HANDLE: i32 = 1;
+
+/// What the columns of one pane need: the width that shows the widest cell in each, and the least that Name gets.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::ui::app) struct ColumnPlan {
+    ideal: [i32; 5],
+    name_floor: i32,
+}
+
+impl ColumnPlan {
+    fn fit(&self, avail: i32) -> [i32; 5] {
+        rust_commander::listing::fit_columns(self.ideal, self.name_floor, avail)
+    }
+}
+
 impl App {
     // The theme palette is the base. Whatever the user set in F12 comes after it and wins.
     pub(in crate::ui::app) fn apply_css(&self, palette: &Palette) {
@@ -65,20 +93,52 @@ impl App {
         }
     }
 
-    pub(in crate::ui::app) fn char_unit(&self) -> i32 {
-        let layout = self.shell.panes[0].path.create_pango_layout(Some("00000000"));
-        (layout.pixel_size().0 / 8).max(7)
+    // Pixels a text takes in the font of the file list.
+    fn text_px(&self, pane: usize, text: &str) -> i32 {
+        self.shell.panes[pane].list.create_pango_layout(Some(text)).pixel_size().0
+    }
+
+    fn widest_px(&self, pane: usize, texts: &[String]) -> i32 {
+        texts.iter().map(|text| self.text_px(pane, text)).max().unwrap_or(0)
+    }
+
+    /// What the columns of a pane want to show its entries. Everything is measured in the font of the list, so a
+    /// column is as wide as its widest cell and no wider: names get the rest of the pane.
+    fn plan_columns(&self, pane: usize, entries: &[Entry]) -> ColumnPlan {
+        use rust_commander::listing::SortKey;
+        let texts = rust_commander::listing::column_texts(entries);
+        let icon = if self.cfg.file_icons { ICON_WIDTH } else { 0 };
+        let cell = |texts: &[String]| self.widest_px(pane, texts) + CELL_EXTRA;
+        let content = [
+            cell(&texts.name) + icon,
+            cell(&texts.ext),
+            cell(&texts.size),
+            cell(&texts.date),
+            cell(&texts.attr),
+        ];
+        // The header keeps its whole title, and the arrow when the list is sorted by it.
+        let sorted = match self.state.pane(PaneId::from_index(pane)).sort {
+            SortKey::Name => 0,
+            SortKey::Ext => 1,
+            SortKey::Size => 2,
+            SortKey::Time => 3,
+            SortKey::Attr => 4,
+        };
+        let mut ideal = content;
+        for (i, title) in ["Name", "Ext", "Size", "Date", "Attr"].into_iter().enumerate() {
+            let arrow = if i == sorted { SORT_ARROW } else { 0 };
+            ideal[i] = content[i].max(self.text_px(pane, title) + HEADER_EXTRA + arrow);
+        }
+        let name_floor = self.text_px(pane, &"0".repeat(NAME_FLOOR_CHARS)) + icon + CELL_EXTRA;
+        ColumnPlan { ideal, name_floor }
     }
 
     pub(in crate::ui::app) fn layout_columns(&mut self, pane: usize, entries: &[Entry]) {
+        self.set_name_expand(pane, self.cfg.auto_columns);
         let widths = if self.cfg.auto_columns {
-            let unit = self.char_unit();
-            let mut px = rust_commander::listing::column_pixels(rust_commander::listing::column_chars(entries), unit);
-            if self.cfg.file_icons {
-                px[0] += unit;
-            }
-            self.wanted_widths[pane] = Some(px);
-            rust_commander::listing::fit_columns(px, self.pane_width(pane))
+            let plan = self.plan_columns(pane, entries);
+            self.wanted_widths[pane] = Some(plan);
+            plan.fit(self.pane_width(pane))
         } else if self.cfg.column_widths.len() == 5 {
             let w = &self.cfg.column_widths;
             [w[0], w[1], w[2], w[3], w[4]]
@@ -88,15 +148,30 @@ impl App {
         self.apply_widths(pane, widths);
     }
 
-    // Usable width for the data columns: pane width minus glyph column, separators, scrollbar and frame.
+    // With auto sizing the Name column takes whatever the pane has left, so the other columns are never followed by
+    // an empty strip, whatever the scrollbar does. Its fixed width is then only the least it gets.
+    fn set_name_expand(&self, pane: usize, on: bool) {
+        let cols = self.shell.panes[pane].list.columns();
+        for i in 0..cols.n_items() {
+            let Some(col) = cols.item(i).and_then(|obj| obj.downcast::<gtk::ColumnViewColumn>().ok()) else { continue };
+            if col.title().is_some_and(|title| !title.is_empty()) {
+                if col.expands() != on {
+                    col.set_expand(on);
+                }
+                return;
+            }
+        }
+    }
+
+    // Room for the data columns: the pane minus its frame, the glyph column and a scrollbar that may come.
     fn pane_width(&self, pane: usize) -> i32 {
         let paned = &self.shell.paned;
         let total = paned.width();
         if total <= 0 {
             return 0;
         }
-        let side = if pane == 0 { paned.position() } else { total - paned.position() - 6 };
-        side - 44
+        let side = if pane == 0 { paned.position() } else { total - paned.position() - PANED_HANDLE };
+        side - PANE_FRAME - SCROLLBAR - GLYPH_COLUMN
     }
 
     pub(in crate::ui::app) fn refit_columns(&mut self) {
@@ -104,13 +179,15 @@ impl App {
             return;
         }
         for pane in 0..2 {
-            if let Some(px) = self.wanted_widths[pane] {
-                let widths = rust_commander::listing::fit_columns(px, self.pane_width(pane));
+            if let Some(plan) = self.wanted_widths[pane] {
+                let widths = plan.fit(self.pane_width(pane));
                 self.apply_widths(pane, widths);
             }
         }
     }
 
+    // A width of 0 hides the column: with auto sizing it is dropped for want of room, and its fixed width is kept
+    // for when the room is back.
     pub(in crate::ui::app) fn apply_widths(&mut self, pane: usize, widths: [i32; 5]) {
         SIZING.store(true, Ordering::Relaxed);
         let cols = self.shell.panes[pane].list.columns();
@@ -122,25 +199,48 @@ impl App {
             }
             let Some(width) = widths.get(data) else { break };
             data += 1;
-            if col.fixed_width() != *width {
+            let shown = *width > 0;
+            if col.is_visible() != shown {
+                col.set_visible(shown);
+            }
+            if shown && col.fixed_width() != *width {
                 col.set_fixed_width(*width);
             }
         }
         SIZING.store(false, Ordering::Relaxed);
     }
 
+    // The fixed widths of the data columns. With auto sizing Name's is only the least it gets, so what it shows
+    // is what the pane has left once the visible columns have theirs.
     pub(in crate::ui::app) fn pane_widths(&self, pane: usize) -> Vec<i32> {
         let cols = self.shell.panes[pane].list.columns();
         let mut out = Vec::new();
+        let mut taken = 0;
         for i in 0..cols.n_items() {
             if let Some(col) = cols.item(i).and_then(|obj| obj.downcast::<gtk::ColumnViewColumn>().ok()) {
                 if col.title().map(|title| title.is_empty()).unwrap_or(true) {
                     continue;
                 }
+                if !out.is_empty() && col.is_visible() {
+                    taken += col.fixed_width();
+                }
                 out.push(col.fixed_width());
             }
         }
+        if self.cfg.auto_columns && out.len() == 5 {
+            out[0] = out[0].max(self.pane_width(pane) - taken);
+        }
         out
+    }
+
+    // Which of the data columns of a pane are shown. Auto sizing hides the small ones when the pane is narrow.
+    pub(in crate::ui::app) fn shown_columns(&self, pane: usize) -> Vec<bool> {
+        let cols = self.shell.panes[pane].list.columns();
+        (0..cols.n_items())
+            .filter_map(|i| cols.item(i).and_then(|obj| obj.downcast::<gtk::ColumnViewColumn>().ok()))
+            .filter(|col| col.title().is_some_and(|title| !title.is_empty()))
+            .map(|col| col.is_visible())
+            .collect()
     }
 
     pub(in crate::ui::app) fn on_column_sized(&mut self, pane: usize) {
@@ -153,8 +253,13 @@ impl App {
         self.cfg.column_widths = widths.clone();
         let _ = config::save(&self.cfg);
         if widths.len() == 5 {
-            let other = 1 - pane;
-            self.apply_widths(other, [widths[0], widths[1], widths[2], widths[3], widths[4]]);
+            let fixed = [widths[0], widths[1], widths[2], widths[3], widths[4]];
+            if turned_off {
+                self.set_name_expand(0, false);
+                self.set_name_expand(1, false);
+                self.apply_widths(pane, fixed);
+            }
+            self.apply_widths(1 - pane, fixed);
         }
         if turned_off {
             self.status = "Column widths kept".into();
@@ -600,13 +705,15 @@ impl App {
     }
 
     pub(in crate::ui::app) fn toggle_auto_columns(&mut self) {
-        self.cfg.auto_columns = !self.cfg.auto_columns;
         if self.cfg.auto_columns {
-            self.cfg.column_widths.clear();
-            self.relayout_columns();
-        } else {
+            // Manual widths start from what the list shows now.
             self.cfg.column_widths = self.pane_widths(self.state.active.index());
+            self.cfg.auto_columns = false;
+        } else {
+            self.cfg.auto_columns = true;
+            self.cfg.column_widths.clear();
         }
+        self.relayout_columns();
         let _ = config::save(&self.cfg);
         self.paint_settings_switch();
     }

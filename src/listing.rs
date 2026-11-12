@@ -331,24 +331,87 @@ fn civil_from_unix_days(days: i64) -> (i32, u32, u32) {
     (y as i32, m as u32, d as u32)
 }
 
-pub fn column_chars(entries: &[Entry]) -> [usize; 5] {
-    let mut name = 4;
-    let mut ext = 3;
-    let mut size = 4;
-    let mut date = 4;
-    let mut attr = 4;
+/// Longest extension the Ext column makes room for. Longer ones are cut with an ellipsis.
+pub const EXT_CHARS: usize = 4;
+
+/// The strings that decide how wide each column has to be. The window measures them in its own font.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ColumnTexts {
+    pub name: Vec<String>,
+    pub ext: Vec<String>,
+    pub size: Vec<String>,
+    pub date: Vec<String>,
+    pub attr: Vec<String>,
+}
+
+/// Keeps the longest few texts offered, by character count.
+struct Longest {
+    keep: usize,
+    items: Vec<(usize, String)>,
+}
+
+impl Longest {
+    fn new(keep: usize) -> Self {
+        Self { keep, items: Vec::with_capacity(keep + 1) }
+    }
+
+    fn offer(&mut self, chars: usize, text: impl FnOnce() -> String) {
+        if self.items.len() == self.keep && chars <= self.items[0].0 {
+            return;
+        }
+        let at = self.items.partition_point(|(n, _)| *n < chars);
+        self.items.insert(at, (chars, text()));
+        if self.items.len() > self.keep {
+            self.items.remove(0);
+        }
+    }
+
+    fn into_texts(self) -> Vec<String> {
+        self.items.into_iter().map(|(_, text)| text).collect()
+    }
+}
+
+/// The widest cells of each column: the longest names and sizes, every extension cut to `EXT_CHARS`, every
+/// distinct attribute string, and one date. Dates all have the same length, so one stands for them all.
+pub fn column_texts(entries: &[Entry]) -> ColumnTexts {
+    let mut name = Longest::new(12);
+    let mut size = Longest::new(6);
+    let mut ext = std::collections::BTreeSet::new();
+    let mut attr = std::collections::BTreeSet::new();
+    let mut dated = false;
     for entry in entries {
         if entry.name.as_ref() == ".." {
             continue;
         }
-        name = name.max(shown_name_chars(entry));
-        ext = ext.max(extension(&entry.name).len());
-        let size_len = if entry.is_dir() && entry.size == 0 { 5 } else { format_size(entry.size).len() };
-        size = size.max(size_len);
-        date = date.max(format_mtime(entry.mtime).len());
-        attr = attr.max(format_attr(entry.mode).len());
+        name.offer(shown_name_chars(entry), || {
+            let suffix = if entry.is_dir() {
+                "/"
+            } else if entry.is_symlink() {
+                "@"
+            } else {
+                ""
+            };
+            format!("{}{suffix}", entry.name)
+        });
+        let ext_text: String = extension(&entry.name).chars().take(EXT_CHARS).collect();
+        if !ext_text.is_empty() {
+            ext.insert(ext_text);
+        }
+        let size_text = if entry.is_dir() && entry.size == 0 { "<DIR>".to_string() } else { format_size(entry.size) };
+        size.offer(size_text.chars().count(), || size_text.clone());
+        dated |= entry.mtime > 0;
+        let mode = format_attr(entry.mode);
+        if !mode.is_empty() {
+            attr.insert(mode);
+        }
     }
-    [name, ext, size, date, attr]
+    ColumnTexts {
+        name: name.into_texts(),
+        ext: ext.into_iter().collect(),
+        size: size.into_texts(),
+        date: if dated { vec!["0000-00-00 00:00".into()] } else { Vec::new() },
+        attr: attr.into_iter().collect(),
+    }
 }
 
 fn shown_name_chars(entry: &Entry) -> usize {
@@ -356,28 +419,27 @@ fn shown_name_chars(entry: &Entry) -> usize {
     entry.name.chars().count() + suffix
 }
 
-pub fn column_pixels(chars: [usize; 5], unit: i32) -> [i32; 5] {
-    let unit = unit.max(7);
-    // Cell padding plus the label's horizontal margins. Date has a wider end margin.
-    let pad = [28, 28, 28, 36, 28];
-    let min = [96, 48, 64, 140, 96];
-    let max = [640, 200, 140, 240, 160];
-    let mut out = [0; 5];
-    for i in 0..5 {
-        out[i] = ((chars[i] as i32) * unit + pad[i]).clamp(min[i], max[i]);
-    }
-    out
-}
-
-/// Fits wanted column pixels to the pane: Name takes what the other columns leave, so long names never decide the layout.
-pub fn fit_columns(wanted: [i32; 5], avail: i32) -> [i32; 5] {
-    const NAME_MIN: i32 = 96;
+/// Fits the columns to the pane. `ideal` is what each column needs to show its widest cell. The columns after Name
+/// keep exactly that, so Size, Date and Attr carry no air and lose no text.
+///
+/// Name takes what the others leave, so long names never decide the layout, and it gets at least `name_floor`. When
+/// the others leave less, the least useful ones drop out, Attr first, then Ext, Date and Size, each given as a width
+/// of 0, until names have their room. Only when even Name alone does not fit is the sum wider than the pane, and the
+/// list scrolls sideways.
+pub fn fit_columns(ideal: [i32; 5], name_floor: i32, avail: i32) -> [i32; 5] {
     if avail <= 0 {
-        return wanted;
+        return ideal;
     }
-    let mut out = wanted;
-    let others: i32 = out[1..].iter().sum();
-    out[0] = (avail - others).max(NAME_MIN);
+    let mut out = ideal;
+    let mut left = avail - out[1..].iter().sum::<i32>();
+    for i in [4, 1, 3, 2] {
+        if left >= name_floor {
+            break;
+        }
+        left += out[i];
+        out[i] = 0;
+    }
+    out[0] = left.max(name_floor);
     out
 }
 
