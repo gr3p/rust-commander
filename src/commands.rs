@@ -576,6 +576,7 @@ pub enum RowAct {
     Unpack,
     Trash,
     CopyPath,
+    Paste,
     Properties,
     PlayerSend,
     PlayerAdd,
@@ -595,9 +596,13 @@ fn row_item(act: RowAct, keys: &'static str, label: &'static str, group: u8) -> 
 
 /// `parent` is the `..` row. A directory is not an archive and not an image. `music` is a song, or a marked
 /// row whose marks may hold songs, which brings the two player items.
+pub fn paste_row() -> RowItem {
+    row_item(RowAct::Paste, "Ctrl+V", "Paste", 1)
+}
+
 pub fn row_menu(parent: bool, dir: bool, archive: bool, image: bool, music: bool) -> Vec<RowItem> {
     if parent {
-        return vec![row_item(RowAct::Open, "Enter", "Open", 0)];
+        return vec![row_item(RowAct::Open, "Enter", "Open", 0), paste_row()];
     }
     let mut rows = vec![row_item(RowAct::Open, "Enter", "Open", 0)];
     if !dir {
@@ -612,6 +617,7 @@ pub fn row_menu(parent: bool, dir: bool, archive: bool, image: bool, music: bool
     }
     rows.push(row_item(RowAct::Copy, "F5", "Copy", 1));
     rows.push(row_item(RowAct::Move, "F6", "Move", 1));
+    rows.push(paste_row());
     rows.push(row_item(RowAct::Rename, "Shift+F6", "Rename", 2));
     rows.push(row_item(RowAct::Pack, "Alt+F5", "Pack", 2));
     if archive && !dir {
@@ -886,7 +892,7 @@ mod tests {
 
     #[test]
     fn parent_row_only_opens() {
-        assert_eq!(acts(&row_menu(true, true, false, false, false)), vec![RowAct::Open]);
+        assert_eq!(acts(&row_menu(true, true, false, false, false)), vec![RowAct::Open, RowAct::Paste]);
     }
 
     #[test]
@@ -898,6 +904,7 @@ mod tests {
                 RowAct::Open,
                 RowAct::Copy,
                 RowAct::Move,
+                RowAct::Paste,
                 RowAct::Rename,
                 RowAct::Pack,
                 RowAct::Trash,
@@ -907,9 +914,9 @@ mod tests {
         );
         assert_eq!(rows[0].group, 0);
         assert_eq!(rows[1].group, 1);
-        assert_eq!(rows[3].group, 2);
-        assert_eq!(rows[5].group, 3);
-        assert_eq!(rows[6].group, 4);
+        assert_eq!(rows[4].group, 2);
+        assert_eq!(rows[6].group, 3);
+        assert_eq!(rows[7].group, 4);
     }
 
     #[test]

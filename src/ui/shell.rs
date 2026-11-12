@@ -84,6 +84,10 @@ pub struct Shell {
     pub idle_drives: Vec<gtk::Button>,
     pub mount_button: gtk::Button,
     pub drive_snapshot: DriveSnapshot,
+    // Network mounts that dropped, kept so a lost VPN does not clear the button.
+    pub down: Vec<rust_commander::places::Mount>,
+    // Mounts the user asked to release. Cleared once they leave the live list.
+    pub released: Vec<PathBuf>,
     pub edit_button: gtk::Button,
     pub save_button: gtk::Button,
     pub discard_button: gtk::Button,
@@ -334,6 +338,8 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
         idle_drives,
         mount_button,
         drive_snapshot,
+        down: Vec::new(),
+        released: Vec::new(),
         edit_button,
         save_button,
         discard_button,
@@ -428,7 +434,7 @@ fn drive_bar(
     bar.set_margin_top(2);
     bar.set_margin_bottom(2);
     let snapshot = (rust_commander::places::mounts(), super::drives::idle_volumes());
-    let (drives, idle) = drive_buttons(sender, active, icon_pack, &snapshot);
+    let (drives, idle) = drive_buttons(sender, active, icon_pack, &snapshot, &[]);
     for button in drives.iter().map(|(_, button)| button).chain(idle.iter()) {
         bar.append(button);
     }
@@ -457,7 +463,9 @@ pub fn rebuild_drives(
     icon_pack: &str,
 ) -> Option<Vec<PathBuf>> {
     let snapshot = (rust_commander::places::mounts(), super::drives::idle_volumes());
-    if snapshot == shell.drive_snapshot {
+    let down = rust_commander::places::keep_down(&shell.drive_snapshot.0, &snapshot.0, &shell.down, &shell.released);
+    shell.released.retain(|path| snapshot.0.iter().any(|mount| &mount.path == path));
+    if snapshot == shell.drive_snapshot && down == shell.down {
         return None;
     }
     let gone = shell
@@ -465,12 +473,13 @@ pub fn rebuild_drives(
         .0
         .iter()
         .filter(|old| !snapshot.0.iter().any(|new| new.path == old.path))
+        .filter(|old| !down.iter().any(|kept| kept.path == old.path))
         .map(|old| old.path.clone())
         .collect();
     for button in shell.drives.drain(..).map(|(_, button)| button).chain(shell.idle_drives.drain(..)) {
         shell.shell_bar.remove(&button);
     }
-    let (drives, idle) = drive_buttons(sender, &shell.active, &iconpack::active(icon_pack), &snapshot);
+    let (drives, idle) = drive_buttons(sender, &shell.active, &iconpack::active(icon_pack), &snapshot, &down);
     let mut prev: Option<gtk::Widget> = None;
     for button in drives.iter().map(|(_, button)| button).chain(idle.iter()) {
         shell.shell_bar.insert_child_after(button, prev.as_ref());
@@ -479,6 +488,7 @@ pub fn rebuild_drives(
     shell.drives = drives;
     shell.idle_drives = idle;
     shell.drive_snapshot = snapshot;
+    shell.down = down;
     Some(gone)
 }
 
@@ -487,10 +497,16 @@ fn drive_buttons(
     active: &Rc<Cell<usize>>,
     icon_pack: &str,
     (mounts, idle): &DriveSnapshot,
+    down: &[rust_commander::places::Mount],
 ) -> (Vec<(PathBuf, gtk::Button)>, Vec<gtk::Button>) {
     use super::msg::Msg;
     let mut drives = Vec::new();
-    for (index, mount) in mounts.iter().enumerate() {
+    let rows: Vec<(&rust_commander::places::Mount, bool)> = mounts
+        .iter()
+        .map(|mount| (mount, true))
+        .chain(down.iter().map(|mount| (mount, false)))
+        .collect();
+    for (index, (mount, up)) in rows.into_iter().enumerate() {
         let button = gtk::Button::new();
         button.add_css_class("drive");
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -506,46 +522,62 @@ fn drive_buttons(
         caption.set_max_width_chars(10);
         row.append(&caption);
         button.set_child(Some(&row));
+        if !up {
+            button.add_css_class("idle");
+        }
         let shortcut = if index < 9 {
             rust_commander::commands::format_keys(&format!("Ctrl+{}", index + 1))
         } else {
             String::new()
         };
-        let tip = if shortcut.is_empty() {
+        let tip = if !up {
+            format!("Not reachable  {}  {}", mount.device, mount.path.display())
+        } else if shortcut.is_empty() {
             format!("{}  {}", mount.device, mount.path.display())
         } else {
             format!("{shortcut}  {}  {}", mount.device, mount.path.display())
         };
-        // Free space changes while the program runs, so it is read each time the tip opens.
-        button.set_has_tooltip(true);
-        let mount_path = mount.path.clone();
-        button.connect_query_tooltip(move |_, _, _, _, tooltip| {
-            let space = rust_commander::places::disk_info(&mount_path)
-                .map(|info| rust_commander::places::summary(&info))
-                .unwrap_or_default();
-            tooltip.set_text(Some(&format!("{tip}\n{space}")));
-            true
-        });
         let menu_click = gtk::GestureClick::new();
         menu_click.set_button(gtk::gdk::BUTTON_SECONDARY);
         let tx_menu = sender.clone();
         let menu_path = mount.path.clone();
-        menu_click.connect_pressed(move |gesture, _, _, _| {
-            let Some(button) = gesture.widget() else { return };
-            let can = super::drives::actions(&menu_path);
-            let mut items: Vec<(&str, Box<dyn Fn()>)> = Vec::new();
-            let (tx, path) = (tx_menu.clone(), menu_path.clone());
-            items.push(("Properties", Box::new(move || tx.emit(Msg::DiskInfo(Some(path.clone()))))));
-            if can.unmount {
+        if up {
+            // Free space changes while the program runs, so it is read each time the tip opens.
+            button.set_has_tooltip(true);
+            let mount_path = mount.path.clone();
+            button.connect_query_tooltip(move |_, _, _, _, tooltip| {
+                let space = rust_commander::places::disk_info(&mount_path)
+                    .map(|info| rust_commander::places::summary(&info))
+                    .unwrap_or_default();
+                tooltip.set_text(Some(&format!("{tip}\n{space}")));
+                true
+            });
+            menu_click.connect_pressed(move |gesture, _, _, _| {
+                let Some(button) = gesture.widget() else { return };
+                let can = super::drives::actions(&menu_path);
+                let mut items: Vec<(&str, Box<dyn Fn()>)> = Vec::new();
                 let (tx, path) = (tx_menu.clone(), menu_path.clone());
-                items.push(("Unmount", Box::new(move || tx.emit(Msg::Unmount(path.clone(), false)))));
-            }
-            if can.eject {
+                items.push(("Properties", Box::new(move || tx.emit(Msg::DiskInfo(Some(path.clone()))))));
+                if can.unmount {
+                    let (tx, path) = (tx_menu.clone(), menu_path.clone());
+                    items.push(("Unmount", Box::new(move || tx.emit(Msg::Unmount(path.clone(), false)))));
+                }
+                if can.eject {
+                    let (tx, path) = (tx_menu.clone(), menu_path.clone());
+                    items.push(("Eject", Box::new(move || tx.emit(Msg::Unmount(path.clone(), true)))));
+                }
+                popup_menu(&button, items);
+            });
+        } else {
+            button.set_tooltip_text(Some(&tip));
+            menu_click.connect_pressed(move |gesture, _, _, _| {
+                let Some(button) = gesture.widget() else { return };
                 let (tx, path) = (tx_menu.clone(), menu_path.clone());
-                items.push(("Eject", Box::new(move || tx.emit(Msg::Unmount(path.clone(), true)))));
-            }
-            popup_menu(&button, items);
-        });
+                let items: Vec<(&str, Box<dyn Fn()>)> =
+                    vec![("Remove", Box::new(move || tx.emit(Msg::ForgetMount(path.clone()))))];
+                popup_menu(&button, items);
+            });
+        }
         button.add_controller(menu_click);
         button.set_focus_on_click(false);
         let tx = sender.clone();
@@ -622,6 +654,7 @@ fn popup_menu(anchor: &gtk::Widget, items: Vec<(&str, Box<dyn Fn()>)>) {
 pub fn popup_rows(
     anchor: &gtk::Widget,
     items: &[rust_commander::commands::RowItem],
+    at: Option<(f64, f64)>,
     on_pick: impl Fn(rust_commander::commands::RowAct) + 'static,
 ) {
     use std::cell::RefCell;
@@ -674,6 +707,9 @@ pub fn popup_rows(
     }
     menu.set_child(Some(&column));
     menu.set_parent(anchor);
+    if let Some((x, y)) = at {
+        menu.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+    }
     let tracked = menu.clone();
     menu.connect_closed(move |menu| {
         let same = OPEN.with(|open| open.borrow().as_ref().is_some_and(|current| current == menu));
@@ -1213,6 +1249,41 @@ fn under(widget: &gtk::Widget, ancestor: &gtk::Widget) -> bool {
     false
 }
 
+// Right-click on empty list space. A file row keeps its own menu.
+fn bind_directory_menu(view: &impl IsA<gtk::Widget>, pane: usize, sender: &relm4::Sender<super::msg::Msg>) {
+    let click = gtk::GestureClick::new();
+    click.set_button(gtk::gdk::BUTTON_SECONDARY);
+    click.set_propagation_phase(gtk::PropagationPhase::Bubble);
+    let tx = sender.clone();
+    click.connect_pressed(move |gesture, _, x, y| {
+        let Some(widget) = gesture.widget() else { return };
+        if widget.pick(x, y, gtk::PickFlags::DEFAULT).is_some_and(skips_directory_menu) {
+            return;
+        }
+        let items = [rust_commander::commands::paste_row()];
+        let tx = tx.clone();
+        popup_rows(&widget, &items, Some((x, y)), move |act| {
+            tx.emit(super::msg::Msg::RowAct(pane, act));
+        });
+    });
+    view.add_controller(click);
+}
+
+fn skips_directory_menu(hit: gtk::Widget) -> bool {
+    let mut current = Some(hit);
+    while let Some(widget) = current {
+        if widget.has_css_class("file-row") {
+            return true;
+        }
+        let name = widget.type_().name();
+        if name == "GtkColumnViewTitle" || name == "GtkScrollbar" {
+            return true;
+        }
+        current = widget.parent();
+    }
+    false
+}
+
 // A file view takes the pane on click and on focus.
 fn claim_pane(view: &impl IsA<gtk::Widget>, index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<Cell<usize>>) {
     // Already-selected rows do not notify, so a click in Ext/Size/Date/Attr must still activate the pane.
@@ -1227,6 +1298,7 @@ fn claim_pane(view: &impl IsA<gtk::Widget>, index: usize, sender: &relm4::Sender
         tx.emit(super::msg::Msg::FocusPane(index));
     });
     view.add_controller(column_click);
+    bind_directory_menu(view, index, sender);
     let focus = gtk::EventControllerFocus::new();
     let tx = sender.clone();
     let focus_active = active_pane.clone();

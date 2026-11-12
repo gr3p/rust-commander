@@ -78,6 +78,7 @@ pub enum Msg {
     MountVolume(usize, String),
     EjectVolume(String),
     Unmount(std::path::PathBuf, bool),
+    ForgetMount(std::path::PathBuf),
     DriveStatus(String),
     MountClosed(u64),
     MountFinished {
@@ -191,4 +192,18 @@ pub enum Msg {
     AudioVisualSmooth(u8),
     AudioVisualDensity(u8),
     AudioRepeatSet(rust_commander::audio::Repeat),
+    Status(String),
+    // Files copied in another program. `dest` is the folder that was open when Ctrl+V was pressed.
+    DesktopPaste {
+        mime: String,
+        bytes: Vec<u8>,
+        dest: std::path::PathBuf,
+    },
+    // The mp4 probe ran off the UI thread: true when the file holds a film and not only sound.
+    FilmChecked {
+        path: std::path::PathBuf,
+        film: bool,
+    },
+    // The folder answered a stat, so its monitor can be made without blocking.
+    WatchReady(usize, std::path::PathBuf),
 }

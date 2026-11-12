@@ -36,7 +36,7 @@ fn dir_follow(seen: Option<SystemTime>, mtime: Option<SystemTime>) -> DirFollow 
 }
 
 impl App {
-    pub(in crate::ui::app) fn arm_watches(&mut self, sender: &ComponentSender<Self>) {
+    pub(in crate::ui::app) fn arm_watches(&mut self) {
         for id in [PaneId::Left, PaneId::Right] {
             let path = self.state.tab(id).path.clone();
             let pane = id.index();
@@ -46,44 +46,61 @@ impl App {
             {
                 continue;
             }
-            let file = gtk::gio::File::for_path(&path);
-            let monitor = file
-                .monitor_directory(
-                    gtk::gio::FileMonitorFlags::NONE,
-                    gtk::gio::Cancellable::NONE,
-                )
-                .ok();
-            if let Some(monitor) = &monitor {
-                let generation = Rc::new(Cell::new(0u64));
-                let first = Rc::new(Cell::new(None::<Instant>));
-                let tx = sender.input_sender().clone();
-                let watched = path.clone();
-                monitor.connect_changed(move |_, _, _, _| {
-                    let next = generation.get().wrapping_add(1);
-                    generation.set(next);
-                    if first.get().is_none() {
-                        first.set(Some(Instant::now()));
-                    }
-                    let (generation, first) = (Rc::clone(&generation), Rc::clone(&first));
-                    let tx = tx.clone();
-                    let watched = watched.clone();
-                    gtk::glib::timeout_add_local_once(Duration::from_millis(350), move || {
-                        // A file that keeps changing (a download) would otherwise hold the reload back for good.
-                        let due = generation.get() == next
-                            || first.get().is_some_and(|at| at.elapsed() >= MAX_WAIT);
-                        if due {
-                            first.set(None);
-                            tx.emit(Msg::DirChanged(pane, watched));
-                        }
-                    });
-                });
-            }
             self.watches[pane] = Some(DirWatch {
-                path,
+                path: path.clone(),
                 seen: None,
-                _monitor: monitor,
+                _monitor: None,
+            });
+            // Starting a monitor on a path that does not answer would block the UI, so a stat goes first.
+            let tx = self.tx.clone();
+            std::thread::spawn(move || {
+                if std::fs::metadata(&path).is_ok() {
+                    tx.emit(Msg::WatchReady(pane, path));
+                }
             });
         }
+    }
+
+    pub(in crate::ui::app) fn watch_ready(&mut self, pane: usize, path: &std::path::Path) {
+        let Some(watch) = self.watches[pane].as_mut() else {
+            return;
+        };
+        if watch.path != path || watch._monitor.is_some() {
+            return;
+        }
+        let file = gtk::gio::File::for_path(path);
+        let monitor = file
+            .monitor_directory(
+                gtk::gio::FileMonitorFlags::NONE,
+                gtk::gio::Cancellable::NONE,
+            )
+            .ok();
+        if let Some(monitor) = &monitor {
+            let generation = Rc::new(Cell::new(0u64));
+            let first = Rc::new(Cell::new(None::<Instant>));
+            let tx = self.tx.clone();
+            let watched = path.to_path_buf();
+            monitor.connect_changed(move |_, _, _, _| {
+                let next = generation.get().wrapping_add(1);
+                generation.set(next);
+                if first.get().is_none() {
+                    first.set(Some(Instant::now()));
+                }
+                let (generation, first) = (Rc::clone(&generation), Rc::clone(&first));
+                let tx = tx.clone();
+                let watched = watched.clone();
+                gtk::glib::timeout_add_local_once(Duration::from_millis(350), move || {
+                    // A file that keeps changing (a download) would otherwise hold the reload back for good.
+                    let due = generation.get() == next
+                        || first.get().is_some_and(|at| at.elapsed() >= MAX_WAIT);
+                    if due {
+                        first.set(None);
+                        tx.emit(Msg::DirChanged(pane, watched));
+                    }
+                });
+            });
+        }
+        watch._monitor = monitor;
     }
 
     pub(in crate::ui::app) fn remember_dir(&mut self, pane: usize, stamp: SystemTime) {

@@ -180,6 +180,35 @@ pub fn parse_mounts(text: &str) -> Vec<Mount> {
     out
 }
 
+// A network mount that drops out of the live list stays, so a lost VPN does not remove it.
+// `released` is one the user unmounted on purpose.
+pub fn keep_down(previous: &[Mount], live: &[Mount], down: &[Mount], released: &[PathBuf]) -> Vec<Mount> {
+    let mut kept: Vec<Mount> = Vec::new();
+    for mount in down.iter().chain(previous.iter()).filter(|mount| mount.network) {
+        if live.iter().any(|now| now.path == mount.path) || released.iter().any(|path| path == &mount.path) {
+            continue;
+        }
+        if kept.iter().any(|have: &Mount| have.path == mount.path) {
+            continue;
+        }
+        kept.push(mount.clone());
+    }
+    kept
+}
+
+// What a lost link returns: host down, no route, network down, not connected, timed out, stale handle.
+const LINK_LOST: [i32; 6] = [libc::EHOSTDOWN, libc::EHOSTUNREACH, libc::ENETUNREACH, libc::ENOTCONN, libc::ETIMEDOUT, libc::ESTALE];
+
+// `err` is a listing error, "{dir}: {io error}" or the stall note "No answer from {dir} in 20s, gave up".
+// True when it is a lost link inside `mount`; permission errors and the like are not.
+pub fn link_lost(err: &str, mount: &Path) -> bool {
+    if let Some(rest) = err.strip_prefix("No answer from ") {
+        return rest.rsplit_once(" in ").is_some_and(|(dir, _)| Path::new(dir).starts_with(mount));
+    }
+    let Some((dir, why)) = err.split_once(": ") else { return false };
+    Path::new(dir).starts_with(mount) && LINK_LOST.iter().any(|code| why.contains(&format!("(os error {code})")))
+}
+
 fn mount_at(path: PathBuf, dev: &str, fstype: &str, labels: &mut std::collections::HashSet<String>) -> Mount {
     let optical = is_optical_device(dev);
     let removable = optical || path.starts_with("/media") || path.starts_with("/run/media");
@@ -265,4 +294,68 @@ fn unescape_mount(raw: &str) -> String {
         .replace("\\011", "\t")
         .replace("\\012", "\n")
         .replace("\\134", "\\")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mount(path: &str, network: bool) -> Mount {
+        Mount {
+            label: path.rsplit('/').next().unwrap_or(path).into(),
+            path: PathBuf::from(path),
+            device: "//srv/share".into(),
+            removable: false,
+            network,
+            optical: false,
+        }
+    }
+
+    #[test]
+    fn network_mount_stays_when_it_drops() {
+        let previous = vec![mount("/", false), mount("/mnt/share", true)];
+        let live = vec![mount("/", false)];
+        let kept = keep_down(&previous, &live, &[], &[]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].path, PathBuf::from("/mnt/share"));
+    }
+
+    #[test]
+    fn unmounted_network_mount_is_forgotten() {
+        let previous = vec![mount("/mnt/share", true)];
+        let released = vec![PathBuf::from("/mnt/share")];
+        assert!(keep_down(&previous, &[], &[], &released).is_empty());
+    }
+
+    #[test]
+    fn removing_a_down_mount_changes_the_list() {
+        let down = vec![mount("/mnt/share", true)];
+        let released = vec![PathBuf::from("/mnt/share")];
+        assert_ne!(keep_down(&[], &[], &down, &released), down);
+    }
+
+    #[test]
+    fn returning_mount_leaves_the_down_list() {
+        let down = vec![mount("/mnt/share", true)];
+        let live = vec![mount("/mnt/share", true)];
+        assert!(keep_down(&[], &live, &down, &[]).is_empty());
+    }
+
+    #[test]
+    fn lost_link_is_told_apart_from_other_errors() {
+        let root = Path::new("/mnt/share");
+        assert!(link_lost("/mnt/share: Host is down (os error 112)", root));
+        assert!(link_lost("/mnt/share/sub: Connection timed out (os error 110)", root));
+        assert!(link_lost("No answer from /mnt/share in 20s, gave up", root));
+        assert!(link_lost("No answer from /mnt/share/sub in 20s, gave up", root));
+        assert!(!link_lost("/mnt/share: Permission denied (os error 13)", root));
+        assert!(!link_lost("/mnt/share2: Host is down (os error 112)", root));
+        assert!(!link_lost("No answer from /mnt/share2 in 20s, gave up", root));
+    }
+
+    #[test]
+    fn local_disk_does_not_stay() {
+        let previous = vec![mount("/media/usb", false)];
+        assert!(keep_down(&previous, &[], &[], &[]).is_empty());
+    }
 }

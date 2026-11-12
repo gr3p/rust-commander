@@ -1,6 +1,6 @@
 [rust-commander]
 name=Rust Commander
-baseurl=https://gr3p.github.io/rust-commander/rpm/fedora/44/x86_64
+baseurl=https://gr3p.github.io/rust-commander/rpm/fedora/$releasever/x86_64
 enabled=1
 metadata_expire=1h
 gpgcheck=1

@@ -30,6 +30,7 @@ mod commands;
 mod disk;
 mod jobs;
 mod mount;
+mod paste;
 mod music;
 mod props;
 mod queue;
@@ -249,6 +250,7 @@ pub struct App {
     settings: Option<SettingsUi>,
     command_list: Option<gtk::Window>,
     smoke: bool,
+    tx: relm4::Sender<Msg>,
 }
 
 pub fn run(smoke: bool) {
@@ -419,6 +421,7 @@ impl SimpleComponent for App {
             settings: None,
             command_list: None,
             smoke,
+            tx: sender.input_sender().clone(),
         };
         model.apply_css(&theme::load_named(&theme::active_name(
             &model.cfg.theme,
@@ -461,7 +464,7 @@ impl SimpleComponent for App {
     fn update(&mut self, msg: Msg, sender: ComponentSender<Self>) {
         let idle_poll = matches!(msg, Msg::Poll);
         self.on_msg(msg, &sender);
-        self.arm_watches(&sender);
+        self.arm_watches();
         self.kick_preview(&sender);
         // Finding the file under the cursor sorts the folder, so an idle poll leaves it be.
         if !idle_poll || self.dirty.iter().any(|pane| *pane) {
@@ -741,6 +744,10 @@ impl App {
             Msg::DiskInfo(path) => self.show_disk_info(path),
             Msg::DrivesChanged => self.refresh_drives(sender),
             Msg::DriveStatus(text) => self.status = text,
+            Msg::Status(text) => self.status = text,
+            Msg::DesktopPaste { mime, bytes, dest } => self.paste_desktop_files(&mime, &bytes, &dest, sender),
+            Msg::FilmChecked { path, film } => self.film_checked(path, film, sender),
+            Msg::WatchReady(pane, path) => self.watch_ready(pane, &path),
             Msg::MountVolume(pane, id) => {
                 self.status = format!("Mounting {id}");
                 let tx = sender.input_sender().clone();
@@ -761,9 +768,18 @@ impl App {
             Msg::Unmount(path, eject) => {
                 let tx = sender.input_sender().clone();
                 let name = path.display().to_string();
+                let path_done = path.clone();
                 super::drives::release(&path, eject, move |result| {
-                    tx.emit(Msg::DriveStatus(released(&name, result)))
+                    let ok = result.is_ok();
+                    tx.emit(Msg::DriveStatus(released(&name, result)));
+                    if ok {
+                        tx.emit(Msg::ForgetMount(path_done));
+                    }
                 });
+            }
+            Msg::ForgetMount(path) => {
+                self.shell.released.push(path);
+                self.refresh_drives(sender);
             }
             Msg::MountClosed(generation) => {
                 if self.mount_gen == generation {
@@ -886,6 +902,7 @@ impl App {
                 }
                 Key::c | Key::C if shift => self.copy_selected_paths(),
                 Key::c | Key::C if self.preview_image_focused() => self.copy_preview_image(sender),
+                Key::v | Key::V if !shift => self.paste_desktop(sender),
                 Key::F1 if shift => self.toggle_thumbs(),
                 Key::F3 => self.set_sort(rust_commander::listing::SortKey::Name),
                 Key::F4 => self.set_sort(rust_commander::listing::SortKey::Ext),
@@ -1254,7 +1271,7 @@ impl App {
             Err(err) => {
                 self.state.cancel_load(id, token);
                 rust_commander::log::error(&format!("list pane={pane}: {err}"));
-                self.status = err;
+                self.status = self.unreachable_note(&err).unwrap_or(err);
             }
         }
     }
@@ -1473,10 +1490,14 @@ impl App {
             return;
         };
         if viewer && self.cfg.viewer.trim().is_empty() {
-            if let Err(err) = launch_default(&path) {
-                rust_commander::log::error(&err);
-                self.status = err;
-            }
+            // The type lookup reads the file, which can stall on a dead mount.
+            let tx = self.tx.clone();
+            std::thread::spawn(move || {
+                if let Err(err) = launch_default(&path) {
+                    rust_commander::log::error(&err);
+                    tx.emit(Msg::Status(err));
+                }
+            });
             return;
         }
         let argv = if viewer {
@@ -2488,7 +2509,24 @@ impl App {
         self.focus_list();
     }
 
+    fn unreachable_note(&self, err: &str) -> Option<String> {
+        let mut mounts: Vec<_> = self.shell.drive_snapshot.0.iter().filter(|mount| mount.network).collect();
+        mounts.extend(self.shell.down.iter());
+        mounts.sort_by_key(|mount| std::cmp::Reverse(mount.path.as_os_str().len()));
+        mounts
+            .into_iter()
+            .find(|mount| rust_commander::places::link_lost(err, &mount.path))
+            .map(|mount| unreachable(&mount.label))
+    }
+
     fn goto_mount(&mut self, pane: usize, path: PathBuf, sender: &ComponentSender<Self>) {
+        if let Some(label) = self.shell.down.iter().find(|mount| mount.path == path).map(|mount| mount.label.clone()) {
+            self.status = unreachable(&label);
+            if let Some((_, button)) = self.shell.drives.iter().find(|(mount, _)| mount == &path) {
+                shell::blink_drive(button);
+            }
+            return;
+        }
         let id = PaneId::from_index(pane);
         self.state.active = id;
         self.shell.active.set(pane);
@@ -2502,11 +2540,17 @@ impl App {
     }
 
     fn refresh_drives(&mut self, sender: &ComponentSender<Self>) {
+        let known: Vec<std::path::PathBuf> = self.shell.down.iter().map(|mount| mount.path.clone()).collect();
         let Some(gone) =
             shell::rebuild_drives(&mut self.shell, sender.input_sender(), &self.cfg.icon_pack)
         else {
             return;
         };
+        for mount in &self.shell.down {
+            if !known.iter().any(|path| path == &mount.path) {
+                self.status = unreachable(&mount.label);
+            }
+        }
         // A pane left on a vanished mount would show a dead folder.
         for id in [PaneId::Left, PaneId::Right] {
             let path = self.state.tab(id).path.clone();
@@ -2665,6 +2709,10 @@ fn spawn_argv(argv: &[std::ffi::OsString]) -> Result<(), String> {
         let _ = child.wait();
     });
     Ok(())
+}
+
+fn unreachable(label: &str) -> String {
+    format!("{label} is not reachable")
 }
 
 // Rows live in the inner list, which owns list.scroll-to-item.
