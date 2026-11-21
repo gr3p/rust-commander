@@ -94,6 +94,18 @@ Samma form som `search::run`, så den går att testa utan fönster. `folder_byte
 - Esc, byte av katalog, byte av flik eller stängd panel avbryter pågående räkning.
 - Vid rot (`/`) och nätverksmonteringar startar ingenting av sig själv. Räkningen är alltid ett uttryckligt kommando i första versionen.
 
+### Nätverksdiskar (SMB, NFS, sshfs)
+
+Här är en varning befogad, eftersom en skanning kan bli mycket långsam eller hänga. Varje `stat` är ett nätverksanrop (SMB/NFS har latens per fråga, inte bara per byte). En stor share kan ge hundratusentals anrop, och en förlorad VPN eller sovande NAS kan blockera ett anrop i uninterruptible sleep (D-läge) i tiotals sekunder, så att `cancel`-flaggan inte hjälper förrän anropet återvänder.
+
+- **Detektion:** `places.rs` har redan `Mount.network` (`cifs`, `smb3`, `nfs`, `nfs4`, `fuse.sshfs`) och `props.rs` känner igen samma typer. Använd `mount_entry` på rotens sökväg. Räkna även andra `fuse.*` som nätverk.
+- **Bekräftelse innan start:** en liten dialog: "Detta är en nätverksdisk (cifs). Att räkna mappstorlekar kan ta lång tid och belasta servern. Fortsätta?" med knapparna **Räkna** och **Avbryt**, och en kryssruta "Fråga inte igen för den här disken" som sparas i config. Ingen dialog för lokala diskar.
+- **Försiktig räkning:** 2–4 trådar (inte 8), och ingen mountövergång. En nätverksmount under en lokal mapp hoppas över och visas som `⊘ monterad`.
+- **Ärligt förlopp:** förloppsrutan visas direkt (inte efter 300 ms) och visar fil/sek, så att en seg skanning syns direkt.
+- **Hängskydd:** en watchdog i UI:t som ser att `files`-räknaren inte ökat på ca 10 s och då visar "Servern svarar inte, väntar…" med Avbryt. Avbryt kopplar loss UI:t omedelbart: panelen blir användbar, och en fastnad tråd får avsluta när anropet returnerar (token gör att dess sena svar slängs).
+- **Cache gör större nytta här:** nätverksresultat får längre giltighetstid i minnescachen (t.ex. 30 min mot 10) och visas som "beräknad för N min sedan", så att en refresh blir ett val och inte standard.
+- **Ingen automatisk räkning** på nätverksdiskar, ens i det sticky läget (etapp 3).
+
 ## 4. Cache
 
 Vinsten är stor, framför allt för att **en räkning av en övre mapp redan ger storleken på alla kataloger under den**. Går man ner i en undermapp behövs ingen ny skanning. Dessutom är kallstarten av `/` dyr (minuter), och sidcachen hjälper bara så länge metadatan ligger kvar i RAM.
