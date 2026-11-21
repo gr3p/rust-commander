@@ -33,7 +33,7 @@ Early release (0.2): expect rough edges, and please [report them](https://github
 
 - **Find anything.** Search by name or by what is inside your files, and filter the list as you type.
 
-- **See what takes the space.** Ctrl+U counts every folder below the one you are in and adds a bar and a percentage per row, in your theme's blue. The count runs on all cores, never follows links or leaves the disk, and shows a window with Cancel when it takes more than a moment.
+- **See what takes the space.** Press Ctrl+U and every row gets a size bar and a percentage, counted on all cores without leaving the disk. Press Ctrl+R and the counting follows you as you open folders, so you can dig down to the big ones.
 
 - **See before you open.** Preview text, images and thumbnails right next to your files, and edit in place.
 
