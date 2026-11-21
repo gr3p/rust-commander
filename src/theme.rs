@@ -1299,7 +1299,7 @@ entry:focus-within {{
         icon_gap = s.space(6),
         cell_pad = format!("0 {}px", s.space(6)),
         head_pad = format!("{}px {}px", s.space(2), s.space(8)),
-        fkey_pad = format!("{}px {}px", s.space(4), s.space(2)),
+        fkey_pad = format!("{}px {}px", s.space(3), s.space(1)),
         row_pad = format!("{}px {}px", s.space(10), s.space(12)),
     )
 }

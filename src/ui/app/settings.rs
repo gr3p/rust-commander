@@ -1288,11 +1288,10 @@ pub(in crate::ui::app) fn show_commands(parent: &gtk::Window, cue: rust_commande
         while let Some(child) = list_fill.first_child() {
             list_fill.remove(&child);
         }
-        let needle = query.trim().to_lowercase();
         for group in rust_commander::commands::Group::ALL {
             let rows: Vec<_> = rust_commander::commands::catalog()
                 .iter()
-                .filter(|item| item.group == group && command_matches(&needle, item))
+                .filter(|item| item.group == group && rust_commander::commands::matches(&query, item))
                 .collect();
             if rows.is_empty() {
                 continue;
@@ -1326,14 +1325,6 @@ pub(in crate::ui::app) fn show_commands(parent: &gtk::Window, cue: rust_commande
     win.present();
     search.grab_focus();
     win
-}
-
-fn command_matches(needle: &str, item: &rust_commander::commands::Item) -> bool {
-    needle.is_empty()
-        || item.label.to_lowercase().contains(needle)
-        || item.keys.to_lowercase().contains(needle)
-        || rust_commander::commands::format_keys(item.keys).to_lowercase().contains(needle)
-        || item.group.name().to_lowercase().contains(needle)
 }
 
 fn command_button(

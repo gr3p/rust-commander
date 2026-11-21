@@ -193,6 +193,8 @@ pub struct App {
     shell: Shell,
     cfg: Config,
     status: String,
+    // The message last seen in `status` and since when, so an old one can give way to the tips.
+    status_seen: (String, Instant),
     dirty: [bool; 2],
     wanted_widths: [Option<settings::ColumnPlan>; 2],
     job: Option<Job>,
@@ -378,6 +380,7 @@ impl SimpleComponent for App {
             shell,
             cfg,
             status: String::new(),
+            status_seen: (String::new(), Instant::now()),
             dirty: [true, true],
             wanted_widths: [None, None],
             job: None,
@@ -577,6 +580,7 @@ impl App {
                 self.poll_queue(sender);
                 self.tick_audio();
                 self.poll_dirs(sender);
+                self.expire_status();
             }
             Msg::AudioEvent(event) => self.on_audio_event(event, sender),
             Msg::AudioCover {
@@ -1930,10 +1934,7 @@ impl App {
         } else if self.status.starts_with("QUICKVIEW") {
             self.status.clear();
         }
-        if self.shell.status.text().as_str() != self.status {
-            self.shell.status.set_text(&self.status);
-        }
-        self.sync_hints();
+        self.show_status();
         self.paint_mode_bar();
         self.mark_drives();
         self.accent_painted = true;
@@ -2069,10 +2070,9 @@ impl App {
             .marked
             .insert(left.join("sub"));
         self.sync();
-        if !super::shell::shows(&self.shell.hints, rust_commander::commands::Act::Pack)
-            || !super::shell::shows(&self.shell.hints, rust_commander::commands::Act::PackHere)
-        {
-            errors.push("pack hint".into());
+        let tips = self.status_text();
+        if !tips.contains("Pack here") || !tips.contains("Pack") {
+            errors.push(format!("pack hint: {tips}"));
         }
         if Path::new(&self.pack_suggestion(false)).parent() != Some(right.as_path())
             || Path::new(&self.pack_suggestion(true)).parent() != Some(left.as_path())
@@ -2122,9 +2122,7 @@ impl App {
         self.reload_pane(PaneId::Right);
         self.state.tab_mut(PaneId::Left).marked.clear();
         self.sync();
-        if super::shell::shows(&self.shell.hints, rust_commander::commands::Act::Pack)
-            || super::shell::shows(&self.shell.hints, rust_commander::commands::Act::PackHere)
-        {
+        if self.status_text().contains("Pack") {
             errors.push("pack hint stays".into());
         }
         if !self.point_at(PaneId::Left, "move-me.txt") {

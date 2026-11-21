@@ -80,7 +80,6 @@ pub struct Shell {
     pub mode_bar: gtk::Stack,
     pub image_scale: gtk::Button,
     pub text_modes: CharsetBar,
-    pub hints: [Hint; rust_commander::commands::HINT_SLOTS],
     pub active: Rc<Cell<usize>>,
     pub drives: Vec<(PathBuf, gtk::Button)>,
     pub idle_drives: Vec<gtk::Button>,
@@ -100,11 +99,6 @@ pub struct Shell {
     pub shells: Vec<PanelShell>,
     pub shell_current: Option<u64>,
     pub shell_seq: u64,
-}
-
-pub struct Hint {
-    pub button: gtk::Button,
-    pub act: Rc<Cell<Option<Act>>>,
 }
 
 pub struct PanelShell {
@@ -163,6 +157,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
     let status = gtk::Label::new(Some(""));
     status.set_xalign(0.0);
     status.set_hexpand(true);
+    status.set_ellipsize(gtk::pango::EllipsizeMode::End);
     status.add_css_class("status");
     let wait = row::dot_spin();
     let status_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -176,13 +171,12 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
     let fbar = gtk::Box::new(gtk::Orientation::Vertical, 4);
     fbar.add_css_class("fbar");
     fbar.set_margin_all(4);
-    let context_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    let fkey_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    fbar.append(&context_row);
+    let fkey_row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
     fbar.append(&fkey_row);
     let mut f_labels = Vec::new();
     let mut shell_key = gtk::Label::new(Some("F9 Shell"));
     for (n, label) in [
+        (1, "F1 Commands"),
         (3, "F3 View"),
         (4, "F4 Edit"),
         (5, "F5 Copy"),
@@ -204,25 +198,16 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
         if n == 9 {
             shell_key = text;
             on_click(&button, move || tx.emit(super::msg::Msg::Key(gtk::gdk::Key::F9, gtk::gdk::ModifierType::empty())));
+        } else if n == 1 {
+            // F1 is the way to every other command, so its label is never cut short.
+            button.set_focus_on_click(false);
+            text.set_ellipsize(gtk::pango::EllipsizeMode::None);
+            on_click(&button, move || tx.emit(super::msg::Msg::Key(gtk::gdk::Key::F1, gtk::gdk::ModifierType::empty())));
         } else {
             on_click(&button, move || tx.emit(super::msg::Msg::FKey(n, false)));
         }
         fkey_row.append(&button);
     }
-    let hints = std::array::from_fn(|_| hint_slot(sender));
-    for hint in &hints {
-        context_row.append(&hint.button);
-    }
-    let all = gtk::Button::with_label("F1 All CMD");
-    all.add_css_class("fkey");
-    all.set_hexpand(true);
-    all.set_focus_on_click(false);
-    if let Some(label) = all.child().and_then(|child| child.downcast::<gtk::Label>().ok()) {
-        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    }
-    let tx = sender.clone();
-    on_click(&all, move || tx.emit(super::msg::Msg::Key(gtk::gdk::Key::F1, gtk::gdk::ModifierType::empty())));
-    context_row.append(&all);
     let image_bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     image_bar.add_css_class("fbar");
     image_bar.set_margin_all(4);
@@ -334,7 +319,6 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
         mode_bar,
         image_scale,
         text_modes,
-        hints,
         active,
         drives,
         idle_drives,
@@ -386,30 +370,6 @@ fn bar_button(
     let button = hint_button(label, make, sender);
     button.set_focus_on_click(false);
     button
-}
-
-fn hint_slot(sender: &relm4::Sender<super::msg::Msg>) -> Hint {
-    let act = Rc::new(Cell::new(None));
-    let button = gtk::Button::with_label("");
-    button.add_css_class("fkey");
-    button.set_hexpand(true);
-    button.set_visible(false);
-    button.set_focus_on_click(false);
-    if let Some(label) = button.child().and_then(|child| child.downcast::<gtk::Label>().ok()) {
-        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    }
-    let tx = sender.clone();
-    let slot = Rc::clone(&act);
-    on_click(&button, move || {
-        if let Some(act) = slot.get() {
-            tx.emit(super::msg::Msg::Run(act));
-        }
-    });
-    Hint { button, act }
-}
-
-pub fn shows(hints: &[Hint], act: Act) -> bool {
-    hints.iter().any(|hint| hint.button.is_visible() && hint.act.get() == Some(act))
 }
 
 fn hint_button(

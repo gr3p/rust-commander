@@ -1112,24 +1112,44 @@ impl App {
         self.dialog = Some(win);
     }
 
-    pub(in crate::ui::app) fn sync_hints(&self) {
+    // The status line says what just happened. With nothing to say it suggests the few commands that matter now,
+    // and the disk usage and music states carry them next to their own text.
+    pub(in crate::ui::app) fn status_text(&self) -> String {
         let cue = self.cue();
         let side = if self.state.active == PaneId::Left { "right" } else { "left" };
-        let ranked = rust_commander::commands::rank(&cue);
-        for (slot, hint) in self.shell.hints.iter().enumerate() {
-            if let Some(act) = ranked.get(slot).copied() {
-                let label = rust_commander::commands::hint_label_for(act, side, &cue);
-                if hint.button.label().as_deref() != Some(label.as_str()) {
-                    hint.button.set_label(&label);
-                }
-                if hint.act.get() != Some(act) {
-                    hint.act.set(Some(act));
-                }
-                hint.button.set_visible(true);
-            } else {
-                hint.act.set(None);
-                hint.button.set_visible(false);
-            }
+        let tips = rust_commander::commands::tips(&cue, side);
+        let with_tips = (cue.usage && self.status.starts_with("Disk usage:"))
+            || (cue.player && self.status.starts_with("QUICKVIEW"));
+        if tips.is_empty() {
+            self.status.clone()
+        } else if self.status.is_empty() {
+            tips
+        } else if with_tips {
+            format!("{}  ·  {tips}", self.status)
+        } else {
+            self.status.clone()
+        }
+    }
+
+    pub(in crate::ui::app) fn show_status(&self) {
+        let text = self.status_text();
+        if self.shell.status.text().as_str() != text {
+            self.shell.status.set_text(&text);
+        }
+    }
+
+    // A message that stays unchanged for a while makes room for the tips again.
+    pub(in crate::ui::app) fn expire_status(&mut self) {
+        const STAYS: std::time::Duration = std::time::Duration::from_secs(15);
+        if self.status_seen.0 != self.status {
+            self.status_seen = (self.status.clone(), std::time::Instant::now());
+            return;
+        }
+        let keeps = self.status.starts_with("QUICKVIEW") || self.status.starts_with("Disk usage:") || self.job.is_some();
+        if !self.status.is_empty() && !keeps && self.status_seen.1.elapsed() > STAYS {
+            self.status.clear();
+            self.status_seen.0.clear();
+            self.show_status();
         }
     }
 

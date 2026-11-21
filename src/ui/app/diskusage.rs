@@ -561,12 +561,9 @@ impl App {
         if row(self, "..").is_some_and(|obj| obj.usage_on()) {
             errors.push("usage: bar on ..".into());
         }
-        let hints = |app: &App| -> Vec<String> {
-            app.shell.hints.iter().filter(|hint| hint.button.is_visible()).filter_map(|hint| hint.button.label().map(|l| l.to_string())).collect()
-        };
-        let shown = hints(self);
-        if !shown.iter().any(|label| label.contains("Follow folders")) || !shown.iter().any(|label| label.contains("Disk usage off")) {
-            errors.push(format!("usage: context row lacks the next steps: {shown:?}"));
+        let shown = self.status_text();
+        if !shown.contains("Follow folders") || !shown.contains("Disk usage off") {
+            errors.push(format!("usage: status line lacks the next steps: {shown:?}"));
         }
 
         // Our own file jobs and Refresh count again. The old numbers stay on screen, dimmed, until the new ones arrive.
@@ -639,8 +636,9 @@ impl App {
         // Ctrl+R follows: a folder opened from here is counted on its own.
         self.toggle_usage_follow(sender);
         self.sync();
-        if !hints(self).iter().any(|label| label.contains("Stop following")) {
-            errors.push(format!("usage: context row does not offer to stop following: {:?}", hints(self)));
+        let tips = rust_commander::commands::tips(&self.cue(), "right");
+        if !tips.contains("Stop following") {
+            errors.push(format!("usage: tips do not offer to stop following: {tips:?}"));
         }
         if !self.usage_follow[0] || self.usage_scan.is_none() {
             errors.push("usage: Ctrl+R did not start a following count".into());
@@ -669,8 +667,9 @@ impl App {
             errors.push("usage: counted after following was off".into());
         }
         self.sync();
-        if hints(self).iter().any(|label| label.contains("Follow folders") || label.contains("Disk usage off")) {
-            errors.push(format!("usage: context row kept the mode's steps: {:?}", hints(self)));
+        let shown = self.status_text();
+        if shown.contains("Follow folders") || shown.contains("Disk usage off") {
+            errors.push(format!("usage: status line kept the mode's steps: {shown:?}"));
         }
         self.reload_pane(id);
         self.sync();

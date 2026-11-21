@@ -1,6 +1,6 @@
 use crate::listing;
 
-// The context row is for everyday commands. Special commands stay in the F1 menu.
+// The status line suggests everyday commands. Special commands stay in the F1 menu.
 // Higher is more likely. Several marked files outrank the file type.
 const HINTS: &[Act] = &[
     Act::AudioToggle,
@@ -34,7 +34,7 @@ const HINTS: &[Act] = &[
     Act::DiskUsageFollow,
 ];
 
-/// Buttons on the context row, including Quick view in the last slot.
+/// Commands `rank` keeps, including Quick view in the last slot.
 pub const HINT_SLOTS: usize = 9;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -376,43 +376,198 @@ pub fn caption(keys: &str, label: &str) -> String {
     }
 }
 
-pub fn hint_label(act: Act, side: &str) -> String {
+/// The keys and the label of a command as the status line and the key row spell them.
+fn hint_parts(act: Act, side: &str) -> (String, String) {
+    let own = |keys: &str, label: &str| (keys.to_string(), label.to_string());
     match act {
-        Act::Unpack => caption("Alt+F9", &format!("Unpack to {side} panel")),
-        Act::UnpackHere => caption("Shift+Alt+F9", "Extract here"),
-        Act::Verify => caption("Ctrl+Shift+F9", "Verify"),
-        Act::Pack => caption("Alt+F5", "Pack"),
-        Act::PackHere => caption("Ctrl+Shift+F5", "Pack here"),
-        Act::View => caption("F3", "View"),
-        Act::Edit => caption("F4", "Edit"),
-        Act::Copy => caption("F5", "Copy"),
-        Act::Move => caption("F6", "Move"),
-        Act::CopyPaths => caption("Ctrl+Shift+C", "Copy path"),
-        Act::Properties => caption("Alt+Enter", "Properties"),
-        Act::Filter => caption("Ctrl+S", "Filter"),
-        Act::Search => caption("Ctrl+Shift+S", "Search"),
-        // The key row is narrow. The list in F1 and the right-click menu spell these out.
-        Act::AudioSend => caption("Ctrl+P", "Send to player"),
-        Act::AudioAdd => caption("Ctrl+Shift+P", "Add to playlist"),
-        Act::AudioFocus => caption("Tab", "Player"),
+        Act::Unpack => own("Alt+F9", &format!("Unpack to {side} panel")),
+        Act::UnpackHere => own("Shift+Alt+F9", "Extract here"),
+        Act::Verify => own("Ctrl+Shift+F9", "Verify"),
+        Act::Pack => own("Alt+F5", "Pack"),
+        Act::PackHere => own("Ctrl+Shift+F5", "Pack here"),
+        Act::View => own("F3", "View"),
+        Act::Edit => own("F4", "Edit"),
+        Act::Copy => own("F5", "Copy"),
+        Act::Move => own("F6", "Move"),
+        Act::CopyPaths => own("Ctrl+Shift+C", "Copy path"),
+        Act::Properties => own("Alt+Enter", "Properties"),
+        Act::Filter => own("Ctrl+S", "Filter"),
+        Act::Search => own("Ctrl+Shift+S", "Search"),
+        // The status line is narrow. The list in F1 and the right-click menu spell these out.
+        Act::AudioSend => own("Ctrl+P", "Send to player"),
+        Act::AudioAdd => own("Ctrl+Shift+P", "Add to playlist"),
+        Act::AudioFocus => own("Tab", "Player"),
         // The hint is only on offer while the small player has the keys, where X is the short way.
-        Act::AudioClose => caption("X", "Close player"),
+        Act::AudioClose => own("X", "Close player"),
         other => CATALOG
             .iter()
             .find(|item| item.act == other)
-            .map(|item| caption(item.keys, item.label))
+            .map(|item| own(item.keys, item.label))
             .unwrap_or_default(),
     }
 }
 
-/// The label on the context row. The disk usage commands say what pressing them does now.
-pub fn hint_label_for(act: Act, side: &str, cue: &Cue) -> String {
+/// The keys and the label of a command now. The disk usage commands say what pressing them does.
+fn hint_parts_for(act: Act, side: &str, cue: &Cue) -> (String, String) {
+    let own = |keys: &str, label: &str| (keys.to_string(), label.to_string());
     match act {
-        Act::DiskUsage if cue.usage => caption("Ctrl+U", "Disk usage off"),
-        Act::DiskUsageFollow if cue.following => caption("Ctrl+R", "Stop following"),
-        Act::DiskUsageFollow => caption("Ctrl+U+R", "Follow folders"),
-        other => hint_label(other, side),
+        Act::DiskUsage if cue.usage => own("Ctrl+U", "Disk usage off"),
+        Act::DiskUsageFollow if cue.following => own("Ctrl+R", "Stop following"),
+        Act::DiskUsageFollow => own("Ctrl+U+R", "Follow folders"),
+        other => hint_parts(other, side),
     }
+}
+
+pub fn hint_label(act: Act, side: &str) -> String {
+    let (keys, label) = hint_parts(act, side);
+    if label.is_empty() { String::new() } else { caption(&keys, &label) }
+}
+
+/// The label of a command now. The disk usage commands say what pressing them does.
+pub fn hint_label_for(act: Act, side: &str, cue: &Cue) -> String {
+    let (keys, label) = hint_parts_for(act, side, cue);
+    if label.is_empty() { String::new() } else { caption(&keys, &label) }
+}
+
+/// The commands the status line offers at most. The rest is in F1.
+const TIPS: usize = 3;
+
+/// The few commands that matter in the state the cue describes, keys first, for the status line.
+pub fn tips(cue: &Cue, side: &str) -> String {
+    rank(cue)
+        .into_iter()
+        .filter(|act| *act != Act::QuickView)
+        .take(TIPS)
+        .map(|act| {
+            let (keys, label) = hint_parts_for(act, side, cue);
+            format!("{} {label}", format_keys(&keys))
+        })
+        .collect::<Vec<_>>()
+        .join("  ·  ")
+}
+
+/// Other words for what a command does, in English and Swedish, so the F1 search finds it under the word the user
+/// happens to think of. Lower case, separated by spaces. The label, the keys and the group are searched as well.
+fn synonyms(act: Act) -> &'static str {
+    match act {
+        Act::Refresh => "reload update rescan uppdatera ladda om läs om",
+        Act::View => "show preview look read visa titta förhandsgranska läs",
+        Act::Edit => "modify change editor redigera ändra editera",
+        Act::NewFile => "create touch blank empty skapa fil ny fil",
+        Act::Copy => "duplicate clone kopiera duplicera",
+        Act::Move => "relocate transfer cut flytta klipp",
+        Act::Queue => "batch later schedule kö köa",
+        Act::Mkdir => "folder directory create new dir skapa mapp katalog",
+        Act::Trash => "bin recycle remove wastebasket papperskorg radera ta bort släng",
+        Act::Delete => "erase remove permanent radera ta bort",
+        Act::NewLink => "symlink symbolic shortcut alias ln länk genväg",
+        Act::Shred => "wipe secure erase destroy overwrite shredder rensa säker radering förstör",
+        Act::Encode => "convert transcode ffmpeg compress video audio konvertera koda omkoda",
+        Act::CopyAs => "duplicate save as copy rename kopiera som spara som",
+        Act::Rename => "name change namn döp om byt namn",
+        Act::SelectAll => "mark everything all select markera alla välj allt",
+        Act::Properties => "info details attributes permissions chmod size egenskaper information detaljer rättigheter",
+        Act::Settings => "preferences options config configure theme inställningar alternativ konfig",
+        Act::Pack | Act::PackHere => "zip compress archive tar gz 7z rar bundle packa arkiv komprimera",
+        Act::Unpack | Act::UnpackHere => "unzip extract decompress uncompress open archive packa upp extrahera",
+        Act::TestArchive => "check integrity verify validate crc zip kontrollera testa arkiv",
+        Act::MakeSfv => "checksum hash md5 sha crc sfv skapa kontrollsumma",
+        Act::Verify => "checksum hash md5 sha crc sfv check validate kontrollera verifiera kontrollsumma",
+        Act::OtherPane => "switch panel side left right toggle swap byt panel andra panelen växla",
+        Act::NextTab => "switch tab cycle nästa flik byt flik",
+        Act::NewTab => "open tab ny flik öppna flik",
+        Act::CloseTab => "close tab stäng flik",
+        Act::Up => "parent folder directory upp överordnad",
+        Act::Back => "history previous bakåt tillbaka historik",
+        Act::Forward => "history next framåt",
+        Act::Mirror => "sync same show folder other panel öppna andra panelen spegla",
+        Act::PlacesLeft => "bookmarks sidebar mounts devices places platser vänster",
+        Act::PlacesRight => "bookmarks sidebar mounts devices places platser höger",
+        Act::Hotlist => "bookmarks favorites favourites directory hot list bokmärken favoriter",
+        Act::Path => "address location goto go to type cd adress sökvag gå till",
+        Act::Open => "enter run launch execute activate öppna kör",
+        Act::Mark | Act::MarkStay => "select tag choose insert markera välj",
+        Act::SortName => "order arrange alphabetical sortera namn",
+        Act::SortExt => "type extension filetype sortera filtyp ändelse",
+        Act::SortDate => "time modified newest oldest datum tid",
+        Act::SortSize => "biggest largest smallest storlek",
+        Act::SortAttr => "attributes permissions attribut",
+        Act::CopyPaths => "clipboard path full name urklipp sökvag kopiera",
+        Act::CopyDir => "clipboard current folder directory path urklipp mapp kopiera",
+        Act::Filter => "narrow quick find incremental limit filtrera",
+        Act::Search => "find locate grep look recursive sök hitta leta",
+        Act::Hidden => "dotfiles show invisible dolda gömda dold",
+        Act::QuickView => "preview panel peek snabbvisning förhandsvisning",
+        Act::Syntax => "highlight colors colour code färger syntaxfärgning",
+        Act::Thumbs => "thumbnails pictures images gallery preview miniatyrer bilder",
+        Act::Terminal => "shell console command line bash term konsol skal",
+        Act::NewShell => "terminal console ny konsol nytt skal",
+        Act::CloseShell => "close terminal console stäng konsol skal",
+        Act::SwitchShell => "terminal console byt konsol skal",
+        Act::ExternalView => "viewer lister open visare",
+        Act::CloseView => "leave exit quit back stäng avsluta",
+        Act::ImageFit => "zoom scale size actual pixel anpassa zooma",
+        Act::ImageStep => "next previous prev gallery slideshow föregående nästa bild",
+        Act::ListerText => "plain text",
+        Act::ListerBinary => "binär bytes",
+        Act::ListerHex => "hexadecimal hexdump",
+        Act::ListerAnsi => "colors escape terminal",
+        Act::ListerAscii => "plain text",
+        Act::ListerJson => "format pretty",
+        Act::QuickEdit => "edit modify redigera andra",
+        Act::Save => "write store spara",
+        Act::Discard => "cancel undo revert throw away kasta ångra",
+        Act::LeaveEdit => "exit close done lämna avsluta",
+        Act::CopyImage => "picture clipboard bild urklipp",
+        Act::AudioToggle => "play pause stop music spela paus spela upp musik",
+        Act::AudioSeek => "skip forward rewind jump spola hoppa",
+        Act::AudioVolume => "sound loud louder quieter ljud volym",
+        Act::AudioMute => "silence sound tyst ljud av",
+        Act::AudioNext => "skip forward track song nästa låt spår",
+        Act::AudioPrev => "back track song föregående låt spår",
+        Act::AudioShuffle => "random mix slumpa blanda",
+        Act::AudioRepeat => "loop again upprepa slinga",
+        Act::AudioMinimize => "small mini shrink minimera liten spelare",
+        Act::AudioJump => "player focus go hoppa spelare",
+        Act::AudioExpand => "big large maximize full stor spelare",
+        Act::AudioClose => "player stop quit stäng spelare",
+        Act::AudioFocus => "player switch panel spelare",
+        Act::AudioSend => "play replace queue music spela skicka musik",
+        Act::AudioAdd => "append playlist queue music lägg till spellista",
+        Act::AudioExternal => "player vlc mpv open extern spelare",
+        Act::Drive => "disk volume mount usb enhet hårddisk",
+        Act::DiskInfo => "free space capacity size storage volume ledigt utrymme diskutrymme kapacitet",
+        Act::DiskUsage => "space size big folders biggest du treemap analyzer ncdu bars storage diskanvändning utrymme storlek stora mappar",
+        Act::DiskUsageFollow => "recursive descend folders följ mappar",
+        Act::Mount => "network share smb nfs sftp ssh ftp remote usb drive nätverk montera ansluta",
+        Act::Commands => "help all menu commands keys shortcuts hjälp alla kommandon genvägar",
+    }
+}
+
+// å, ä and ö count as a and o, so a search typed without them still finds the word.
+fn fold(text: &str) -> String {
+    text.to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'å' | 'ä' => 'a',
+            'ö' => 'o',
+            other => other,
+        })
+        .collect()
+}
+
+/// Whether the F1 search `query` finds `item`. Every word of the query must turn up in the label, the keys, the
+/// group or the synonyms.
+pub fn matches(query: &str, item: &Item) -> bool {
+    let haystack = fold(&format!(
+        "{} {} {} {} {}",
+        item.label,
+        item.keys,
+        format_keys(item.keys),
+        item.group.name(),
+        synonyms(item.act)
+    ));
+    fold(query).split_whitespace().all(|word| haystack.contains(word))
 }
 
 pub fn applies(act: Act, cue: &Cue) -> bool {
@@ -683,6 +838,33 @@ mod tests {
         // Several marked files still come first.
         cue.marks = 3;
         assert_eq!(rank(&cue)[0], Act::Pack);
+    }
+
+    #[test]
+    fn tips_put_the_next_steps_first_and_stay_short() {
+        let mut cue = Cue::none();
+        cue.dir = true;
+        let tip = tips(&cue, "right");
+        assert!(tip.contains("Copy path") && !tip.contains("Quick view"), "{tip}");
+        cue.usage = true;
+        let tip = tips(&cue, "right");
+        assert!(tip.starts_with("Ctl+U+R Follow folders") || tip.starts_with("⌃U+R Follow folders"), "{tip}");
+        assert!(tip.contains("Disk usage off"), "{tip}");
+        assert!(tips(&cue, "right").split("  ·  ").count() <= TIPS);
+    }
+
+    #[test]
+    fn the_command_search_knows_other_words_in_english_and_swedish() {
+        let find = |query: &str, act: Act| matches(query, catalog().iter().find(|item| item.act == act).unwrap());
+        assert!(find("zip", Act::Pack) && find("zip", Act::Unpack));
+        assert!(find("flytta", Act::Move) && find("move", Act::Move));
+        assert!(find("unzip", Act::Unpack) && !find("unzip", Act::Pack));
+        assert!(find("sok", Act::Search) && find("sök", Act::Search));
+        assert!(find("kopiera", Act::Copy));
+        // Every word has to match, and an unrelated word finds nothing.
+        assert!(find("flytta fil", Act::Move));
+        assert!(!find("zip flytta", Act::Pack));
+        assert!(!find("flytta", Act::Pack));
     }
 
     #[test]
