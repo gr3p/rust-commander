@@ -79,6 +79,7 @@ pub struct Shell {
     pub f_labels: Vec<String>,
     pub mode_bar: gtk::Stack,
     pub image_scale: gtk::Button,
+    pub image_turn: gtk::Box,
     pub text_modes: CharsetBar,
     pub active: Rc<Cell<usize>>,
     pub drives: Vec<(PathBuf, gtk::Button)>,
@@ -216,6 +217,16 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
     let image_next = hint_button("Right Next", || super::msg::Msg::ImageStep(1), sender);
     let thumbs = rust_commander::commands::caption("Ctrl+Shift+F1", "Thumbnails");
     let image_thumbs = hint_button(&thumbs, || super::msg::Msg::Run(rust_commander::commands::Act::Thumbs), sender);
+    let turn_left = hint_button("L Rotate left", || super::msg::Msg::Run(rust_commander::commands::Act::ImageTurnLeft), sender);
+    let turn_right = hint_button("R Rotate right", || super::msg::Msg::Run(rust_commander::commands::Act::ImageTurnRight), sender);
+    turn_left.set_visible(true);
+    turn_right.set_visible(true);
+    // Only the quick view turns pictures, so paint_mode_bar hides the pair for the F3 window.
+    let image_turn = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    image_turn.set_hexpand(true);
+    image_turn.set_homogeneous(true);
+    image_turn.append(&turn_left);
+    image_turn.append(&turn_right);
     image_scale.set_visible(true);
     image_prev.set_visible(true);
     image_next.set_visible(true);
@@ -223,6 +234,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
     image_bar.append(&image_scale);
     image_bar.append(&image_prev);
     image_bar.append(&image_next);
+    image_bar.append(&image_turn);
     image_bar.append(&image_thumbs);
     let text_modes = charset_bar(sender);
     let edit_button = bar_button(&rust_commander::commands::caption("Ctrl+E", "Edit"), || super::msg::Msg::ToggleQuickEdit, sender);
@@ -318,6 +330,7 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
         f_labels,
         mode_bar,
         image_scale,
+        image_turn,
         text_modes,
         active,
         drives,

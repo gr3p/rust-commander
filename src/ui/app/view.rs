@@ -986,6 +986,7 @@ impl App {
         if self.shell.image_scale.label().as_deref() != Some(label) {
             self.shell.image_scale.set_label(label);
         }
+        self.shell.image_turn.set_visible(self.image.is_none());
         paint_charset(&self.shell.text_modes, self.charset);
         let quick_text = self.cfg.mode_buttons
             && self.lister.is_none()
