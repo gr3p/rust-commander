@@ -253,7 +253,44 @@ Dessa steg behöver dig eller utrustning jag saknar. De noteras som öppna i PR-
 | GTK-prestanda med många rader | Uppdatera modellen i batchar högst 10 gånger per sekund. `ColumnView` binder bara synliga celler, så kostnaden följer antalet synliga rader. |
 | Räkningen pekar på borttagen mapp | `ENOENT` på roten ger ett felmeddelande i statusraden. |
 
-## Öppna frågor
+## Utfall: vad som byggdes
+
+Etapp 1 och 2 är byggda. De öppna frågorna fick förslagen som svar: andel av mappens innehåll, engångskommando, Ctrl+U, allokerad storlek (`usage_apparent` i config byter). Ändringar mot texten ovan:
+
+- **Kärnan** är `src/usage.rs`. `usage::run(&Options, &cancelled, &mut progress) -> io::Result<Report>` returnerar rapporten i stället för en `Event::Finished`. Roten läses först av anroparens tråd, sedan tar en pool vid. Mappar ner till nivå 3 får egna summor (tak 50 000), vilket är det cachen lagrar. `View` håller siffrorna per rad, `Cache` minnescachen, `Watchdog` stillastående-vakten.
+- **Symlänkar** räknas som 0 i skenbart läge (som gamla `folder_bytes`) och med sina egna block i allokerat läge. `folder_bytes` (Egenskaper) går nu via samma kärna.
+- **Cachen** justerar inte med delta. En egen filjobb och Refresh markerar mappen och dess föräldrar som `stale` (siffran visas dämpad), och räkningen startar om på lokala diskar. Nätverksdiskar räknar inte om av sig själva efter ett filjobb.
+- **Kolumnen** har tom rubrik, som glyfkolumnen, så att storleksberäkning, sortering och rubrikklick lämnas orörda. Den tar sin bredd från Name (`USAGE_WIDTH`). Procenten står till vänster om stapeln.
+- **Kommandot** är `Act::DiskUsage`, Ctrl+U: första trycket räknar, under räkning avbryter det, därefter stänger det läget. F2 (Refresh) räknar om. Esc avbryter en pågående räkning.
+- **Nätverksdiskar:** en `AlertDialog` med Avbryt, Räkna och "Alltid för den här disken" (sparas som `usage_network_ok`). Alla `fuse.*` räknas som nätverk.
+- Andelen av hela disken står i statusraden efter en räkning på en lokal disk (inte på nätverksdisk, där `statvfs` kan vänta på servern). Verktygstips finns inte.
+- Ingen del av planen togs bort. Inget F12-val för skenbar storlek: den ligger bara i config.
+
+### Testutfall
+
+| Nivå | Vad | Utfall |
+|---|---|---|
+| A | 24 enhetstester i `usage.rs` plus `config`, inklusive `View`, `Cache`, `Watchdog`, nätverksdetektion, djup 2 000 nivåer på en tråd med 256 KiB stack, panik i en arbetstråd, avbryt på 120 000 filer | gröna |
+| B | `scripts/usage-vs-du.sh` mot `du` på `/usr/share`, `/usr/lib`, `/var/lib`, `~/Documents`, `src/`, `target/release/deps` | allokerat läge: exakt lika överallt. Skenbart läge: skiljer under 0,01 % (`du` räknar symlänkarnas längd, vi gör det inte) |
+| C | 4 nya acceptanstester (sandlådan, namn som inte är UTF-8, storleksordning, Ctrl+U unik) | gröna |
+| D | D1–D4 och D8 i `scripts/usage-stress.sh`, D5–D7 och D8 som `--ignored usage_stress`-tester | gröna. 1 miljon filer: 5,6 MB RSS och 0,09 s |
+| E | 1/2/4/8 trådar mot `du` (varm cache, `/usr`) | 0,29 / 0,16 / 0,087 / 0,054 s mot `du` 0,38 s |
+| F | `scripts/slowfs.py` (FUSE med 5 ms per anrop) och `scripts/usage-netfs.sh` genom det riktiga fönstret | räkningen blir klar. Vid tyst server visas "No answer…" och Cancel tar under 30 ms. Frågan före en nätverksräkning startar ingenting förrän den besvarats |
+| G | `scripts/gui-smoke.sh` utökad med `smoke_usage` | grön |
+| H | Riktig SMB/NFS, roterande disk, btrfs/ZFS, kall cache | ej testat, kräver annan utrustning eller root |
+
+Kör om allt:
+
+```bash
+cargo test
+cargo test --release --lib -- --ignored --test-threads=1 usage_stress
+scripts/usage-vs-du.sh
+scripts/usage-stress.sh
+scripts/usage-netfs.sh
+sh scripts/gui-smoke.sh
+```
+
+## Beslutade frågor (var öppna)
 
 1. Ska stapeln visa andel av **mappens innehåll** (förslag) eller andel av **hela disken**?
 2. Ska läget vara ett **engångskommando** (förslag för första versionen) eller ett **sticky läge** som räknar vid varje katalogbyte?

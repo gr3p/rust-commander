@@ -54,6 +54,8 @@ pub struct PaneUi {
     pub filter: gtk::Entry,
     pub stack: gtk::Stack,
     pub list: gtk::ColumnView,
+    /// The bar of the disk usage mode. Hidden when the mode is off.
+    pub usage_col: gtk::ColumnViewColumn,
     pub grid: gtk::GridView,
     pub store: gio::ListStore,
     pub selection: gtk::SingleSelection,
@@ -1386,8 +1388,10 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
     list.set_hexpand(true);
     list.set_vexpand(true);
     list.set_show_column_separators(true);
-    for col in row::file_columns(index, sender) {
-        list.append_column(&col);
+    let columns = row::file_columns(index, sender);
+    let usage_col = columns[4].clone();
+    for col in &columns {
+        list.append_column(col);
     }
     bind_header_clicks(&list, index, sender, active_pane);
     let tx = sender.clone();
@@ -1523,6 +1527,7 @@ fn pane(index: usize, sender: &relm4::Sender<super::msg::Msg>, active_pane: &Rc<
         filter,
         stack,
         list,
+        usage_col,
         grid,
         store,
         selection,

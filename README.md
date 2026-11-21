@@ -33,6 +33,8 @@ Early release (0.2): expect rough edges, and please [report them](https://github
 
 - **Find anything.** Search by name or by what is inside your files, and filter the list as you type.
 
+- **See what takes the space.** Ctrl+U counts every folder below the one you are in and adds a bar and a percentage per row, in your theme's blue. The count runs on all cores, never follows links or leaves the disk, and shows a window with Cancel when it takes more than a moment.
+
 - **See before you open.** Preview text, images and thumbnails right next to your files, and edit in place.
 
 - **Music built in.** Press Ctrl+Q on a song and it plays in the other panel, with its cover, tags, a seek bar, volume and a visualizer in your theme's colors. The playlist is the folder, or the songs you marked and sent from the right-click menu, with next, previous, shuffle and repeat. Fold it into a small player under a panel and keep working. mp3, flac, ogg, opus, wav, aac, m4a and aiff are decoded by the program itself and played through ALSA, so PipeWire and PulseAudio work. The keys are under Music below.
@@ -122,6 +124,7 @@ The panel with focus is the source, the other is the target. Press F1 for all co
 | Ctrl+Shift+S | Search names through all subfolders, also file text, size, date, duplicates and archives |
 | Ctrl+F3 to Ctrl+F6 | Sort |
 | Ctrl+H | Show or hide dotfiles |
+| Ctrl+U | Disk usage: count folder sizes and show a bar per row. Press again while counting to cancel, and once more to switch it off. F2 counts again |
 | Ctrl+Shift+F1 | Thumbnail grid |
 | Super+Up / Super+Down | Maximize the window / restore it, as in other GNOME windows. If your window manager already has its own binding for these keys, it handles them first |
 
@@ -212,6 +215,12 @@ The built-in editor refuses to save a file with multiple hard links or a differe
 Settings (F12) has two tabs: General, and Theme and colors. The log is written to `~/.local/state/rust-commander/rust-commander.log`.
 
 Auto column size is on by default and fits the columns to the panel as it is resized. Size, Date and Attr are only as wide as their text, Ext shows at most four characters, and Name gets everything that is left. When a panel is too narrow for that, the columns drop out in the order Attr, Ext, Date and Size, so names keep room. Only when names alone do not fit does the list scroll sideways. Dragging a column header turns auto sizing off and keeps your widths; switch it on again in F12.
+
+### Disk usage
+
+Ctrl+U counts the folder on screen and shows how much of it each row takes. Folders are counted by the space they use on disk, as `du` does, hard links once, symbolic links never followed, and other mounts are left out and marked `<MNT>`. Sort by Size to put the big folders together. A pane that shows bars counts again after Refresh (F2) and after your own copies, moves and deletes. Numbers from an earlier count stay on screen dimmed, with a `~` before the size, until the new count replaces them. Counted folders are kept in memory for ten minutes (thirty on a network disk), so a folder below one you have counted already has its numbers when you press Ctrl+U in it.
+
+On a network disk (SMB, NFS, sshfs and other FUSE mounts) the program asks first, because every folder is a question to the server. The answer "Always for this disk" is kept in `usage_network_ok` in the config file. A count that gets no answer for ten seconds says so, and Cancel gives the window back at once. `usage_apparent = true` in the config counts file lengths instead of space on disk.
 
 ### Themes
 

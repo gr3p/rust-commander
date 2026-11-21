@@ -74,6 +74,14 @@ pub enum Msg {
     PickPlace(usize, std::path::PathBuf),
     Mount(usize, std::path::PathBuf),
     DiskInfo(Option<std::path::PathBuf>),
+    // Disk usage. The number is the count the answer belongs to; an older one is dropped.
+    UsageTick(u64, rust_commander::usage::Snapshot),
+    UsageDone(u64, Result<rust_commander::usage::Report, String>),
+    UsageDisk(u64, u64),
+    UsageTimer(u64),
+    UsageCancel,
+    // The network disk question was answered. Some(mount) also remembers the disk.
+    UsageGo(usize, Option<String>),
     DrivesChanged,
     MountVolume(usize, String),
     EjectVolume(String),
@@ -147,6 +155,8 @@ pub enum Msg {
     ShellExited(u64),
     SelectShell(u64),
     Smoke,
+    // Step of the disk usage test on a slow or silent mount, driven by RUST_COMMANDER_SMOKE_NETFS.
+    SmokeNet(u32),
     DirChanged(usize, std::path::PathBuf),
     // pane, path, mtime we compared, mtime just read. The stat runs off the UI thread.
     DirStamp(

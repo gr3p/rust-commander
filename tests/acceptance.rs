@@ -18,6 +18,7 @@ use rust_commander::sizes;
 use rust_commander::state::{AppState, PaneId};
 use rust_commander::sum;
 use rust_commander::theme;
+use rust_commander::usage;
 
 fn main() {
     if let Some(name) = case_arg() {
@@ -141,6 +142,8 @@ const MEMORY: &[(&str, fn() -> Result<(), String>)] = &[
     ("mount_point_only_under_mnt", mount_point_only_under_mnt),
     ("mount_names_refuse_tricks", mount_names_refuse_tricks),
     ("point_name_is_always_valid", point_name_is_always_valid),
+    ("usage_sort_orders_folders_by_size", usage_sort_orders_folders_by_size),
+    ("disk_usage_command_has_its_own_key", disk_usage_command_has_its_own_key),
 ];
 
 const FS: &[&str] = &[
@@ -181,6 +184,8 @@ const FS: &[&str] = &[
     "checksum_refuses_paths_outside_folder",
     "sfv_roundtrip_and_symlink_outside",
     "atomic_write_keeps_mode_and_link",
+    "usage_counts_inside_the_sandbox",
+    "usage_rows_match_listing_names",
 ];
 
 fn dispatch(name: &str, dir: &Path) -> Result<(), String> {
@@ -222,6 +227,8 @@ fn dispatch(name: &str, dir: &Path) -> Result<(), String> {
         "checksum_refuses_paths_outside_folder" => checksum_refuses_paths_outside_folder(dir),
         "sfv_roundtrip_and_symlink_outside" => sfv_roundtrip_and_symlink_outside(dir),
         "atomic_write_keeps_mode_and_link" => atomic_write_keeps_mode_and_link(dir),
+        "usage_counts_inside_the_sandbox" => usage_counts_inside_the_sandbox(dir),
+        "usage_rows_match_listing_names" => usage_rows_match_listing_names(dir),
         other => Err(format!("unknown case {other}")),
     }
 }
@@ -1906,6 +1913,67 @@ fn copy(items: &[(PathBuf, PathBuf)]) -> Result<(), String> {
 fn transfer(items: &[(PathBuf, PathBuf)], kind: Kind) -> Result<(), String> {
     ops::transfer(items, kind, &AtomicBool::new(false), &AtomicBool::new(false), &mut |_| {}, &mut |_, _| Choice::Overwrite)
         .map_err(s)?;
+    Ok(())
+}
+
+fn usage_sort_orders_folders_by_size() -> Result<(), String> {
+    let folder = |name: &str, size: u64| Entry { name: name.into(), raw: None, size, mtime: 1, mode: 0, flags: DIR };
+    let mut state = AppState::new(pb("/left"), pb("/right"));
+    // What the count writes into the entries: folders keep their sizes, files theirs.
+    state.tab_mut(PaneId::Left).entries = vec![folder("small", 10), file("huge.bin", 9_999), folder("big", 5_000), folder("empty", 0)];
+    state.pane_mut(PaneId::Left).sort = SortKey::Size;
+    let names: Vec<_> = state
+        .visible(PaneId::Left)
+        .into_iter()
+        .map(|i| state.tab(PaneId::Left).entries[i].name.to_string())
+        .collect();
+    eq(names, vec!["empty".to_string(), "small".into(), "big".into(), "huge.bin".into()], "folders by size, then files")
+}
+
+fn disk_usage_command_has_its_own_key() -> Result<(), String> {
+    use rust_commander::commands::{Act, catalog};
+    let own: Vec<_> = catalog().iter().filter(|item| item.act == Act::DiskUsage).collect();
+    eq(own.len(), 1, "catalog entries")?;
+    eq(own[0].keys, "Ctrl+U", "key")?;
+    let shared = catalog().iter().filter(|item| item.keys == "Ctrl+U").count();
+    eq(shared, 1, "Ctrl+U is used once")
+}
+
+fn usage_counts_inside_the_sandbox(dir: &Path) -> Result<(), String> {
+    let tree = dir.join("tree");
+    fs::create_dir_all(tree.join("a/b")).map_err(s)?;
+    fs::write(tree.join("a/b/f"), vec![1u8; 300]).map_err(s)?;
+    fs::write(tree.join("top"), vec![1u8; 20]).map_err(s)?;
+    std::os::unix::fs::symlink("/etc", tree.join("out")).map_err(s)?;
+    let opts = usage::Options { root: tree.clone(), mode: usage::Mode { apparent: true, same_device: true }, threads: 4 };
+    let report = usage::run(&opts, &|| false, &mut |_| {}).map_err(s)?;
+    eq(report.total, 320, "total")?;
+    eq(report.unreadable, 0, "nothing unreadable")?;
+    // The folder above is only partly readable here. Counting it must end with a report, not a panic or a hang.
+    let above = usage::Options { root: dir.to_path_buf(), ..opts.clone() };
+    usage::run(&above, &|| false, &mut |_| {}).map_err(s)?;
+    // A path the sandbox hides is an error for the root, never a crash.
+    let hidden = usage::Options { root: PathBuf::from("/root"), ..opts };
+    let _ = usage::run(&hidden, &|| false, &mut |_| {});
+    Ok(())
+}
+
+// A row finds its number by name. Names that are not UTF-8 must come out the same on both sides.
+fn usage_rows_match_listing_names(dir: &Path) -> Result<(), String> {
+    use std::os::unix::ffi::OsStrExt;
+    let odd = std::ffi::OsStr::from_bytes(b"caf\xe9");
+    fs::create_dir_all(dir.join(odd)).map_err(s)?;
+    fs::write(dir.join(odd).join("f"), vec![0u8; 64]).map_err(s)?;
+    fs::create_dir_all(dir.join("plain")).map_err(s)?;
+    fs::write(dir.join("plain/f"), vec![0u8; 32]).map_err(s)?;
+    let mode = usage::Mode { apparent: true, same_device: true };
+    let report = usage::run(&usage::Options { root: dir.to_path_buf(), mode, threads: 2 }, &|| false, &mut |_| {}).map_err(s)?;
+    let view = usage::View::from_counts(dir, mode, &report.children, &report.bytes, false);
+    for entry in listing::read_dir(dir).map_err(s)?.iter().filter(|e| e.name.as_ref() != "..") {
+        let cell = view.cell(&entry.name).ok_or_else(|| format!("no number for {}", entry.name))?;
+        let want = if entry.name.as_ref() == "plain" { 32 } else { 64 };
+        eq(cell.bytes, want, &entry.name)?;
+    }
     Ok(())
 }
 

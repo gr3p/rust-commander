@@ -150,12 +150,13 @@ pub enum Act {
     AudioExternal,
     Drive,
     DiskInfo,
+    DiskUsage,
     Mount,
     Commands,
 }
 
 impl Act {
-    pub const ALL: [Act; 92] = [
+    pub const ALL: [Act; 93] = [
         Act::Refresh,
         Act::View,
         Act::Edit,
@@ -246,6 +247,7 @@ impl Act {
         Act::AudioExternal,
         Act::Drive,
         Act::DiskInfo,
+        Act::DiskUsage,
         Act::Mount,
         Act::Commands,
     ];
@@ -507,6 +509,7 @@ const CATALOG: &[Item] = &[
     Item { act: Act::PlacesRight, keys: "Alt+F2", label: "Right places", group: Group::Navigate },
     Item { act: Act::Drive, keys: "Ctrl+1…9", label: "Drive", group: Group::Navigate },
     Item { act: Act::DiskInfo, keys: "Ctrl+I", label: "Disk info", group: Group::Navigate },
+    Item { act: Act::DiskUsage, keys: "Ctrl+U", label: "Disk usage", group: Group::Navigate },
     Item { act: Act::Mount, keys: "Ctrl+Shift+M", label: "Mount", group: Group::Navigate },
     Item { act: Act::Hotlist, keys: "Ctrl+D", label: "Hotlist", group: Group::Navigate },
     Item { act: Act::Path, keys: "Ctrl+L", label: "Path", group: Group::Navigate },

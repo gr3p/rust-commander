@@ -28,6 +28,7 @@ mod audio;
 mod audio_smoke;
 mod commands;
 mod disk;
+mod diskusage;
 mod jobs;
 mod mount;
 mod paste;
@@ -246,6 +247,10 @@ pub struct App {
     dir_busy: bool,
     search: Option<search::SearchUi>,
     search_gen: u64,
+    usage_modes: [Option<diskusage::UsageMode>; 2],
+    usage_scan: Option<diskusage::UsageScan>,
+    usage_cache: rust_commander::usage::Cache,
+    usage_gen: u64,
     search_target: Option<(PaneId, usize, u64, String)>,
     settings: Option<SettingsUi>,
     command_list: Option<gtk::Window>,
@@ -417,6 +422,10 @@ impl SimpleComponent for App {
             dir_busy: false,
             search: None,
             search_gen: 0,
+            usage_modes: [None, None],
+            usage_scan: None,
+            usage_cache: rust_commander::usage::Cache::default(),
+            usage_gen: 0,
             search_target: None,
             settings: None,
             command_list: None,
@@ -462,6 +471,15 @@ impl SimpleComponent for App {
                 }
                 tx.emit(Msg::Smoke);
                 gtk::glib::ControlFlow::Break
+            });
+        }
+        if std::env::var_os("RUST_COMMANDER_SMOKE_NETFS").is_some() {
+            let tx = sender.input_sender().clone();
+            let mut step = 0;
+            gtk::glib::timeout_add_local(Duration::from_millis(500), move || {
+                tx.emit(Msg::SmokeNet(step));
+                step += 1;
+                gtk::glib::ControlFlow::Continue
             });
         }
         ComponentParts { model, widgets }
@@ -748,6 +766,12 @@ impl App {
             }
             Msg::Mount(pane, path) => self.goto_mount(pane, path, sender),
             Msg::DiskInfo(path) => self.show_disk_info(path),
+            Msg::UsageTick(serial, snap) => self.on_usage_tick(serial, snap),
+            Msg::UsageDone(serial, result) => self.on_usage_done(serial, result),
+            Msg::UsageDisk(serial, used) => self.on_usage_disk(serial, used),
+            Msg::UsageTimer(serial) => self.on_usage_timer(serial),
+            Msg::UsageCancel => self.cancel_usage(),
+            Msg::UsageGo(pane, remember) => self.usage_go(pane, remember, &sender),
             Msg::DrivesChanged => self.refresh_drives(sender),
             Msg::DriveStatus(text) => self.status = text,
             Msg::Status(text) => self.status = text,
@@ -799,6 +823,7 @@ impl App {
                 error,
             } => self.mount_finished(generation, point, open, error, sender),
             Msg::Smoke => self.run_smoke(sender),
+            Msg::SmokeNet(step) => self.smoke_net(step, sender),
             Msg::DirChanged(pane, path) => self.reload_watched(pane, &path, sender),
             Msg::DirStamp(stamps) => self.apply_dir_stamps(stamps, sender),
             Msg::SearchFeed => self.show_search_feed(sender),
@@ -931,6 +956,7 @@ impl App {
                 }
                 Key::h | Key::H => self.toggle_hidden(),
                 Key::i | Key::I => self.show_disk_info(None),
+                Key::u | Key::U => self.toggle_usage(sender),
                 Key::m | Key::M if shift => {
                     let tx = sender.input_sender().clone();
                     let button = self.shell.mount_button.clone();
@@ -1078,6 +1104,7 @@ impl App {
             Key::Escape if self.shell.editing.get() => {
                 self.leave_quick_edit(sender);
             }
+            Key::Escape if self.usage_scan.is_some() => self.cancel_usage(),
             Key::Escape => self.dismiss(),
             _ => {}
         }
@@ -1254,6 +1281,7 @@ impl App {
         match result {
             Ok(entries) => {
                 if self.state.apply_listing(id, tab, token, entries) {
+                    self.usage_after_listing(pane);
                     if let Some(stamp) = stamp {
                         self.remember_dir(pane, stamp);
                     }
@@ -1366,6 +1394,7 @@ impl App {
         let (path, token) = self.state.refresh(id);
         let tab = self.state.pane(id).active;
         self.spawn_load(sender, id, tab, path, token);
+        self.usage_after_refresh(id.index(), sender);
     }
 
     fn go_up(&mut self, sender: &ComponentSender<Self>) {
@@ -1776,7 +1805,14 @@ impl App {
             } else {
                 Vec::new()
             };
+            let usage = self.usage_modes[pane]
+                .as_ref()
+                .filter(|held| held.tab == tab_active && held.view.path == self.state.tab(id).path)
+                .map(|held| &held.view);
             let ui = &self.shell.panes[pane];
+            if ui.usage_col.is_visible() != usage.is_some() {
+                ui.usage_col.set_visible(usage.is_some());
+            }
             row::set_loading(
                 &ui.list,
                 self.loads
@@ -1845,13 +1881,15 @@ impl App {
                 rust_commander::log::info(&format!("list reload pane={pane} rows={}", rows.len()));
                 ui.store.remove_all();
                 for (entry, marked) in &rows {
-                    ui.store.append(&EntryObject::from_entry(
+                    let obj = EntryObject::from_entry(
                         entry,
                         &self.state.tab(id).path,
                         *marked,
                         self.cfg.file_icons,
                         &crate::ui::iconpack::active(&self.cfg.icon_pack),
-                    ));
+                    );
+                    row::paint_usage_row(&obj, usage);
+                    ui.store.append(&obj);
                 }
                 self.dirty[pane] = false;
                 pending[pane] = Some(rows.iter().map(|(entry, _)| entry.clone()).collect());
@@ -2224,6 +2262,7 @@ impl App {
             errors.push("quick view stayed".into());
         }
         self.smoke_music(&mut errors, sender);
+        self.smoke_usage(&mut errors, sender);
 
         self.toggle_settings(sender);
         let shown = self

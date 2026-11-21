@@ -46,7 +46,7 @@ pub struct Child {
     pub foreign: bool,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Snapshot {
     pub children: Arc<[Child]>,
     /// One value per child, in the order of `children`.
@@ -533,6 +533,40 @@ pub fn cores() -> usize {
     std::thread::available_parallelism().map_or(2, |n| n.get())
 }
 
+/// Notices a count that stands still: a server that stopped answering, a disk that sleeps.
+#[derive(Clone, Copy, Debug)]
+pub struct Watchdog {
+    entries: u64,
+    moved: Instant,
+}
+
+impl Watchdog {
+    pub fn new(now: Instant) -> Self {
+        Self { entries: 0, moved: now }
+    }
+
+    pub fn feed(&mut self, entries: u64, now: Instant) {
+        if entries != self.entries {
+            self.entries = entries;
+            self.moved = now;
+        }
+    }
+
+    pub fn stalled(&self, now: Instant, limit: Duration) -> bool {
+        now.saturating_duration_since(self.moved) >= limit
+    }
+
+    pub fn quiet_for(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.moved)
+    }
+}
+
+/// The mount point and file system type holding `dir`.
+pub fn mount_of(dir: &Path) -> Option<(PathBuf, String)> {
+    let text = fs::read_to_string("/proc/mounts").ok()?;
+    crate::places::mount_entry(&text, dir).map(|(mount, _, fstype, _)| (mount, fstype))
+}
+
 pub const CACHE_CAP: usize = 50_000;
 /// Smaller folders are counted again in a blink, so they are not worth a place.
 pub const MIN_CACHED: u64 = 1 << 20;
@@ -622,6 +656,110 @@ impl Cache {
 
     pub fn clear(&mut self) {
         self.map.clear();
+    }
+}
+
+/// The share as the label beside the bar: whole percent, and "<1%" for something small but not empty.
+pub fn percent_text(part: u64, total: u64) -> String {
+    let share = percent(part, total);
+    if part > 0 && share < 0.5 { "<1%".into() } else { format!("{share:.0}%") }
+}
+
+/// What one row shows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Cell {
+    pub bytes: u64,
+    /// 0 to 1, the share of everything in the folder.
+    pub frac: f64,
+    pub text: String,
+    /// A folder on another mount: no number, no bar.
+    pub foreign: bool,
+}
+
+#[derive(Clone, Debug)]
+struct Item {
+    bytes: u64,
+    foreign: bool,
+    known: bool,
+}
+
+/// The sizes of the children of one folder, in the form the panel draws them. Kept apart from the entries so a
+/// refresh of the listing does not lose them.
+#[derive(Clone, Debug)]
+pub struct View {
+    pub path: PathBuf,
+    pub mode: Mode,
+    /// Still counting: the numbers can grow.
+    pub partial: bool,
+    /// Taken from an earlier count. Shown dimmed until a new one replaces it.
+    pub stale: bool,
+    items: HashMap<String, Item>,
+    total: u64,
+}
+
+impl View {
+    pub fn from_counts(path: &Path, mode: Mode, children: &[Child], bytes: &[u64], partial: bool) -> Self {
+        let items: HashMap<String, Item> = children
+            .iter()
+            .zip(bytes)
+            .map(|(child, bytes)| {
+                (child.name.to_string_lossy().into_owned(), Item { bytes: *bytes, foreign: child.foreign, known: true })
+            })
+            .collect();
+        let mut view = Self { path: path.to_path_buf(), mode, partial, stale: false, items, total: 0 };
+        view.total = view.sum();
+        view
+    }
+
+    /// What the cache knows before the count has said anything: folders it kept, files by their length.
+    /// `entries` is (name, is a folder, length).
+    pub fn prefilled(path: &Path, mode: Mode, entries: &[(String, bool, u64)], cache: &Cache, now: Instant) -> Self {
+        let items = entries
+            .iter()
+            .map(|(name, is_dir, len)| {
+                let item = if *is_dir {
+                    match cache.get(&path.join(name), mode, now) {
+                        Some(hit) => Item { bytes: hit.bytes, foreign: false, known: true },
+                        None => Item { bytes: 0, foreign: false, known: false },
+                    }
+                } else {
+                    Item { bytes: *len, foreign: false, known: true }
+                };
+                (name.clone(), item)
+            })
+            .collect();
+        let mut view = Self { path: path.to_path_buf(), mode, partial: true, stale: true, items, total: 0 };
+        view.total = view.sum();
+        view
+    }
+
+    fn sum(&self) -> u64 {
+        self.items.values().filter(|item| item.known && !item.foreign).fold(0, |sum, item| sum.saturating_add(item.bytes))
+    }
+
+    pub fn total(&self) -> u64 {
+        self.total
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// None for a name the count has not reached yet, or does not know.
+    pub fn cell(&self, name: &str) -> Option<Cell> {
+        let item = self.items.get(name)?;
+        if item.foreign {
+            return Some(Cell { bytes: 0, frac: 0.0, text: String::new(), foreign: true });
+        }
+        if !item.known {
+            return None;
+        }
+        Some(Cell {
+            bytes: item.bytes,
+            frac: percent(item.bytes, self.total) / 100.0,
+            text: percent_text(item.bytes, self.total),
+            foreign: false,
+        })
     }
 }
 
@@ -1009,6 +1147,64 @@ mod tests {
         assert_eq!(report.total, 12);
         assert_eq!(report.unreadable, 0);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn view_gives_each_row_its_share() {
+        let children = [
+            Child { name: "big".into(), is_dir: true, foreign: false },
+            Child { name: "small".into(), is_dir: true, foreign: false },
+            Child { name: "tiny.txt".into(), is_dir: false, foreign: false },
+            Child { name: "mnt".into(), is_dir: true, foreign: true },
+        ];
+        let view = View::from_counts(Path::new("/x"), Mode::DISK, &children, &[750, 249, 1, 9999], false);
+        assert_eq!(view.total(), 1000);
+        let big = view.cell("big").unwrap();
+        assert_eq!((big.bytes, big.text.as_str()), (750, "75%"));
+        assert!((big.frac - 0.75).abs() < 1e-9);
+        assert_eq!(view.cell("tiny.txt").unwrap().text, "<1%");
+        let mount = view.cell("mnt").unwrap();
+        assert!(mount.foreign && mount.text.is_empty());
+        assert!(view.cell("missing").is_none());
+        assert!(!view.partial && !view.stale);
+    }
+
+    #[test]
+    fn empty_folder_view_never_divides_by_zero() {
+        let children = [Child { name: "a".into(), is_dir: true, foreign: false }];
+        let view = View::from_counts(Path::new("/x"), Mode::DISK, &children, &[0], false);
+        let cell = view.cell("a").unwrap();
+        assert_eq!((cell.frac, cell.text.as_str()), (0.0, "0%"));
+        assert_eq!(percent_text(0, 0), "0%");
+        assert_eq!(percent_text(1, 1_000_000), "<1%");
+        assert_eq!(percent_text(1, 1), "100%");
+    }
+
+    #[test]
+    fn prefilled_view_uses_the_cache_and_marks_the_rest_unknown() {
+        let now = Instant::now();
+        let mut cache = Cache::default();
+        cache.store(&report_of(&[("/r", 5 * MIN_CACHED), ("/r/known", 3 * MIN_CACHED)]), Mode::DISK, false, now);
+        let entries = [("known".to_string(), true, 0), ("other".to_string(), true, 0), ("file".to_string(), false, 10)];
+        let view = View::prefilled(Path::new("/r"), Mode::DISK, &entries, &cache, now);
+        assert!(view.partial && view.stale);
+        assert_eq!(view.cell("known").unwrap().bytes, 3 * MIN_CACHED);
+        assert!(view.cell("other").is_none());
+        assert_eq!(view.cell("file").unwrap().bytes, 10);
+    }
+
+    #[test]
+    fn watchdog_fires_only_when_the_count_stands_still() {
+        let t0 = Instant::now();
+        let limit = Duration::from_secs(10);
+        let mut dog = Watchdog::new(t0);
+        dog.feed(100, t0 + Duration::from_secs(4));
+        assert!(!dog.stalled(t0 + Duration::from_secs(13), limit));
+        dog.feed(100, t0 + Duration::from_secs(13));
+        assert!(dog.stalled(t0 + Duration::from_secs(14), limit));
+        dog.feed(101, t0 + Duration::from_secs(15));
+        assert!(!dog.stalled(t0 + Duration::from_secs(16), limit));
+        assert_eq!(dog.quiet_for(t0 + Duration::from_secs(16)), Duration::from_secs(1));
     }
 
     #[test]

@@ -878,6 +878,33 @@ progressbar.job text {{
   font-weight: bold;
   color: {bright};
 }}
+progressbar.usage {{
+  min-height: 0;
+  padding: 0;
+  margin: 2px 6px 2px 0;
+}}
+progressbar.usage trough {{
+  min-height: 12px;
+  background: alpha({fg}, 0.12);
+  border: none;
+  border-radius: 3px;
+}}
+progressbar.usage progress {{
+  min-height: 12px;
+  background: {blue};
+  border: none;
+  border-radius: 3px;
+}}
+label.usage-share {{
+  font-size: 0.9em;
+  color: {fg};
+}}
+.usage-cell.partial progressbar.usage progress {{
+  background: alpha({blue}, 0.45);
+}}
+.usage-cell.partial label.usage-share {{
+  color: {dim};
+}}
 button.drive {{
   background: transparent;
   border: 1px solid transparent;
@@ -1266,6 +1293,7 @@ entry:focus-within {{
         dim = p.dim,
         soft = mix(&p.dim, &p.foreground, 0.4),
         red = p.red,
+        blue = p.blue,
         title_px = (f64::from(s.font_px) * 1.5).round() as u32,
         radius = s.radius,
         icon_gap = s.space(6),

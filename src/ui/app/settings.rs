@@ -171,7 +171,9 @@ impl App {
             return 0;
         }
         let side = if pane == 0 { paned.position() } else { total - paned.position() - PANED_HANDLE };
-        side - PANE_FRAME - SCROLLBAR - GLYPH_COLUMN
+        // The usage bar comes out of the same room, so Name and the small columns give way for it.
+        let usage = if self.shell.panes[pane].usage_col.is_visible() { crate::ui::row::USAGE_WIDTH } else { 0 };
+        side - PANE_FRAME - SCROLLBAR - GLYPH_COLUMN - usage
     }
 
     pub(in crate::ui::app) fn refit_columns(&mut self) {

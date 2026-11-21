@@ -183,6 +183,7 @@ impl App {
     pub(in crate::ui::app) fn finish_job(&mut self, result: Result<Report, String>, sender: &ComponentSender<Self>) {
         let work = self.job.as_ref().map(|job| job.work).unwrap_or(Work::Transfer);
         self.job = None;
+        self.usage_after_job(sender);
         let retry_password = matches!(&result, Err(err) if err == "Password required" || err == "Wrong password")
             && self.pending.as_ref().is_some_and(|pending| pending.asked < 2);
         let cancelled = match &result {

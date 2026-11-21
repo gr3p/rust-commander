@@ -41,6 +41,19 @@ mod imp {
         // Changes when the file does, so an edited image is decoded again.
         #[property(get, set)]
         stamp: Cell<u64>,
+        // The name as the listing has it, without the / or @ that Name shows.
+        #[property(get, set)]
+        entry_name: RefCell<String>,
+        // The usage bar. Off outside the disk usage mode and for rows the count has not reached.
+        #[property(get, set)]
+        usage_on: Cell<bool>,
+        #[property(get, set)]
+        usage_frac: Cell<f64>,
+        #[property(get, set)]
+        usage_text: RefCell<String>,
+        // A number that can still change or comes from an earlier count.
+        #[property(get, set)]
+        usage_partial: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -89,6 +102,7 @@ impl EntryObject {
             .property("big-icon", token)
             .property("thumb", thumb)
             .property("stamp", entry.mtime as u64 ^ entry.size.rotate_left(32))
+            .property("entry-name", entry.name.to_string())
             .property("is-dir", entry.is_dir())
             .build()
     }
@@ -143,12 +157,13 @@ fn watch_menu(item: &relm4::gtk::ListItem, pane: usize, sender: &relm4::Sender<c
     child.add_controller(click);
 }
 
-pub fn file_columns(pane: usize, sender: &relm4::Sender<crate::ui::msg::Msg>) -> [relm4::gtk::ColumnViewColumn; 6] {
+pub fn file_columns(pane: usize, sender: &relm4::Sender<crate::ui::msg::Msg>) -> [relm4::gtk::ColumnViewColumn; 7] {
     [
         glyph_column(pane, sender),
         column("name", "Name", false, -1, 0.0, 0, 8, true, true, pane, sender),
         column("ext", "Ext", false, 80, 0.0, 0, 8, true, false, pane, sender),
         column("size", "Size", false, 96, 0.0, 0, 8, true, false, pane, sender),
+        usage_column(pane, sender),
         column("time", "Date", false, 188, 0.0, 0, 8, true, false, pane, sender),
         column("attr", "Attr", false, 120, 0.0, 0, 8, true, false, pane, sender),
     ]
@@ -248,6 +263,125 @@ fn column(
     if width > 0 {
         col.set_fixed_width(width);
     }
+    col
+}
+
+/// Puts what the disk usage count knows on one row, or clears the bar when there is no count.
+pub fn paint_usage_row(obj: &EntryObject, view: Option<&rust_commander::usage::View>) {
+    let name = obj.entry_name();
+    let Some(view) = view.filter(|_| name != "..") else {
+        if obj.usage_on() {
+            obj.set_usage_on(false);
+        }
+        return;
+    };
+    let draft = view.partial || view.stale;
+    let size = |text: String| {
+        if obj.size_text() != text {
+            obj.set_size_text(text);
+        }
+    };
+    match view.cell(&name) {
+        Some(cell) if cell.foreign => {
+            obj.set_usage_on(false);
+            size("<MNT>".into());
+        }
+        Some(cell) => {
+            obj.set_usage_frac(cell.frac);
+            obj.set_usage_text(cell.text);
+            obj.set_usage_partial(draft);
+            obj.set_usage_on(true);
+            if obj.is_dir() {
+                size(if cell.bytes == 0 {
+                    "<DIR>".into()
+                } else if draft {
+                    format!("~{}", listing::format_size(cell.bytes))
+                } else {
+                    listing::format_size(cell.bytes)
+                });
+            }
+        }
+        None => {
+            obj.set_usage_on(false);
+            if obj.is_dir() {
+                size(if draft { "…".into() } else { "<DIR>".into() });
+            }
+        }
+    }
+}
+
+/// Width of the usage column, for the room it takes from Name.
+pub const USAGE_WIDTH: i32 = 150;
+
+struct UsageWatch {
+    obj: relm4::gtk::glib::WeakRef<EntryObject>,
+    handler: relm4::gtk::glib::SignalHandlerId,
+}
+
+fn paint_usage(cell: &relm4::gtk::Box, obj: &EntryObject) {
+    let on = obj.usage_on();
+    if cell.is_visible() != on {
+        cell.set_visible(on);
+    }
+    if !on {
+        return;
+    }
+    let Some(label) = cell.first_child().and_then(|child| child.downcast::<relm4::gtk::Label>().ok()) else { return };
+    let Some(bar) = label.next_sibling().and_then(|child| child.downcast::<relm4::gtk::ProgressBar>().ok()) else { return };
+    label.set_text(&obj.usage_text());
+    bar.set_fraction(obj.usage_frac());
+    if obj.usage_partial() {
+        cell.add_css_class("partial");
+    } else {
+        cell.remove_css_class("partial");
+    }
+}
+
+// The bar of the disk usage mode. Its title is empty, like the glyph column's, so sizing and sorting leave it alone.
+// It stays hidden until the mode is on.
+fn usage_column(pane: usize, sender: &relm4::Sender<crate::ui::msg::Msg>) -> relm4::gtk::ColumnViewColumn {
+    use relm4::gtk;
+    let factory = gtk::SignalListItemFactory::new();
+    let tx = sender.clone();
+    factory.connect_setup(move |_, item| {
+        let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+        let cell = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        cell.add_css_class("usage-cell");
+        let share = gtk::Label::new(None);
+        share.add_css_class("usage-share");
+        share.set_width_chars(4);
+        share.set_xalign(1.0);
+        let bar = gtk::ProgressBar::new();
+        bar.add_css_class("usage");
+        bar.set_valign(gtk::Align::Center);
+        bar.set_hexpand(true);
+        cell.append(&share);
+        cell.append(&bar);
+        cell.set_visible(false);
+        item.set_child(Some(&cell));
+        watch_menu(item, pane, &tx);
+    });
+    factory.connect_bind(move |_, item| {
+        let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+        let Some(obj) = item.item().and_then(|obj| obj.downcast::<EntryObject>().ok()) else { return };
+        let Some(cell) = item.child().and_then(|child| child.downcast::<gtk::Box>().ok()) else { return };
+        paint_usage(&cell, &obj);
+        let cell = cell.clone();
+        let handler = obj.connect_notify_local(None, move |obj, _| paint_usage(&cell, obj));
+        unsafe { item.set_data("usage-watch", UsageWatch { obj: obj.downgrade(), handler }) };
+    });
+    factory.connect_unbind(|_, item| {
+        let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+        let Some(watch) = (unsafe { item.steal_data::<UsageWatch>("usage-watch") }) else { return };
+        if let Some(obj) = watch.obj.upgrade() {
+            obj.disconnect(watch.handler);
+        }
+    });
+    let col = gtk::ColumnViewColumn::new(Some(""), Some(factory));
+    col.set_expand(false);
+    col.set_resizable(false);
+    col.set_fixed_width(USAGE_WIDTH);
+    col.set_visible(false);
     col
 }
 

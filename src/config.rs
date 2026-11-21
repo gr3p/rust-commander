@@ -96,6 +96,12 @@ pub struct Config {
     pub player_repeat: String,
     #[serde(default)]
     pub player_shuffle: bool,
+    /// Folder sizes as file lengths. Off counts the space on disk, as `du` does.
+    #[serde(default)]
+    pub usage_apparent: bool,
+    /// Mount points of network disks that may be counted without asking first.
+    #[serde(default)]
+    pub usage_network_ok: Vec<String>,
 }
 
 fn default_theme() -> String {
@@ -180,6 +186,8 @@ impl Default for Config {
             player_visual_density: default_visual_mid(),
             player_repeat: default_repeat(),
             player_shuffle: false,
+            usage_apparent: false,
+            usage_network_ok: Vec::new(),
         }
     }
 }
@@ -326,6 +334,15 @@ mod tests {
         assert_eq!(old.blink_count, 3);
         let count: Config = toml::from_str("blink_count = 5").unwrap();
         assert_eq!(count.blink_count, 5);
+    }
+
+    #[test]
+    fn usage_settings_default_and_round_trip() {
+        let old: Config = toml::from_str("").unwrap();
+        assert!(!old.usage_apparent && old.usage_network_ok.is_empty());
+        let set: Config = toml::from_str("usage_apparent = true\nusage_network_ok = [\"/mnt/nas\"]").unwrap();
+        assert!(set.usage_apparent);
+        assert_eq!(set.usage_network_ok, vec!["/mnt/nas".to_string()]);
     }
 
     #[test]
