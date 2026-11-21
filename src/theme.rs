@@ -756,6 +756,13 @@ window {{
 .pane-active {{
   border: 1px solid {border};
 }}
+/* The top edge of the panes is the line under the drive tabs. */
+.pane,
+.pane-active {{
+  border-top-width: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}}
 label.glyph.marked {{
   color: {accent};
 }}
@@ -892,8 +899,15 @@ button.drive label.drive-num {{
 button.drive:hover {{
   background: {rhov};
 }}
+box.drives {{
+  border-bottom: 1px solid {muted};
+}}
 button.drive.current {{
-  border-color: {accent};
+  background: {bg};
+  border-color: {border};
+  border-bottom-color: transparent;
+  border-radius: 6px 6px 0 0;
+  transform: translateY(1px);
 }}
 button.drive.idle {{
   opacity: 0.6;

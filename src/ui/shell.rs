@@ -432,7 +432,6 @@ fn drive_bar(
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
     bar.add_css_class("drives");
     bar.set_margin_top(2);
-    bar.set_margin_bottom(2);
     let snapshot = (rust_commander::places::mounts(), super::drives::idle_volumes());
     let (drives, idle) = drive_buttons(sender, active, icon_pack, &snapshot, &[]);
     for button in drives.iter().map(|(_, button)| button).chain(idle.iter()) {
