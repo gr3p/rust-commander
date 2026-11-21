@@ -1118,7 +1118,7 @@ impl App {
         let ranked = rust_commander::commands::rank(&cue);
         for (slot, hint) in self.shell.hints.iter().enumerate() {
             if let Some(act) = ranked.get(slot).copied() {
-                let label = rust_commander::commands::hint_label(act, side);
+                let label = rust_commander::commands::hint_label_for(act, side, &cue);
                 if hint.button.label().as_deref() != Some(label.as_str()) {
                     hint.button.set_label(&label);
                 }

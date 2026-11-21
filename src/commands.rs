@@ -30,6 +30,8 @@ const HINTS: &[Act] = &[
     Act::Search,
     Act::Thumbs,
     Act::DiskInfo,
+    Act::DiskUsage,
+    Act::DiskUsageFollow,
 ];
 
 /// Buttons on the context row, including Quick view in the last slot.
@@ -280,6 +282,10 @@ pub struct Cue {
     pub drive: bool,
     // zip, rar, tar and 7z. Unpack follows `archive`, which includes 7z.
     pub testable: bool,
+    /// The active panel shows disk usage bars, or is counting them.
+    pub usage: bool,
+    /// The active panel counts every folder it opens.
+    pub following: bool,
 }
 
 impl Cue {
@@ -302,6 +308,8 @@ impl Cue {
             editing: false,
             drive: false,
             testable: false,
+            usage: false,
+            following: false,
         }
     }
 }
@@ -397,6 +405,16 @@ pub fn hint_label(act: Act, side: &str) -> String {
     }
 }
 
+/// The label on the context row. The disk usage commands say what pressing them does now.
+pub fn hint_label_for(act: Act, side: &str, cue: &Cue) -> String {
+    match act {
+        Act::DiskUsage if cue.usage => caption("Ctrl+U", "Disk usage off"),
+        Act::DiskUsageFollow if cue.following => caption("Ctrl+R", "Stop following"),
+        Act::DiskUsageFollow => caption("Ctrl+U+R", "Follow folders"),
+        other => hint_label(other, side),
+    }
+}
+
 pub fn applies(act: Act, cue: &Cue) -> bool {
     match act {
         Act::Unpack | Act::UnpackHere => cue.archive,
@@ -464,6 +482,10 @@ fn score(act: Act, cue: &Cue) -> i32 {
         Act::CopyPaths if cue.file => 16,
         Act::Properties if cue.file || cue.dir => 14,
         Act::DiskInfo if cue.drive => 30,
+        // In the mode the next steps lead the row: follow a big folder down, or switch it off.
+        Act::DiskUsageFollow if cue.usage => 66,
+        Act::DiskUsage if cue.usage => 62,
+        Act::DiskUsage if cue.drive || cue.dir => 12,
         Act::Filter => 10,
         Act::Search => 8,
         Act::Thumbs => 7,
@@ -643,6 +665,24 @@ mod tests {
         let mut cue = Cue::none();
         build(&mut cue);
         cue
+    }
+
+    #[test]
+    fn disk_usage_mode_leads_the_row_with_its_next_steps() {
+        let mut cue = Cue::none();
+        cue.dir = true;
+        assert!(rank(&cue).contains(&Act::DiskUsage));
+        assert!(!rank(&cue).contains(&Act::DiskUsageFollow));
+        cue.usage = true;
+        let ranked = rank(&cue);
+        assert_eq!(&ranked[..2], &[Act::DiskUsageFollow, Act::DiskUsage]);
+        assert!(hint_label_for(Act::DiskUsageFollow, "right", &cue).contains("Follow folders"));
+        assert!(hint_label_for(Act::DiskUsage, "right", &cue).contains("Disk usage off"));
+        cue.following = true;
+        assert!(hint_label_for(Act::DiskUsageFollow, "right", &cue).contains("Stop following"));
+        // Several marked files still come first.
+        cue.marks = 3;
+        assert_eq!(rank(&cue)[0], Act::Pack);
     }
 
     #[test]

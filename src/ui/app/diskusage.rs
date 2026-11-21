@@ -64,6 +64,10 @@ impl App {
             .filter(|mode| mode.tab == self.state.pane(id).active && mode.view.path == self.state.tab(id).path)
     }
 
+    pub(in crate::ui::app) fn usage_scan_pane(&self) -> Option<usize> {
+        self.usage_scan.as_ref().map(|scan| scan.pane)
+    }
+
     // First press counts. While counting it cancels, and once the bars are there it switches the mode off.
     pub(in crate::ui::app) fn toggle_usage(&mut self, sender: &ComponentSender<Self>) {
         let pane = self.state.active.index();
@@ -557,6 +561,13 @@ impl App {
         if row(self, "..").is_some_and(|obj| obj.usage_on()) {
             errors.push("usage: bar on ..".into());
         }
+        let hints = |app: &App| -> Vec<String> {
+            app.shell.hints.iter().filter(|hint| hint.button.is_visible()).filter_map(|hint| hint.button.label().map(|l| l.to_string())).collect()
+        };
+        let shown = hints(self);
+        if !shown.iter().any(|label| label.contains("Follow folders")) || !shown.iter().any(|label| label.contains("Disk usage off")) {
+            errors.push(format!("usage: context row lacks the next steps: {shown:?}"));
+        }
 
         // Our own file jobs and Refresh count again. The old numbers stay on screen, dimmed, until the new ones arrive.
         for (name, restart) in [("job", true), ("refresh", false)] {
@@ -627,6 +638,10 @@ impl App {
 
         // Ctrl+R follows: a folder opened from here is counted on its own.
         self.toggle_usage_follow(sender);
+        self.sync();
+        if !hints(self).iter().any(|label| label.contains("Stop following")) {
+            errors.push(format!("usage: context row does not offer to stop following: {:?}", hints(self)));
+        }
         if !self.usage_follow[0] || self.usage_scan.is_none() {
             errors.push("usage: Ctrl+R did not start a following count".into());
         }
@@ -652,6 +667,10 @@ impl App {
         open_folder(self, home.clone());
         if self.usage_modes[0].is_some() || self.usage_scan.is_some() {
             errors.push("usage: counted after following was off".into());
+        }
+        self.sync();
+        if hints(self).iter().any(|label| label.contains("Follow folders") || label.contains("Disk usage off")) {
+            errors.push(format!("usage: context row kept the mode's steps: {:?}", hints(self)));
         }
         self.reload_pane(id);
         self.sync();
