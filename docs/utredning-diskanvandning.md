@@ -125,14 +125,123 @@ Vinsten är stor, framför allt för att **en räkning av en övre mapp redan ge
 2. **Kommando + kolumn + förloppsruta + minnescache** (`commands.rs`, `ui/app/…`, `ui/row.rs`, `theme.rs`). Acceptanstest i `tests/acceptance.rs`.
 3. **Efterarbete**: sticky läge (räkna automatiskt vid byte av katalog, men aldrig för `/`, nätverk, eller kataloger över en tröskel), diskcache, filter för dolda filer, dubbelklick för att gå ner i mappen.
 
-## Tester
+## Testplan
 
-- Summerar rätt över nästlade mappar; hård länk räknas en gång; symlänk följs inte.
-- Symlänk till en förälder (loop) och en mapp med `chmod 000` avbryter inte räkningen.
-- Katalog på 100 000 tomma filer avbryts inom ~100 ms efter att flaggan satts.
-- Djup på 2 000 nivåer ger "för djup", inte stack overflow (testtråd med liten stack bevisar att det inte är rekursion).
-- Gammal `token` ger inget utslag i panelen (acceptanstest).
-- `cargo test` ska vara grönt före push, som vanligt.
+Planen går att köra på den här maskinen utan root och utan riktig SMB-server. Verktyg som finns: `du`, `bwrap`, `unshare -rm` (tmpfs- och bind-mounts i en användar-namnrymd fungerar, kontrollerat), `strace`, `ydotool`, `/dev/fuse` med `fusermount3`. Alla nivåer utom H körs av mig (G kräver en Wayland-session och hoppas annars över). Varje etapp (se 5) har egna grindar; ingenting pushas till `master` innan `cargo test` är grönt, eftersom varje push släpper en release.
+
+### A. Enhetstester i `src/usage.rs` (`cargo test --lib usage`)
+
+Körs utan fönster. Fixturer skapas i `std::env::temp_dir()` som i `sizes.rs`.
+
+| ID | Fall | Förväntat |
+|---|---|---|
+| A1 | Nästlade mappar med kända filstorlekar | Summan stämmer exakt, per direkt underkatalog och totalt. |
+| A2 | Hård länk (två namn, samma inode), även över olika undermappar | Räknas en gång. |
+| A3 | Symlänk till fil, till mapp och till förälder (loop) | Följs aldrig. Länken själv räknas som sin egen storlek. Ingen hängning. |
+| A4 | Mapp med `chmod 000` och en som försvinner mitt i räkningen | Räkningen fortsätter. `unreadable` ökar för `EACCES`, `ENOENT` ignoreras. |
+| A5 | Rot som inte finns / rot som är en fil / rot som är en symlänk | Tydligt fel respektive filens storlek, aldrig panik. |
+| A6 | Glesa filer (`set_len` 1 GiB, inget skrivet) | Allokerad läge visar nästan 0, skenbart läge visar 1 GiB. |
+| A7 | Djup 3 000 nivåer, körs i en tråd med 256 KiB stack | Klarar sig eller ger "för djup" vid taket. Ingen stack overflow bevisar att vi inte rekursar. |
+| A8 | Bred katalog med 200 000 tomma filer, flagga sätts efter 50 ms | Returnerar inom 200 ms med `cancelled`. Bevisar kontroll var 1024:e post. |
+| A9 | Panik injiceras i en arbetstråd (`#[cfg(test)]`-krok) | `Finished` med fel kommer fram, processen lever, övriga trådar avslutas. |
+| A10 | Trådantal 1 respektive 8 över samma träd | Identiskt resultat. |
+| A11 | Maxvärden (`u64::MAX`-nära) | `saturating_add`, ingen overflow-panik i debugbygge. |
+| A12 | `Event::Progress` | Tas emot högst ~10 gånger per sekund och är monotont växande; `Finished.slots` summerar till totalen. |
+| A13 | `folder_bytes` efter ombyggnad | Samma tester som idag (`sizes.rs`) är fortfarande gröna. |
+| A14 | Nätverksdetektion: syntetisk `/proc/mounts`-text med `cifs`, `nfs4`, `fuse.sshfs`, `fuse.rclone`, `ext4`, `tmpfs` | Rätt `network`-flagga via `places::mount_entry`. Escapade mellanslag i monteringspunkt hanteras. |
+| A15 | Watchdogen som ren funktion: `stalled(last_count, last_change, now)` | Slår till först efter tröskeln och bara om räknaren står still. Inte vid pågående framsteg. |
+| A16 | Cache: delta-justering efter flytt/kopia/radering, utgång på tid, tak på antal poster, olika alternativ ger olika nycklar | Föräldrar får (ny − gammal). Äldsta ut först. Inget läckage mellan alternativ. |
+
+### B. Jämförelse mot `du` (verkliga data, läser bara)
+
+Skript `scripts/usage-vs-du.sh` (nytt, endast läsning). Kör räknaren och `du` på samma uppsättning och jämför.
+
+- Mappar: `~/Documents`, `/usr`, `/var/lib`, ett repo med `target/`, en mapp med hårda länkar (t.ex. `~/.cache` eller `/usr/share`), och `/usr/lib`.
+- Kommandon: `du -x -B1 --apparent-size` mot skenbart läge och `du -x -B1` mot allokerat läge, jämför per direkt underkatalog (`du -x -B1 --max-depth=1`).
+- Godkänt: exakt lika när inget ändrats under körningen. Annars högst 0,5 % avvikelse, och avvikelsen förklaras (filer som ändrats). Alla större avvikelser undersöks med `strace -f -c`/diff innan vi går vidare.
+- Kör `du` två gånger först så att båda startar varma. En kall körning mäts separat i E.
+
+### C. Acceptanstester (`tests/acceptance.rs`, Landlock-sandlådan)
+
+Varje fall körs i egen process med `FIXTURE` som enda skrivbara/läsbara yta, som övriga fall där.
+
+| ID | Fall | Förväntat |
+|---|---|---|
+| C1 | Landlock tillåter läsning av fixturen men inget mer: räknaren går inte utanför och kraschar inte på nekade vägar | Fel räknas, inget annat sker. |
+| C2 | Modell: `token` från gammal räkning efter katalogbyte | Delresultat och `Finished` från gamla token ändrar inget i panelen. |
+| C3 | Kolumnen: `size_text` för mapp med känd/okänd/ofullständig storlek | `<DIR>` → `…`/`~` → `1.5 MB`. |
+| C4 | Procentberäkning: summa 0, en post, 100 % fördelat på flera, avrundning | Aldrig NaN, aldrig över 100 %, aldrig negativ. |
+| C5 | Sortering på storlek i läget | Mappar sorteras på `usage-bytes`, filer på `len`. Utan läget oförändrat. |
+| C6 | Kommandokatalog | `Act::DiskUsage` finns i `commands.rs` med nyckel, etikett och grupp, och krockar inte med andra tangenter. |
+| C7 | Config | Ny inställning (skenbar/allokerad, bekräftad nätverksdisk) skrivs och läses, saknade nycklar ger standardvärden. |
+
+### D. Robusthet och stress (lokalt, ingen root)
+
+Körs som `cargo test --release -- --ignored usage_stress` eller som skript. Skapas under `/tmp`, rensas efteråt.
+
+| ID | Fall | Hur | Förväntat |
+|---|---|---|---|
+| D1 | Mount-gräns | `unshare -rm`, montera `tmpfs` under en testmapp | Mappen visas som monterad, och dess innehåll räknas inte med. Med `same_device = false` räknas det. |
+| D2 | Bind-mount-loop | `unshare -rm`, `mount --bind` mapp in i sin egen undermapp | Terminerar. Katalog-`(dev, ino)`-mängden eller djuptaket stoppar loopen. Ingen dubbelräkning av det som redan setts. |
+| D3 | Fildeskriptorer | `ulimit -n 32`, träd med 5 000 kataloger | Klarar sig, inga `EMFILE` (en öppen katalog per tråd). |
+| D4 | Minne | 1 000 000 filer i 20 000 kataloger, mät maxminne med `/usr/bin/time -v` | Under ca 100 MB, och påverkas inte av antalet filer (bara av bredden). |
+| D5 | Radering under räkning | Bakgrundsprocess raderar och skapar filer medan räkningen går, 20 körningar | Inga paniker, inga fel förutom räknade `ENOENT`. Slutsumman ligger mellan före och efter. |
+| D6 | Avbryt-latens | Avbryt efter 100 ms på ett träd som tar 10 s | Alla trådar stoppade inom 250 ms, och inga tråd-/fd-läckor (`/proc/self/fd`, `/proc/self/task` jämförs före/efter). |
+| D7 | Upprepade räkningar | 500 korta räkningar i rad och 500 avbrutna | Antal trådar och fd tillbaka på utgångsvärdet. Minnet växer inte (cachetaket håller). |
+| D8 | Fel under hela trädet | Träd där varannan mapp är `000` | Alla läsbara delar summeras. `unreadable` stämmer. |
+| D9 | Ovanliga namn | Namn som inte är UTF-8, nyrad i namn, 255 byte långa namn, sökväg över `PATH_MAX` | Inga paniker. Överlånga vägar räknas som fel, inte krasch. |
+
+### E. Prestanda och trådar
+
+Mäts med `hyperfine`-liknande loop (`time` om `hyperfine` saknas), 5 körningar, median. Före/efter jämförs mot nuvarande `folder_bytes`.
+
+- **E1 Varm cache:** 1 vs 2 vs 4 vs 8 trådar på `~/Documents`/`/usr`. Mål: minst 3× snabbare än dagens `folder_bytes` med 8 trådar och inte långsammare än `du`.
+- **E2 `entry.metadata()` mot `symlink_metadata(path)`:** isolerad mikromätning, bekräftar att fd-relativ uppslagning är vinsten som utredningen påstår.
+- **E3 Kall cache:** `sync; echo 3 | sudo tee /proc/sys/vm/drop_caches` kräver root, så görs bara om du godkänner det. Annars ersätts testet av att mäta första respektive andra körningen på en mapp som inte besökts.
+- **E4 Roterande disk:** kan inte testas här (NVMe). Logiken för 1–2 trådar testas som ren funktion (A-nivå) mot en syntetisk `/sys/dev/block/…/rotational`-sökväg. Verklig mätning kräver en USB-hårddisk (se H).
+- **E5 Delresultat:** tid till första `Progress` under 100 ms på stora träd, så att panelen aldrig verkar hänga.
+
+### F. Nätverksdiskar utan riktig server
+
+Vi har ingen SMB-server här (`smbd` saknas), men beteendena kan ändå testas:
+
+| ID | Fall | Hur | Förväntat |
+|---|---|---|---|
+| F1 | Klassificering | A14 | `network = true` för cifs/smb3/nfs/nfs4/fuse.*. |
+| F2 | Långsamt filsystem | Liten FUSE-daemon (Python `fusepy`/`pyfuse3` eller C med libfuse3, installeras i en venv) som svarar med 5 ms fördröjning per `getattr`, monterad med `fusermount3` under `/tmp` | Räkningen blir klar, trådantal begränsas till 2–4, filer/sek visas, avbryt fungerar. Beroenden installeras bara om testet körs. Misslyckas installationen markeras F2 som hoppad, inte som godkänd. |
+| F3 | Hängande server | Samma FUSE-daemon som sover 30 s på ett `getattr` | UI:t visar "Servern svarar inte…" efter ~10 s, Avbryt frigör panelen direkt, en sen respons från den fastnade tråden ändrar inget (token). Programmet avslutas normalt även med en tråd kvar. |
+| F4 | Bekräftelsedialog | GUI-smoke (G) mot FUSE-monteringen | Dialogen visas. "Avbryt" startar ingen skanning. "Fråga inte igen" sparas i config och dialogen uteblir nästa gång. |
+| F5 | Nätverksmount under lokal mapp | FUSE-montering under en lokal testmapp | Den hoppas över och markeras `⊘ monterad`, ingen skanning startar. |
+
+### G. GUI-smoke (`scripts/gui-smoke.sh`, kräver Wayland och `bwrap`; `ydotool` finns)
+
+Utökas med ett steg som kör mot en genererad fixtur:
+
+1. Starta, öppna fixturen i vänster panel.
+2. Kör kommandot (F1-menyn och tangenten). Kolumnen **Usage** dyker upp, staplarna fylls, storleksraderna byter från `…` till värden, `..` får ingen stapel.
+3. På en stor fixtur: förloppsrutan syns efter ~300 ms, visar antal och Avbryt. Avbryt lämnar staplarna avmarkerade med `~`, inget kraschar.
+4. Byt katalog mitt i en räkning: ingen gammal stapel visas i den nya katalogen.
+5. Esc avbryter. Byte av flik och stängning av panelen avbryter och rensar.
+6. Kopiera en fil med F5 i läget: cachen justeras, procenten uppdateras utan ny skanning.
+7. Refresh: gamla värden visas dämpade (`~`) medan nya strömmar in.
+8. Temat: stapelfärg följer paletten i ett mörkt och ett ljust tema.
+9. Stäng läget: kolumnen försvinner, inget CPU-bruk kvar (`top`/`/proc/<pid>/stat` stilla).
+
+### H. Det jag inte kan göra härifrån
+
+Dessa steg behöver dig eller utrustning jag saknar. De noteras som öppna i PR-/commit-texten, inte som godkända.
+
+- Riktig SMB-share och NFS (hängande server, VPN som tappas, sovande NAS).
+- Roterande USB-hårddisk (trådval och verklig prestanda).
+- Btrfs/ZFS med komprimering eller reflinks (avvikelse mot `du`).
+- Kall cache med `drop_caches` (kräver root).
+
+### Grindar
+
+1. **Etapp 1 (kärnan):** A, B, D1–D9 och E grön. `cargo test` grönt.
+2. **Etapp 2 (UI + cache):** C, F och G gröna samt A16. `cargo test` grönt, `scripts/gui-smoke.sh` grönt.
+3. **Före release:** hela planen en gång till på den slutliga koden, och H redovisas som öppna punkter.
+4. Fel som hittas får ett eget regressionstest i A eller C innan de rättas.
 
 ## Risker och avvägningar
 
