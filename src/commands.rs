@@ -123,6 +123,8 @@ pub enum Act {
     CloseView,
     ImageFit,
     ImageStep,
+    ImageTurnLeft,
+    ImageTurnRight,
     ListerText,
     ListerBinary,
     ListerHex,
@@ -159,7 +161,7 @@ pub enum Act {
 }
 
 impl Act {
-    pub const ALL: [Act; 94] = [
+    pub const ALL: [Act; 96] = [
         Act::Refresh,
         Act::View,
         Act::Edit,
@@ -221,6 +223,8 @@ impl Act {
         Act::CloseView,
         Act::ImageFit,
         Act::ImageStep,
+        Act::ImageTurnLeft,
+        Act::ImageTurnRight,
         Act::ListerText,
         Act::ListerBinary,
         Act::ListerHex,
@@ -508,6 +512,8 @@ fn synonyms(act: Act) -> &'static str {
         Act::CloseView => "leave exit quit back stäng avsluta",
         Act::ImageFit => "zoom scale size actual pixel anpassa zooma",
         Act::ImageStep => "next previous prev gallery slideshow föregående nästa bild",
+        Act::ImageTurnLeft => "rotate turn flip counterclockwise vänster rotera vrid vänd",
+        Act::ImageTurnRight => "rotate turn flip clockwise höger rotera vrid vänd",
         Act::ListerText => "plain text",
         Act::ListerBinary => "binär bytes",
         Act::ListerHex => "hexadecimal hexdump",
@@ -587,6 +593,7 @@ pub fn applies(act: Act, cue: &Cue) -> bool {
         Act::QuickEdit => cue.quick_view && cue.file && !cue.image && !cue.archive && !cue.editing,
         Act::ImageFit | Act::ImageStep => cue.image_view,
         Act::CopyImage => cue.image_view,
+        Act::ImageTurnLeft | Act::ImageTurnRight => cue.quick_view && cue.image && !cue.editing,
         Act::AudioToggle | Act::AudioSeek | Act::AudioVolume | Act::AudioMute => cue.audio,
         Act::AudioNext | Act::AudioPrev | Act::AudioShuffle | Act::AudioRepeat => cue.audio,
         Act::AudioMinimize => cue.player && !cue.mini,
@@ -738,6 +745,8 @@ const CATALOG: &[Item] = &[
     Item { act: Act::CloseView, keys: "Escape", label: "Close view", group: Group::View },
     Item { act: Act::ImageFit, keys: "S", label: "Fit or 1:1", group: Group::View },
     Item { act: Act::ImageStep, keys: "Left/Right", label: "Previous or next", group: Group::View },
+    Item { act: Act::ImageTurnLeft, keys: "L", label: "Rotate image left", group: Group::View },
+    Item { act: Act::ImageTurnRight, keys: "R", label: "Rotate image right", group: Group::View },
     Item { act: Act::ListerText, keys: "1", label: "Text", group: Group::View },
     Item { act: Act::ListerBinary, keys: "2", label: "Binary", group: Group::View },
     Item { act: Act::ListerHex, keys: "3", label: "Hex", group: Group::View },

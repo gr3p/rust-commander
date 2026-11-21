@@ -940,6 +940,12 @@ impl App {
         }
     }
 
+    pub(in crate::ui::app) fn rotate_quick_image(&mut self, clockwise: bool) {
+        if self.state.quick_view && self.cursor_is_image() && self.preview.rotate_image(clockwise) {
+            self.paint_preview();
+        }
+    }
+
     pub(in crate::ui::app) fn toggle_quick_scale(&mut self) {
         if !self.cursor_is_image() {
             return;

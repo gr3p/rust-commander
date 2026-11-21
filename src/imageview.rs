@@ -91,6 +91,24 @@ pub fn decode_bytes(bytes: &[u8], max_edge: u32) -> Result<Rgba, String> {
     Ok(Rgba { width: rgba.width(), height: rgba.height(), pixels: rgba.into_raw() })
 }
 
+/// A quarter turn of tightly packed RGBA pixels. The width and height swap.
+pub fn rotate_quarter(width: u32, height: u32, pixels: &[u8], clockwise: bool) -> (u32, u32, Vec<u8>) {
+    let (w, h) = (width as usize, height as usize);
+    if pixels.len() < w * h * 4 {
+        return (width, height, pixels.to_vec());
+    }
+    let mut out = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let (nx, ny) = if clockwise { (h - 1 - y, x) } else { (y, w - 1 - x) };
+            let from = (y * w + x) * 4;
+            let to = (ny * h + nx) * 4;
+            out[to..to + 4].copy_from_slice(&pixels[from..from + 4]);
+        }
+    }
+    (height, width, out)
+}
+
 pub fn render_svg(svg: &str, edge: u32) -> Result<Rgba, String> {
     let tree = resvg::usvg::Tree::from_str(svg, &resvg::usvg::Options::default()).map_err(|err| err.to_string())?;
     let mut pixmap = resvg::tiny_skia::Pixmap::new(edge, edge).ok_or_else(|| "Bad icon size".to_string())?;
@@ -196,6 +214,21 @@ mod tests {
         assert_eq!(full.pixels.len(), 64 * 64 * 4);
         let small = decode_bytes(&bytes, 16).unwrap();
         assert_eq!((small.width, small.height), (16, 16));
+    }
+
+    #[test]
+    fn quarter_turns_move_pixels_and_swap_the_size() {
+        // 2 wide, 3 tall, one distinct byte per pixel in the first channel.
+        let src: Vec<u8> = (0..6u8).flat_map(|n| [n, 0, 0, 255]).collect();
+        let firsts = |px: &[u8]| px.chunks(4).map(|c| c[0]).collect::<Vec<_>>();
+        let (w, h, right) = rotate_quarter(2, 3, &src, true);
+        assert_eq!((w, h), (3, 2));
+        assert_eq!(firsts(&right), vec![4, 2, 0, 5, 3, 1]);
+        let (w, h, left) = rotate_quarter(2, 3, &src, false);
+        assert_eq!((w, h), (3, 2));
+        assert_eq!(firsts(&left), vec![1, 3, 5, 0, 2, 4]);
+        let (w, h, back) = rotate_quarter(w, h, &right, false);
+        assert_eq!((w, h, back), (2, 3, src));
     }
 
     #[test]

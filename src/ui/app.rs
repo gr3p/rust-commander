@@ -1101,6 +1101,8 @@ impl App {
                 self.state.set_cursor(usize::MAX);
                 self.focus_list();
             }
+            Key::l | Key::L if self.state.quick_view && self.cursor_is_image() => self.rotate_quick_image(false),
+            Key::r | Key::R if self.state.quick_view && self.cursor_is_image() => self.rotate_quick_image(true),
             Key::a | Key::A if self.state.quick_view => self.set_charset(Charset::Ansi, sender),
             Key::j | Key::J if self.state.quick_view => self.set_charset(Charset::Json, sender),
             Key::s | Key::S if self.state.quick_view && self.cursor_is_image() => {

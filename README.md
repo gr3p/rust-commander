@@ -144,6 +144,7 @@ The panel with focus is the source, the other is the target. Press F1 for all co
 | F3 | View text, binary, hex, or pretty JSON in UTF-8, ANSI or ASCII. Images open in their own window |
 | Ctrl+E | Edit in place |
 | Ctrl+Q | Quick view in the other panel, editable |
+| L / R | In the quick view of an image, rotate it a quarter turn left or right. Only the view turns, the file is untouched |
 | F4 | Open the editor you pick in F12 |
 
 | Music (the big player in the quick view) | |

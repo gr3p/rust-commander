@@ -212,6 +212,8 @@ impl App {
                     self.step_quick_image(1);
                 }
             }
+            Act::ImageTurnLeft => self.rotate_quick_image(false),
+            Act::ImageTurnRight => self.rotate_quick_image(true),
             Act::ListerText => self.lister_set_mode(ViewMode::Text, sender),
             Act::ListerBinary => self.lister_set_mode(ViewMode::Binary, sender),
             Act::ListerHex => self.lister_set_mode(ViewMode::Hex, sender),

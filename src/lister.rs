@@ -503,6 +503,14 @@ impl PreviewSlot {
         self.rev = self.rev.wrapping_add(1);
     }
 
+    /// Turns the shown picture a quarter. Does nothing when the slot holds no picture.
+    pub fn rotate_image(&mut self, clockwise: bool) -> bool {
+        let PreviewBody::Image { width, height, pixels } = &self.body else { return false };
+        let (width, height, pixels) = crate::imageview::rotate_quarter(*width, *height, pixels, clockwise);
+        self.set_body(PreviewBody::Image { width, height, pixels });
+        true
+    }
+
     pub fn text(&self) -> &str {
         match &self.body {
             PreviewBody::Text(text) => text,
