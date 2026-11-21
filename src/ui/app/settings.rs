@@ -281,6 +281,7 @@ impl App {
         let tx = sender.input_sender().clone();
         let win = gtk::Window::new();
         win.set_title(Some("Settings"));
+        win.add_css_class("settings-win");
         win.set_modal(true);
         win.set_transient_for(Some(&self.shell.window));
         win.set_default_width(540);

@@ -1131,17 +1131,15 @@ button.menu-row label.menu-key {{
 .audio-time {{
   font-feature-settings: "tnum";
 }}
-.audio-player scale trough,
-.audio-mini scale trough {{
-  background: {muted};
+scale trough {{
+  background: alpha({fg}, 0.18);
   min-height: 4px;
   border: none;
   box-shadow: none;
   outline: none;
   border-radius: 2px;
 }}
-.audio-player scale highlight,
-.audio-mini scale highlight {{
+scale highlight {{
   background: {accent};
   min-height: 4px;
   border: none;
@@ -1149,8 +1147,7 @@ button.menu-row label.menu-key {{
   outline: none;
   border-radius: 2px;
 }}
-.audio-player scale slider,
-.audio-mini scale slider {{
+scale slider {{
   background: {accent};
   min-width: 12px;
   min-height: 12px;
@@ -1159,9 +1156,99 @@ button.menu-row label.menu-key {{
   box-shadow: none;
   margin: -4px;
 }}
-.audio-player scale:disabled slider,
-.audio-mini scale:disabled slider {{
+scale:hover slider {{
+  background: {bright};
+}}
+scale:disabled slider,
+scale:disabled highlight {{
   background: {muted};
+}}
+/* The audio player keeps a muted trough. */
+.audio-player scale trough,
+.audio-mini scale trough {{
+  background: {muted};
+}}
+progressbar trough {{
+  background: alpha({fg}, 0.12);
+  border: none;
+  box-shadow: none;
+  border-radius: 3px;
+  min-height: 8px;
+}}
+progressbar progress {{
+  background: {accent};
+  border: none;
+  box-shadow: none;
+  border-radius: 3px;
+  min-height: 8px;
+}}
+notebook > header {{
+  background: {bg};
+  border-color: {muted};
+  box-shadow: none;
+}}
+tab {{
+  background: transparent;
+  color: {soft};
+  box-shadow: none;
+  outline: none;
+}}
+tab:hover {{
+  color: {fg};
+  box-shadow: inset 0 -3px {muted};
+}}
+tab:checked {{
+  color: {bright};
+  box-shadow: inset 0 -3px {accent};
+}}
+switch {{
+  background: {sel};
+  border-color: {muted};
+  color: {fg};
+}}
+switch > slider {{
+  background: {fg};
+  border-color: {muted};
+}}
+switch:checked > slider {{
+  border-color: {accent};
+}}
+window.settings-win,
+.settings-win notebook,
+.settings-win notebook > stack,
+.settings-win scrolledwindow,
+.settings-win viewport {{
+  background: {bg};
+  color: {fg};
+}}
+.settings-win button {{
+  background: {sel};
+  background-image: none;
+  color: {fg};
+  border: 1px solid {muted};
+  box-shadow: none;
+  text-shadow: none;
+}}
+.settings-win button:hover {{
+  background: {rhov};
+  background-image: none;
+  border-color: {accent};
+}}
+.settings-win button:active,
+.settings-win button:checked {{
+  background: {rsel};
+  color: {bright};
+}}
+.settings-win separator {{
+  background: {muted};
+  min-height: 1px;
+}}
+.settings-win entry {{
+  border: 1px solid {muted};
+  box-shadow: none;
+}}
+.settings-win entry:focus-within {{
+  border-color: {accent};
 }}
 /* The player's buttons are drawn icons that take the text color of the button. */
 button.media-icon,
