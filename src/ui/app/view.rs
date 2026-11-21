@@ -881,6 +881,19 @@ impl App {
         ui.preview_kind.visible_child_name().as_deref() == Some("image") && ui.picture.has_focus()
     }
 
+    // Ctrl+Up/Down scrolls the text preview in the other pane, so the cursor stays in the active list.
+    pub(in crate::ui::app) fn scroll_preview(&mut self, delta: i64) -> bool {
+        if !self.state.quick_view || self.shell.editing.get() {
+            return false;
+        }
+        let ui = &self.shell.panes[self.state.active.other().index()];
+        if ui.preview_kind.visible_child_name().as_deref() != Some("text") {
+            return false;
+        }
+        scroll_text(&ui.preview, delta);
+        true
+    }
+
     pub(in crate::ui::app) fn copy_preview_path(&mut self) {
         let Some(path) = self.file_under_cursor() else { return };
         let Some(display) = gtk::gdk::Display::default() else { return };

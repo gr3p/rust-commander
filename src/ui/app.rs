@@ -938,6 +938,11 @@ impl App {
                     self.state.toggle_visible_marks();
                     self.touch(self.state.active);
                 }
+                Key::Up | Key::KP_Up if !shift && self.scroll_preview(-1) => {}
+                Key::Down | Key::KP_Down if !shift && self.scroll_preview(1) => {}
+                Key::Page_Up | Key::KP_Page_Up if !shift && self.scroll_preview(-4096) => {}
+                Key::Page_Down | Key::KP_Page_Down if !shift && self.scroll_preview(4096) => {}
+                Key::Home | Key::KP_Home if !shift && self.scroll_preview(0) => {}
                 Key::c | Key::C if shift => self.copy_selected_paths(),
                 Key::c | Key::C if self.preview_image_focused() => self.copy_preview_image(sender),
                 Key::v | Key::V if !shift => self.paste_desktop(sender),
