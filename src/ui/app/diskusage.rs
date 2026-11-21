@@ -243,7 +243,7 @@ impl App {
         scan.total = snap.total;
         let (pane, mode) = (scan.pane, scan.mode);
         let Some(held) = self.usage_modes[pane].as_mut() else { return };
-        held.view = View::from_counts(&held.view.path, mode, &snap.children, &snap.bytes, true);
+        held.view = View::from_counts(&held.view.path, mode, &snap.children, &snap.bytes, &snap.open, true);
         self.paint_usage_rows(pane);
         self.paint_usage_popup();
     }
@@ -258,6 +258,8 @@ impl App {
             self.touch(PaneId::from_index(pane));
             return;
         }
+        // Turns the spinners of the folders still being counted.
+        self.paint_usage_rows(pane);
         let Some(scan) = self.usage_scan.as_ref() else { return };
         let stalled = scan.watchdog.stalled(Instant::now(), STALL_AFTER);
         // A network disk is slow by nature, so it gets its window at once. A stalled count always does.
@@ -363,7 +365,7 @@ impl App {
             self.usage_cache.store(&report, scan.mode, scan.medium == Medium::Network, Instant::now());
         }
         if let Some(held) = self.usage_modes[pane].as_mut() {
-            held.view = View::from_counts(&scan.root, scan.mode, &report.children, &report.bytes, report.failed);
+            held.view = View::from_counts(&scan.root, scan.mode, &report.children, &report.bytes, &[], report.failed);
         }
         self.apply_usage_sizes(pane);
         self.touch(id);

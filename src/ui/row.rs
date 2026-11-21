@@ -241,6 +241,12 @@ fn column(
         if id == "name" {
             paint_file_icon(item, &obj);
         }
+        // The disk usage count changes the size while the row is on screen.
+        if id == "size" {
+            let label = label.clone();
+            let handler = obj.connect_size_text_notify(move |obj| label.set_label(&obj.size_text()));
+            unsafe { item.set_data("size-watch", MarkWatch { obj: obj.downgrade(), handler }) };
+        }
         if marked {
             apply_marked(&label, obj.marked());
             let label = label.clone();
@@ -248,10 +254,11 @@ fn column(
             unsafe { item.set_data("mark-watch", MarkWatch { obj: obj.downgrade(), handler }) };
         }
     });
-    if marked {
-        factory.connect_unbind(|_, item| {
+    if marked || id == "size" {
+        let key = if marked { "mark-watch" } else { "size-watch" };
+        factory.connect_unbind(move |_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
-            let Some(watch) = (unsafe { item.steal_data::<MarkWatch>("mark-watch") }) else { return };
+            let Some(watch) = (unsafe { item.steal_data::<MarkWatch>(key) }) else { return };
             if let Some(obj) = watch.obj.upgrade() {
                 obj.disconnect(watch.handler);
             }
@@ -266,9 +273,21 @@ fn column(
     col
 }
 
-/// Puts what the disk usage count knows on one row, or clears the bar when there is no count.
+const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+fn spin_frame() -> &'static str {
+    SPIN[(relm4::gtk::glib::monotonic_time() / 100_000) as usize % SPIN.len()]
+}
+
+/// Puts what the disk usage count knows on one row, or clears the bar when there is no count. A property is only
+/// set when it changes, since every set repaints the cell.
 pub fn paint_usage_row(obj: &EntryObject, view: Option<&rust_commander::usage::View>) {
     let name = obj.entry_name();
+    let size = |text: String| {
+        if obj.size_text() != text {
+            obj.set_size_text(text);
+        }
+    };
     let Some(view) = view.filter(|_| name != "..") else {
         if obj.usage_on() {
             obj.set_usage_on(false);
@@ -276,37 +295,42 @@ pub fn paint_usage_row(obj: &EntryObject, view: Option<&rust_commander::usage::V
         return;
     };
     let draft = view.partial || view.stale;
-    let size = |text: String| {
-        if obj.size_text() != text {
-            obj.set_size_text(text);
+    let cell = view.cell(&name);
+    let Some(cell) = cell.filter(|cell| !cell.foreign) else {
+        if obj.usage_on() {
+            obj.set_usage_on(false);
         }
+        if obj.is_dir() {
+            // A folder on another mount, or one the count has not reached yet.
+            size(if view.cell(&name).is_some() { "<MNT>".into() } else if draft { spin_frame().into() } else { "<DIR>".into() });
+        }
+        return;
     };
-    match view.cell(&name) {
-        Some(cell) if cell.foreign => {
-            obj.set_usage_on(false);
-            size("<MNT>".into());
-        }
-        Some(cell) => {
-            obj.set_usage_frac(cell.frac);
-            obj.set_usage_text(cell.text);
-            obj.set_usage_partial(draft);
-            obj.set_usage_on(true);
-            if obj.is_dir() {
-                size(if cell.bytes == 0 {
-                    "<DIR>".into()
-                } else if draft {
-                    format!("~{}", listing::format_size(cell.bytes))
-                } else {
-                    listing::format_size(cell.bytes)
-                });
-            }
-        }
-        None => {
-            obj.set_usage_on(false);
-            if obj.is_dir() {
-                size(if draft { "…".into() } else { "<DIR>".into() });
-            }
-        }
+    if obj.usage_frac() != cell.frac {
+        obj.set_usage_frac(cell.frac);
+    }
+    if obj.usage_text() != cell.text {
+        obj.set_usage_text(cell.text.clone());
+    }
+    if obj.usage_partial() != draft {
+        obj.set_usage_partial(draft);
+    }
+    if !obj.usage_on() {
+        obj.set_usage_on(true);
+    }
+    if obj.is_dir() {
+        let number = if cell.bytes == 0 { String::new() } else { listing::format_size(cell.bytes) };
+        size(if cell.open && draft && number.is_empty() {
+            spin_frame().into()
+        } else if cell.open && draft {
+            format!("{} {number}", spin_frame())
+        } else if cell.bytes == 0 {
+            "<DIR>".into()
+        } else if draft {
+            format!("~{number}")
+        } else {
+            number
+        });
     }
 }
 

@@ -266,6 +266,18 @@ Etapp 1 och 2 är byggda. De öppna frågorna fick förslagen som svar: andel av
 - Andelen av hela disken står i statusraden efter en räkning på en lokal disk (inte på nätverksdisk, där `statvfs` kan vänta på servern). Verktygstips finns inte.
 - Ingen del av planen togs bort. Inget F12-val för skenbar storlek: den ligger bara i config.
 
+### Fel efter första versionen: fönstret frös
+
+Första versionen frös fönstret under hela räkningen av `/home/marcus` (8,5 s, 1,1 miljoner poster), så att varken popup eller staplar syntes och GNOME föreslog force quit. Orsak: tråden som rapporterar förloppet väntade på samma signal och lås som arbetstrådarna. Den väcktes därför av varje ny mapp i kön och skickade tusentals delresultat per sekund till fönstret. Dessutom stal den väckningarna från arbetarna, som då väntade upp till 100 ms i taget.
+
+Rättat:
+- Rapporttråden har en egen väntesignal och skickar högst ett delresultat per 100 ms.
+- Mappar direkt under roten hämtas först (FIFO), djupare mappar LIFO, så att en stor mapp inte svälter ut de andra raderna.
+- Varje rad vet när dess egen räkning är klar. Under räkningen visar Size en spinner för mappar som inte är klara och `~` före storleken för de som är det. Size-cellen uppdateras live.
+- Paniker skrivs nu med backtrace till loggen (`log::install_panic_hook`).
+
+Efter rättningen tar samma räkning 0,18 s, och den längsta pausen i fönstrets huvudloop under en räkning är under 90 ms. Mot en FUSE-disk med 8 ms per anrop visas popupen och spinnrarna, med längsta paus 65 ms. Testet `progress_is_capped_and_marks_open_folders` faller med det gamla beteendet (15 ms mellan rapporterna).
+
 ### Testutfall
 
 | Nivå | Vad | Utfall |

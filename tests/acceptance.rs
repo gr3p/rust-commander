@@ -1968,7 +1968,7 @@ fn usage_rows_match_listing_names(dir: &Path) -> Result<(), String> {
     fs::write(dir.join("plain/f"), vec![0u8; 32]).map_err(s)?;
     let mode = usage::Mode { apparent: true, same_device: true };
     let report = usage::run(&usage::Options { root: dir.to_path_buf(), mode, threads: 2 }, &|| false, &mut |_| {}).map_err(s)?;
-    let view = usage::View::from_counts(dir, mode, &report.children, &report.bytes, false);
+    let view = usage::View::from_counts(dir, mode, &report.children, &report.bytes, &[], false);
     for entry in listing::read_dir(dir).map_err(s)?.iter().filter(|e| e.name.as_ref() != "..") {
         let cell = view.cell(&entry.name).ok_or_else(|| format!("no number for {}", entry.name))?;
         let want = if entry.name.as_ref() == "plain" { 32 } else { 64 };

@@ -55,6 +55,8 @@ pub struct Snapshot {
     /// Names read so far. Stands still when the disk or the server does not answer.
     pub entries: u64,
     pub current: PathBuf,
+    /// One flag per child: folders below it are still being read.
+    pub open: Vec<bool>,
 }
 
 #[derive(Debug)]
@@ -83,6 +85,29 @@ struct Work {
     top: u32,
     dir: PathBuf,
     depth: u32,
+}
+
+// The folders right under the root go first, in order, so every row starts at once and small ones finish early.
+// Deeper folders are taken newest first, which keeps the queue as small as the width of the branch being read.
+#[derive(Default)]
+struct Queue {
+    tops: std::collections::VecDeque<Work>,
+    deep: Vec<Work>,
+}
+
+impl Queue {
+    fn push(&mut self, work: Work) {
+        if work.depth <= 1 { self.tops.push_back(work) } else { self.deep.push(work) }
+    }
+
+    fn pop(&mut self) -> Option<Work> {
+        self.tops.pop_front().or_else(|| self.deep.pop())
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.tops.is_empty() && self.deep.is_empty()
+    }
 }
 
 struct RootScan {
@@ -180,10 +205,15 @@ fn scan_root(opts: &Options, cancelled: &impl Fn() -> bool) -> io::Result<Option
 struct Shared<'a> {
     opts: &'a Options,
     dev: u64,
-    queue: Mutex<Vec<Work>>,
+    queue: Mutex<Queue>,
     wake: Condvar,
+    // The thread that reports progress waits here, apart from the workers, so a busy queue does not wake it.
+    idle_lock: Mutex<()>,
+    idle: Condvar,
     // Folders queued or being read. Zero means the walk is over.
     pending: AtomicUsize,
+    // The same per top-level child, so a row knows when its own count is done.
+    top_pending: Vec<AtomicUsize>,
     stop: AtomicBool,
     failed: AtomicBool,
     own: Vec<AtomicU64>,
@@ -228,6 +258,7 @@ impl Shared<'_> {
     }
 
     fn push(&self, work: Work) {
+        self.top_pending[work.top as usize].fetch_add(1, Ordering::AcqRel);
         self.pending.fetch_add(1, Ordering::AcqRel);
         lock(&self.queue).push(work);
         self.wake.notify_one();
@@ -252,10 +283,18 @@ impl Shared<'_> {
         }
     }
 
-    fn finish_one(&self) {
+    fn finish_one(&self, top: u32) {
+        self.top_pending[top as usize].fetch_sub(1, Ordering::AcqRel);
         if self.pending.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.wake.notify_all();
+            self.idle.notify_all();
         }
+    }
+
+    fn halt(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.wake.notify_all();
+        self.idle.notify_all();
     }
 }
 
@@ -263,6 +302,10 @@ fn process(sh: &Shared, work: &Work, cancelled: &impl Fn() -> bool) {
     #[cfg(test)]
     if work.dir.file_name().is_some_and(|name| name == "__panic__") {
         panic!("test panic");
+    }
+    #[cfg(test)]
+    if work.dir.file_name().is_some_and(|name| name.to_string_lossy().starts_with("__slow")) {
+        std::thread::sleep(Duration::from_millis(15));
     }
     if let Ok(mut current) = sh.current.try_lock() {
         current.clone_from(&work.dir);
@@ -344,11 +387,10 @@ fn worker(sh: &Shared, cancelled: &impl Fn() -> bool) {
         let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| process(sh, &work, cancelled)));
         if done.is_err() {
             sh.failed.store(true, Ordering::Relaxed);
-            sh.stop.store(true, Ordering::Relaxed);
-            sh.wake.notify_all();
+            sh.halt();
             return;
         }
-        sh.finish_one();
+        sh.finish_one(work.top);
     }
 }
 
@@ -399,9 +441,12 @@ pub fn run(
     let sh = Shared {
         opts,
         dev,
-        queue: Mutex::new(Vec::new()),
+        queue: Mutex::new(Queue::default()),
         wake: Condvar::new(),
+        idle_lock: Mutex::new(()),
+        idle: Condvar::new(),
         pending: AtomicUsize::new(0),
+        top_pending: bytes.iter().map(|_| AtomicUsize::new(0)).collect(),
         stop: AtomicBool::new(false),
         failed: AtomicBool::new(false),
         own: (0..room).map(|i| AtomicU64::new(own.get(i).copied().unwrap_or(0))).collect(),
@@ -422,6 +467,7 @@ pub fn run(
         total: sh.total.load(Ordering::Relaxed),
         entries: sh.entries.load(Ordering::Relaxed),
         current: lock(&sh.current).clone(),
+        open: sh.top_pending.iter().map(|n| n.load(Ordering::Acquire) > 0).collect(),
     };
     progress(&snapshot(&sh));
     let workers = if work.is_empty() { 0 } else { opts.threads.max(1) };
@@ -432,22 +478,25 @@ pub fn run(
         for _ in 0..workers {
             scope.spawn(|| worker(&sh, cancelled));
         }
+        // At most one report per tick, however busy the workers are. Each report is a repaint in the window.
         let mut last = sh.entries.load(Ordering::Relaxed);
+        let mut sent = Instant::now();
         while workers > 0 {
             {
-                let queue = lock(&sh.queue);
-                let _ = sh.wake.wait_timeout(queue, TICK);
+                let guard = lock(&sh.idle_lock);
+                let wait = TICK.saturating_sub(sent.elapsed()).max(Duration::from_millis(1));
+                let _ = sh.idle.wait_timeout(guard, wait);
             }
             if cancelled() {
-                sh.stop.store(true, Ordering::Relaxed);
-                sh.wake.notify_all();
+                sh.halt();
             }
             if sh.over() {
                 break;
             }
             let now = sh.entries.load(Ordering::Relaxed);
-            if now != last {
+            if now != last && sent.elapsed() >= TICK {
                 last = now;
+                sent = Instant::now();
                 progress(&snapshot(&sh));
             }
         }
@@ -668,6 +717,8 @@ pub fn percent_text(part: u64, total: u64) -> String {
 /// What one row shows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Cell {
+    /// Still being counted: the number can grow.
+    pub open: bool,
     pub bytes: u64,
     /// 0 to 1, the share of everything in the folder.
     pub frac: f64,
@@ -681,6 +732,7 @@ struct Item {
     bytes: u64,
     foreign: bool,
     known: bool,
+    open: bool,
 }
 
 /// The sizes of the children of one folder, in the form the panel draws them. Kept apart from the entries so a
@@ -698,12 +750,15 @@ pub struct View {
 }
 
 impl View {
-    pub fn from_counts(path: &Path, mode: Mode, children: &[Child], bytes: &[u64], partial: bool) -> Self {
+    /// `open` has a flag per child for a count still running, or is empty.
+    pub fn from_counts(path: &Path, mode: Mode, children: &[Child], bytes: &[u64], open: &[bool], partial: bool) -> Self {
         let items: HashMap<String, Item> = children
             .iter()
             .zip(bytes)
-            .map(|(child, bytes)| {
-                (child.name.to_string_lossy().into_owned(), Item { bytes: *bytes, foreign: child.foreign, known: true })
+            .enumerate()
+            .map(|(at, (child, bytes))| {
+                let open = open.get(at).copied().unwrap_or(false);
+                (child.name.to_string_lossy().into_owned(), Item { bytes: *bytes, foreign: child.foreign, known: true, open })
             })
             .collect();
         let mut view = Self { path: path.to_path_buf(), mode, partial, stale: false, items, total: 0 };
@@ -719,11 +774,11 @@ impl View {
             .map(|(name, is_dir, len)| {
                 let item = if *is_dir {
                     match cache.get(&path.join(name), mode, now) {
-                        Some(hit) => Item { bytes: hit.bytes, foreign: false, known: true },
-                        None => Item { bytes: 0, foreign: false, known: false },
+                        Some(hit) => Item { bytes: hit.bytes, foreign: false, known: true, open: false },
+                        None => Item { bytes: 0, foreign: false, known: false, open: true },
                     }
                 } else {
-                    Item { bytes: *len, foreign: false, known: true }
+                    Item { bytes: *len, foreign: false, known: true, open: false }
                 };
                 (name.clone(), item)
             })
@@ -749,12 +804,13 @@ impl View {
     pub fn cell(&self, name: &str) -> Option<Cell> {
         let item = self.items.get(name)?;
         if item.foreign {
-            return Some(Cell { bytes: 0, frac: 0.0, text: String::new(), foreign: true });
+            return Some(Cell { open: false, bytes: 0, frac: 0.0, text: String::new(), foreign: true });
         }
         if !item.known {
             return None;
         }
         Some(Cell {
+            open: item.open,
             bytes: item.bytes,
             frac: percent(item.bytes, self.total) / 100.0,
             text: percent_text(item.bytes, self.total),
@@ -903,9 +959,12 @@ mod tests {
         let sh = Shared {
             opts: &sh_opts,
             dev: fs::metadata(&dir).unwrap().dev(),
-            queue: Mutex::new(Vec::new()),
+            queue: Mutex::new(Queue::default()),
             wake: Condvar::new(),
+            idle_lock: Mutex::new(()),
+            idle: Condvar::new(),
             pending: AtomicUsize::new(0),
+            top_pending: vec![AtomicUsize::new(0)],
             stop: AtomicBool::new(false),
             failed: AtomicBool::new(false),
             own: vec![AtomicU64::new(0), AtomicU64::new(0)],
@@ -1157,7 +1216,7 @@ mod tests {
             Child { name: "tiny.txt".into(), is_dir: false, foreign: false },
             Child { name: "mnt".into(), is_dir: true, foreign: true },
         ];
-        let view = View::from_counts(Path::new("/x"), Mode::DISK, &children, &[750, 249, 1, 9999], false);
+        let view = View::from_counts(Path::new("/x"), Mode::DISK, &children, &[750, 249, 1, 9999], &[], false);
         assert_eq!(view.total(), 1000);
         let big = view.cell("big").unwrap();
         assert_eq!((big.bytes, big.text.as_str()), (750, "75%"));
@@ -1172,7 +1231,7 @@ mod tests {
     #[test]
     fn empty_folder_view_never_divides_by_zero() {
         let children = [Child { name: "a".into(), is_dir: true, foreign: false }];
-        let view = View::from_counts(Path::new("/x"), Mode::DISK, &children, &[0], false);
+        let view = View::from_counts(Path::new("/x"), Mode::DISK, &children, &[0], &[], false);
         let cell = view.cell("a").unwrap();
         assert_eq!((cell.frac, cell.text.as_str()), (0.0, "0%"));
         assert_eq!(percent_text(0, 0), "0%");
@@ -1205,6 +1264,35 @@ mod tests {
         dog.feed(101, t0 + Duration::from_secs(15));
         assert!(!dog.stalled(t0 + Duration::from_secs(16), limit));
         assert_eq!(dog.quiet_for(t0 + Duration::from_secs(16)), Duration::from_secs(1));
+    }
+
+    // A report is a repaint in the window. A flood of them froze it, so they are capped at one per tick.
+    #[test]
+    fn progress_is_capped_and_marks_open_folders() {
+        let dir = scratch("tick");
+        // Chains of slow folders keep adding work all through the count, as a real tree does.
+        for chain in 0..3 {
+            let mut path = dir.join("busy");
+            for depth in 0..12 {
+                path.push(format!("__slow{chain}_{depth}"));
+            }
+            write(&path.join("f"), 1);
+        }
+        write(&dir.join("quick/f"), 1);
+        let opts = Options { root: dir.clone(), mode: apparent(), threads: 2 };
+        let mut calls: Vec<(Instant, Snapshot)> = Vec::new();
+        let report = run(&opts, &|| false, &mut |snap| calls.push((Instant::now(), snap.clone()))).unwrap();
+        assert!(!report.cancelled && report.total == 4);
+        assert!(calls.len() >= 2, "{}", calls.len());
+        for pair in calls[1..].windows(2) {
+            assert!(pair[1].0 - pair[0].0 >= Duration::from_millis(90), "{:?}", pair[1].0 - pair[0].0);
+        }
+        let busy = report.children.iter().position(|c| c.name == "busy").unwrap();
+        let quick = report.children.iter().position(|c| c.name == "quick").unwrap();
+        let (_, mid) = &calls[1];
+        assert!(mid.open[busy], "busy should still be counting");
+        assert!(!mid.open[quick], "quick should be done");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
