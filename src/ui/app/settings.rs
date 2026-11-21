@@ -1259,6 +1259,7 @@ pub(in crate::ui::app) fn commands_row(tx: relm4::Sender<Msg>) -> gtk::Box {
     name.set_hexpand(true);
     let open = gtk::Button::with_label("Commands");
     open.add_css_class("fkey");
+    open.add_css_class("dialog-button");
     crate::ui::shell::on_click(&open, move || tx.emit(Msg::ShowCommands));
     row.append(&name);
     row.append(&open);

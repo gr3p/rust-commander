@@ -951,6 +951,10 @@ button.fkey {{
 button.fkey label {{
   min-width: 0;
 }}
+/* A dialog button is the fkey look with room around the text, unlike the tight bottom bar. */
+button.fkey.dialog-button {{
+  padding: {dialog_pad};
+}}
 .settings-row {{
   padding: {row_pad};
 }}
@@ -1390,6 +1394,7 @@ entry:focus-within {{
         cell_pad = format!("0 {}px", s.space(6)),
         head_pad = format!("{}px {}px", s.space(2), s.space(8)),
         fkey_pad = format!("{}px {}px", s.space(3), s.space(1)),
+        dialog_pad = format!("{}px {}px", s.space(4), s.space(16)),
         row_pad = format!("{}px {}px", s.space(10), s.space(12)),
     )
 }

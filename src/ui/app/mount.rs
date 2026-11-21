@@ -481,6 +481,7 @@ fn labeled(title: &str, secret: bool) -> (gtk::Box, gtk::Label, gtk::Entry) {
 fn action_button(label: &str) -> gtk::Button {
     let button = gtk::Button::with_label(label);
     button.add_css_class("fkey");
+    button.add_css_class("dialog-button");
     button.set_halign(gtk::Align::End);
     button
 }

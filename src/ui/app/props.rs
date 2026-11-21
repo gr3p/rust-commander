@@ -65,8 +65,10 @@ impl App {
         buttons.set_halign(gtk::Align::End);
         let ok = gtk::Button::with_label("OK");
         ok.add_css_class("fkey");
+        ok.add_css_class("dialog-button");
         let cancel = gtk::Button::with_label("Cancel");
         cancel.add_css_class("fkey");
+        cancel.add_css_class("dialog-button");
         buttons.append(&ok);
         buttons.append(&cancel);
         let column = gtk::Box::new(gtk::Orientation::Vertical, 8);

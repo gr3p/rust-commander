@@ -35,6 +35,7 @@ impl App {
         let grid = rows(&info);
         let ok = gtk::Button::with_label("OK");
         ok.add_css_class("fkey");
+        ok.add_css_class("dialog-button");
         ok.set_halign(gtk::Align::End);
         let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
         column.set_margin_all(12);
