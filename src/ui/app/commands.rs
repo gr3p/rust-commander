@@ -149,9 +149,7 @@ impl App {
                 if self.shell_has_focus() {
                     self.close_current_shell();
                 } else {
-                    let id = self.state.active;
-                    self.state.close_tab(id);
-                    self.touch(id);
+                    self.close_active_tab();
                 }
             }
             Act::Up => self.go_up(sender),

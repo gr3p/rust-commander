@@ -989,14 +989,7 @@ impl App {
                     if self.shell_has_focus() {
                         self.close_current_shell();
                     } else {
-                        let id = self.state.active;
-                        let count = self.state.pane(id).tabs.len();
-                        let closed = self.state.pane(id).active;
-                        self.state.close_tab(id);
-                        if self.state.pane(id).tabs.len() < count {
-                            self.usage_after_close_tab(id.index(), closed);
-                        }
-                        self.touch(id);
+                        self.close_active_tab();
                     }
                 }
                 Key::d | Key::D if self.lister_editing() => self.discard_lister(sender),
@@ -1472,6 +1465,17 @@ impl App {
         let (tab, path, token) = self.state.new_tab(id);
         self.touch(id);
         self.spawn_load(sender, id, tab, path, token);
+    }
+
+    fn close_active_tab(&mut self) {
+        let id = self.state.active;
+        let count = self.state.pane(id).tabs.len();
+        let closed = self.state.pane(id).active;
+        self.state.close_tab(id);
+        if self.state.pane(id).tabs.len() < count {
+            self.usage_after_close_tab(id.index(), closed);
+        }
+        self.touch(id);
     }
 
     fn set_sort(&mut self, key: rust_commander::listing::SortKey) {

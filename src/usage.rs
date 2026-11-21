@@ -360,7 +360,7 @@ fn process(sh: &Shared, work: &Work, cancelled: &impl Fn() -> bool) {
         };
         let weight = weigh(&md, mode);
         if !md.is_dir() {
-            let weight = if repeat(&mut lock(&sh.links), &md) { 0 } else { weight };
+            let weight = if md.nlink() > 1 && repeat(&mut lock(&sh.links), &md) { 0 } else { weight };
             node_sum = node_sum.saturating_add(weight);
             top_sum = top_sum.saturating_add(weight);
             continue;

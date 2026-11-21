@@ -37,6 +37,7 @@ pub fn install_panic_hook() {
             if let Some(sink) = slot.as_mut() {
                 let _ = sink.file.write_all(line.as_bytes());
                 let _ = sink.file.flush();
+                sink.size += line.len() as u64;
             }
         }
         default(info);
