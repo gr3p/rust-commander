@@ -5,10 +5,11 @@ Gäller Cursor, VS Code/Copilot, Claude och Codex. Projektet har en utvecklare, 
 ## Git-flöde
 
 - **Det finns bara en gren: `master`.** Arbeta direkt på den. Skapa inga andra grenar, worktrees eller agent-grenar, och skapa ingen `develop`.
-- Varje push till `master` bygger och publicerar en release (`.github/workflows/release.yml`). Pusha därför bara testad kod (`cargo test` grönt). Ändringar som bara rör `*.md` publicerar inget.
+- Varje push till `master` bygger och publicerar en release (`.github/workflows/release.yml`). Pusha därför bara testad kod (`cargo test` grönt), och bara när användaren bett om det. Ändringar som bara rör `*.md` publicerar inget.
 - Börja varje pass med `git fetch origin` och `git status -sb`. Står du på något annat än `master`, byt dit (`git switch master`) innan du ändrar något. Finns ocommittade ändringar, fråga användaren först.
 - Ligger `origin/master` före dig (`git log master..origin/master --oneline`), hämta det med `git pull --ff-only` innan du börjar. Annars bygger du på gammal kod och versionsnumret blir fel.
-- Committa små, avslutade steg och pusha direkt (`git push origin master`), så att inget verktyg lämnar ocommittat arbete åt nästa. Blir pushen avvisad: `git pull --rebase`, kör testerna och pusha igen.
+- Committa små, avslutade steg, så att inget verktyg lämnar ocommittat arbete åt nästa.
+- **Pusha aldrig utan att användaren uttryckligen bett om det.** Varje push släpper en release. Säg i stället att det finns opushade commits. När användaren ber om push: `git push origin master`. Blir pushen avvisad: `git pull --rebase`, kör testerna och pusha igen.
 - Använd inte `git stash`, `reset --hard`, `checkout .`, `restore .`, force-push eller `clean` på arbete du inte själv skapade i detta pass.
 
 ## Formatering
