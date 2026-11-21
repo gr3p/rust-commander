@@ -1108,6 +1108,7 @@ impl App {
         column.append(&label);
         column.append(&ok);
         win.set_child(Some(&column));
+        focus_ok(&win, &ok);
         win.present();
         self.dialog = Some(win);
     }
