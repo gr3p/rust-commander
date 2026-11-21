@@ -131,6 +131,10 @@ impl App {
 
     pub(in crate::ui::app) fn start_usage(&mut self, pane: usize, medium: Medium, sender: &ComponentSender<Self>) {
         let _ = sender;
+        self.start_usage_now(pane, medium);
+    }
+
+    fn start_usage_now(&mut self, pane: usize, medium: Medium) {
         self.stop_scan();
         let id = PaneId::from_index(pane);
         let root = self.state.tab(id).path.clone();
@@ -217,6 +221,7 @@ impl App {
     }
 
     pub(in crate::ui::app) fn usage_off(&mut self, pane: usize) {
+        self.usage_follow[pane] = false;
         if self.usage_scan.as_ref().is_some_and(|scan| scan.pane == pane) {
             self.stop_scan();
         }
@@ -407,9 +412,50 @@ impl App {
         }
         if self.usage_valid(pane).is_some() {
             self.apply_usage_sizes(pane);
+        } else if self.usage_follow[pane] {
+            self.follow_into(pane);
         } else {
             self.usage_off(pane);
         }
+    }
+
+    // Ctrl+R: count every folder the pane opens from now on. Pressed again it stops following and keeps the bars.
+    pub(in crate::ui::app) fn toggle_usage_follow(&mut self, sender: &ComponentSender<Self>) {
+        let pane = self.state.active.index();
+        if self.usage_follow[pane] {
+            self.usage_follow[pane] = false;
+            self.status = "Disk usage no longer follows folders".into();
+            return;
+        }
+        let counting = self.usage_scan.as_ref().is_some_and(|scan| scan.pane == pane);
+        if !counting && self.usage_valid(pane).is_none() {
+            self.begin_usage(pane, sender);
+            // A network disk asks first. Following waits for the answer and the count.
+            if self.usage_scan.as_ref().is_none_or(|scan| scan.pane != pane) {
+                return;
+            }
+        }
+        self.usage_follow[pane] = true;
+        self.status = "Disk usage follows folders. Ctrl+R stops following, Ctrl+U turns it off".into();
+    }
+
+    // A folder opened in follow mode. A network disk is only counted on its own when it has been allowed for good.
+    fn follow_into(&mut self, pane: usize) {
+        let path = self.state.tab(PaneId::from_index(pane)).path.clone();
+        if self.state.tab(PaneId::from_index(pane)).feed {
+            self.usage_off(pane);
+            return;
+        }
+        let medium = usage::medium_of(&path);
+        if medium == Medium::Network {
+            let mount = usage::mount_of(&path).map(|(mount, _)| mount.display().to_string()).unwrap_or_default();
+            if !self.cfg.usage_network_ok.contains(&mount) {
+                self.usage_off(pane);
+                self.status = "Disk usage stopped following: this is a network disk. Ctrl+U counts it".into();
+                return;
+            }
+        }
+        self.start_usage_now(pane, medium);
     }
 
     pub(in crate::ui::app) fn paint_usage_rows(&self, pane: usize) {
@@ -575,7 +621,38 @@ impl App {
         if self.usage_modes[0].is_some() {
             errors.push("usage: kept after leaving the folder".into());
         }
-        self.state.tab_mut(id).path = home;
+        self.state.tab_mut(id).path = home.clone();
+        self.reload_pane(id);
+        self.sync();
+
+        // Ctrl+R follows: a folder opened from here is counted on its own.
+        self.toggle_usage_follow(sender);
+        if !self.usage_follow[0] || self.usage_scan.is_none() {
+            errors.push("usage: Ctrl+R did not start a following count".into());
+        }
+        count(self, errors);
+        let open_folder = |app: &mut App, path: std::path::PathBuf| {
+            let token = app.state.navigate(id, path.clone(), true);
+            app.loads.push((token, Arc::new(AtomicBool::new(false))));
+            let entries = rust_commander::listing::read_dir(&path).unwrap_or_default();
+            let tab = app.state.pane(id).active;
+            app.on_listed(0, tab, token, Ok(entries), None);
+        };
+        open_folder(self, home.join(&folder));
+        let followed = self.usage_scan.as_ref().is_some_and(|scan| scan.root == home.join(&folder));
+        if !followed || self.usage_valid(0).is_none() {
+            errors.push("usage: following did not count the folder it opened".into());
+        }
+        count(self, errors);
+        // Ctrl+R again stops following and keeps the bars. The next folder ends the mode.
+        self.toggle_usage_follow(sender);
+        if self.usage_follow[0] || self.usage_valid(0).is_none() {
+            errors.push("usage: Ctrl+R off dropped the bars or kept following".into());
+        }
+        open_folder(self, home.clone());
+        if self.usage_modes[0].is_some() || self.usage_scan.is_some() {
+            errors.push("usage: counted after following was off".into());
+        }
         self.reload_pane(id);
         self.sync();
     }

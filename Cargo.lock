@@ -1331,7 +1331,7 @@ dependencies = [
 
 [[package]]
 name = "rust-commander"
-version = "0.2.135"
+version = "0.2.136"
 dependencies = [
  "crc32fast",
  "flate2",

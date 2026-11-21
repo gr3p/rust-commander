@@ -125,6 +125,7 @@ The panel with focus is the source, the other is the target. Press F1 for all co
 | Ctrl+F3 to Ctrl+F6 | Sort |
 | Ctrl+H | Show or hide dotfiles |
 | Ctrl+U | Disk usage: count folder sizes and show a bar per row. Press again while counting to cancel, and once more to switch it off. F2 counts again |
+| Ctrl+U+R | Disk usage that follows you: hold Ctrl and press U, then R (or just Ctrl+R), and every folder you open is counted, so you can follow a big folder down the tree. Ctrl+R again stops following |
 | Ctrl+Shift+F1 | Thumbnail grid |
 | Super+Up / Super+Down | Maximize the window / restore it, as in other GNOME windows. If your window manager already has its own binding for these keys, it handles them first |
 
@@ -219,6 +220,8 @@ Auto column size is on by default and fits the columns to the panel as it is res
 ### Disk usage
 
 Ctrl+U counts the folder on screen and shows how much of it each row takes. Folders are counted by the space they use on disk, as `du` does, hard links once, symbolic links never followed, and other mounts are left out and marked `<MNT>`. Sort by Size to put the big folders together. While it counts, a folder whose count is not done has a spinner in the Size column, and the bars grow as the numbers come in. A pane that shows bars counts again after Refresh (F2) and after your own copies, moves and deletes. Numbers from an earlier count stay on screen dimmed, with a `~` before the size, until the new count replaces them. Counted folders are kept in memory for ten minutes (thirty on a network disk), so a folder below one you have counted already has its numbers when you press Ctrl+U in it.
+
+Ctrl+U+R (or Ctrl+R) makes the pane follow you: every folder you open, down or up, is counted at once, and the folders counted before show their numbers from memory while it runs. Ctrl+R again stops following and keeps the bars, Ctrl+U or Escape ends the mode. Following never starts a count on a network disk by itself, unless you chose "Always for this disk" there.
 
 On a network disk (SMB, NFS, sshfs and other FUSE mounts) the program asks first, because every folder is a question to the server. The answer "Always for this disk" is kept in `usage_network_ok` in the config file. A count that gets no answer for ten seconds says so, and Cancel gives the window back at once. `usage_apparent = true` in the config counts file lengths instead of space on disk.
 

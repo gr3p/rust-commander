@@ -278,6 +278,10 @@ Rättat:
 
 Efter rättningen tar samma räkning 0,18 s, och den längsta pausen i fönstrets huvudloop under en räkning är under 90 ms. Mot en FUSE-disk med 8 ms per anrop visas popupen och spinnrarna, med längsta paus 65 ms. Testet `progress_is_capped_and_marks_open_folders` faller med det gamla beteendet (15 ms mellan rapporterna).
 
+### Följ-läge (Ctrl+U+R)
+
+Sticky-läget från etapp 3 är byggt som `Act::DiskUsageFollow`, Ctrl+U+R i F1 (Ctrl+R ensamt fungerar också). Panelen räknar varje mapp den öppnar. Ctrl+R igen slutar följa och behåller staplarna, Ctrl+U eller Esc stänger läget. På en nätverksdisk följer läget bara om disken står i `usage_network_ok`, annars stannar det med ett meddelande i statusraden. GUI-smoken går in i en undermapp i följ-läge, ser att den räknas, stänger följ-läget och ser att nästa mapp inte räknas.
+
 ### Testutfall
 
 | Nivå | Vad | Utfall |

@@ -241,6 +241,7 @@ impl App {
             Act::Drive => self.status = "Press Ctrl+1 to Ctrl+9".into(),
             Act::DiskInfo => self.show_disk_info(None),
             Act::DiskUsage => self.toggle_usage(sender),
+            Act::DiskUsageFollow => self.toggle_usage_follow(sender),
             Act::Mount => self.open_mount(sender),
             Act::Commands => self.toggle_commands(sender),
         }

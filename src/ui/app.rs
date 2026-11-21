@@ -248,6 +248,8 @@ pub struct App {
     search: Option<search::SearchUi>,
     search_gen: u64,
     usage_modes: [Option<diskusage::UsageMode>; 2],
+    // The pane counts every folder it opens.
+    usage_follow: [bool; 2],
     usage_scan: Option<diskusage::UsageScan>,
     usage_cache: rust_commander::usage::Cache,
     usage_gen: u64,
@@ -423,6 +425,7 @@ impl SimpleComponent for App {
             search: None,
             search_gen: 0,
             usage_modes: [None, None],
+            usage_follow: [false, false],
             usage_scan: None,
             usage_cache: rust_commander::usage::Cache::default(),
             usage_gen: 0,
@@ -957,6 +960,8 @@ impl App {
                 Key::h | Key::H => self.toggle_hidden(),
                 Key::i | Key::I => self.show_disk_info(None),
                 Key::u | Key::U => self.toggle_usage(sender),
+                // Ctrl held: U then R turns on follow. R alone does too.
+                Key::r | Key::R => self.toggle_usage_follow(sender),
                 Key::m | Key::M if shift => {
                     let tx = sender.input_sender().clone();
                     let button = self.shell.mount_button.clone();

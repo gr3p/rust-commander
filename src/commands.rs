@@ -151,12 +151,13 @@ pub enum Act {
     Drive,
     DiskInfo,
     DiskUsage,
+    DiskUsageFollow,
     Mount,
     Commands,
 }
 
 impl Act {
-    pub const ALL: [Act; 93] = [
+    pub const ALL: [Act; 94] = [
         Act::Refresh,
         Act::View,
         Act::Edit,
@@ -248,6 +249,7 @@ impl Act {
         Act::Drive,
         Act::DiskInfo,
         Act::DiskUsage,
+        Act::DiskUsageFollow,
         Act::Mount,
         Act::Commands,
     ];
@@ -510,6 +512,7 @@ const CATALOG: &[Item] = &[
     Item { act: Act::Drive, keys: "Ctrl+1…9", label: "Drive", group: Group::Navigate },
     Item { act: Act::DiskInfo, keys: "Ctrl+I", label: "Disk info", group: Group::Navigate },
     Item { act: Act::DiskUsage, keys: "Ctrl+U", label: "Disk usage", group: Group::Navigate },
+    Item { act: Act::DiskUsageFollow, keys: "Ctrl+U+R", label: "Disk usage, follow into folders", group: Group::Navigate },
     Item { act: Act::Mount, keys: "Ctrl+Shift+M", label: "Mount", group: Group::Navigate },
     Item { act: Act::Hotlist, keys: "Ctrl+D", label: "Hotlist", group: Group::Navigate },
     Item { act: Act::Path, keys: "Ctrl+L", label: "Path", group: Group::Navigate },

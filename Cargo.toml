@@ -1,6 +1,6 @@
 [package]
 name = "rust-commander"
-version = "0.2.135"
+version = "0.2.136"
 edition = "2024"
 license = "MIT"
 

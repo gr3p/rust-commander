@@ -1936,7 +1936,11 @@ fn disk_usage_command_has_its_own_key() -> Result<(), String> {
     eq(own.len(), 1, "catalog entries")?;
     eq(own[0].keys, "Ctrl+U", "key")?;
     let shared = catalog().iter().filter(|item| item.keys == "Ctrl+U").count();
-    eq(shared, 1, "Ctrl+U is used once")
+    eq(shared, 1, "Ctrl+U is used once")?;
+    let follow: Vec<_> = catalog().iter().filter(|item| item.act == Act::DiskUsageFollow).collect();
+    eq(follow.len(), 1, "follow in F1")?;
+    eq(follow[0].keys, "Ctrl+U+R", "follow key")?;
+    eq(catalog().iter().filter(|item| item.keys.contains("Ctrl+R") || item.keys == "Ctrl+U+R").count(), 1, "Ctrl+R is free")
 }
 
 fn usage_counts_inside_the_sandbox(dir: &Path) -> Result<(), String> {
