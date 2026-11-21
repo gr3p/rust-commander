@@ -94,11 +94,24 @@ Samma form som `search::run`, så den går att testa utan fönster. `folder_byte
 - Esc, byte av katalog, byte av flik eller stängd panel avbryter pågående räkning.
 - Vid rot (`/`) och nätverksmonteringar startar ingenting av sig själv. Räkningen är alltid ett uttryckligt kommando i första versionen.
 
-## 4. Etapper
+## 4. Cache
+
+Vinsten är stor, framför allt för att **en räkning av en övre mapp redan ger storleken på alla kataloger under den**. Går man ner i en undermapp behövs ingen ny skanning. Dessutom är kallstarten av `/` dyr (minuter), och sidcachen hjälper bara så länge metadatan ligger kvar i RAM.
+
+- **Bara minne i första versionen.** `HashMap<(PathBuf, Alternativ), Usage>` med `bytes`, `scanned_at`, `complete`. Endast kataloger sparas, aldrig filer, och bara de över ca 1 MiB (mindre räknas om direkt ändå). Tak ca 50 000 poster (några MB), äldsta ut först. Poster går ut efter ca 10 min och cachen töms när läget varit av en stund.
+- **Visa gammalt medan nytt räknas.** Vid refresh visas de gamla siffrorna dämpade med `~` medan en ny räkning strömmar in och ersätter dem. Staplarna blir aldrig tomma.
+- **Invalidering:**
+  - Katalogens `mtime` ändras bara av direkta barn och bevisar alltså inget om djupa ändringar. Den används inte som giltighetstest.
+  - Egna filjobb (`jobs.rs`: kopiera, flytta, radera, packa, packa upp) justerar cachen med skillnaden för käll- och målkatalog och alla deras föräldrar.
+  - Refresh räknar om den öppna mappen. Dessutom "räkna om markerad mapp": skannar bara det delträdet och uppdaterar föräldrarna med skillnaden (ny minus gammal).
+  - Alternativ som allokerad/skenbar storlek och mountgräns ingår i nyckeln.
+- **Disk (valfritt, senare):** en enda fil `~/.cache/rust-commander/usage.bin` med hårt tak (ca 5 MB) och 24 timmars giltighet, som skrivs över och därför aldrig växer. Mest nytta för att slippa minutskanningen av `/` efter omstart. Alltid märkt "beräknad för N timmar sedan".
+
+## 5. Etapper
 
 1. **Kärnan** `src/usage.rs` + enhetstester (se nedan) + låt `folder_bytes` använda den.
-2. **Kommando + kolumn + förloppsruta** (`commands.rs`, `ui/app/…`, `ui/row.rs`, `theme.rs`). Acceptanstest i `tests/acceptance.rs`.
-3. **Efterarbete**: sticky läge (räkna automatiskt vid byte av katalog, men aldrig för `/`, nätverk, eller kataloger över en tröskel), resultatcache per katalog som ogiltigförklaras av filjobb i `jobs.rs` (kopiera/flytta/radera) och av katalogens mtime, filter för dolda filer, dubbelklick för att gå ner i mappen.
+2. **Kommando + kolumn + förloppsruta + minnescache** (`commands.rs`, `ui/app/…`, `ui/row.rs`, `theme.rs`). Acceptanstest i `tests/acceptance.rs`.
+3. **Efterarbete**: sticky läge (räkna automatiskt vid byte av katalog, men aldrig för `/`, nätverk, eller kataloger över en tröskel), diskcache, filter för dolda filer, dubbelklick för att gå ner i mappen.
 
 ## Tester
 
