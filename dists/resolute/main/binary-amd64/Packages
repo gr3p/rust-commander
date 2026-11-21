@@ -1,19 +1,19 @@
 Package: rust-commander
 Architecture: amd64
-Version: 0.2.130-1
+Version: 0.2.133-1
 Priority: optional
 Section: utils
 Maintainer: Marcus Wallén <sysopt@protonmail.com>
-Installed-Size: 11069
+Installed-Size: 11241
 Depends: libc6 (>= 2.43), libcairo2 (>= 1.2.4), libgcc-s1 (>= 4.2), libglib2.0-0t64 (>= 2.54.0), libgraphene-1.0-0 (>= 1.5.4), libgtk-4-1 (>= 4.9.2), libpango-1.0-0 (>= 1.44.3), libstdc++6 (>= 5.2), libvte-2.91-gtk4-0 (>= 0.47.90), hicolor-icon-theme
 Recommends: libasound2t64 | libasound2, libopus0
 Suggests: p7zip-full
-Filename: pool/main/r/rust-commander/rust-commander_0.2.130-1_amd64.deb
-Size: 3928740
-MD5sum: de2b6d1ab75d507c7499c3a570840dcc
-SHA1: 71309445648c8c95d3c0722e27a7dec33f714f95
-SHA256: 43ee32dfaafbc6c38e12452f5c31b1bcc6de78cc4c656caf0769916ae4852338
-SHA512: 1538a14728e17b05ec039f87b7323ebc5c8a22fce9a1fcc6ebb17dea2d03f0322b9bfb224a62315cfeb6d774c6a4265d6adb694613024b19219b08856fbfe57c
+Filename: pool/main/r/rust-commander/rust-commander_0.2.133-1_amd64.deb
+Size: 3987620
+MD5sum: 93806418568a50ca02f0dc01b282487a
+SHA1: 133d388973c20f1762b2f57afc8b08dd027aac2d
+SHA256: c122e87f36e4efe5cea204d5aba1083eac27180a1a06112b354cf2fd51ca9a51
+SHA512: f1f611ee2587c9a070d7be6585fe61572cfe9b4a83b0c47dd51ce4248067768f1c3ff9b4143cd4c07df80b3d9ca4f9ad046b0d5fe3e1b559a32829c55f8abbb5
 Homepage: https://github.com/gr3p/rust-commander
 Description: dual-pane file manager
  Rust Commander copies and moves files, views and edits text, shows images,
