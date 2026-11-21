@@ -932,7 +932,10 @@ box.drives {{
 button.drive.current {{
   background: {bg};
   border-color: {border};
-  border-bottom-color: transparent;
+  /* No bottom border: the side borders then run down to the line instead of a
+     transparent corner join leaving a one-pixel gap. */
+  border-bottom-width: 0;
+  padding-bottom: 4px;
   border-radius: 6px 6px 0 0;
   transform: translateY(1px);
 }}
