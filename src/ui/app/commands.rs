@@ -42,7 +42,7 @@ impl App {
             editing: self.shell.editing.get(),
             drive: self.shell.drives.iter().any(|(path, _)| path == &self.state.tab(id).path),
             testable,
-            usage: self.usage_valid(id.index()).is_some() || self.usage_scan_pane() == Some(id.index()),
+            usage: self.usage_valid(id.index()).is_some() || self.usage_scanning(id.index()),
             following: self.usage_follow[id.index()],
         }
     }

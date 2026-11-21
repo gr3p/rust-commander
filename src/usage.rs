@@ -182,19 +182,19 @@ fn scan_root(opts: &Options, cancelled: &impl Fn() -> bool) -> io::Result<Option
             if opts.mode.same_device && md.dev() != scan.dev {
                 child.foreign = true;
                 scan.skipped += 1;
-                scan.own[0] += own;
+                scan.own[0] = scan.own[0].saturating_add(own);
             } else if scan.dirs.insert((md.dev(), md.ino())) {
                 let node = scan.nodes.len() as u32;
                 scan.nodes.push(NodeMeta { path: entry.path(), parent: 0 });
                 scan.own.push(own);
                 scan.work.push(Work { node, top, dir: entry.path(), depth: 1 });
             } else {
-                scan.own[0] += own;
+                scan.own[0] = scan.own[0].saturating_add(own);
             }
             scan.bytes.push(own);
         } else {
             let weight = if repeat(&mut scan.links, &md) { 0 } else { own };
-            scan.own[0] += weight;
+            scan.own[0] = scan.own[0].saturating_add(weight);
             scan.bytes.push(weight);
         }
         scan.children.push(child);
@@ -229,6 +229,10 @@ struct Shared<'a> {
     current: Mutex<PathBuf>,
 }
 
+fn add_sat(target: &AtomicU64, n: u64) {
+    let _ = target.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| Some(cur.saturating_add(n)));
+}
+
 impl Shared<'_> {
     fn over(&self) -> bool {
         self.stop.load(Ordering::Relaxed) || self.pending.load(Ordering::Acquire) == 0
@@ -236,14 +240,14 @@ impl Shared<'_> {
 
     fn add_own(&self, node: u32, n: u64) {
         if n > 0 {
-            self.own[node as usize].fetch_add(n, Ordering::Relaxed);
-            self.total.fetch_add(n, Ordering::Relaxed);
+            add_sat(&self.own[node as usize], n);
+            add_sat(&self.total, n);
         }
     }
 
     fn add_top(&self, top: u32, n: u64) {
         if n > 0 {
-            self.top[top as usize].fetch_add(n, Ordering::Relaxed);
+            add_sat(&self.top[top as usize], n);
         }
     }
 
@@ -283,18 +287,24 @@ impl Shared<'_> {
         }
     }
 
+    fn notify_over(&self) {
+        // Take the locks before notifying so a waiter checking the predicate cannot miss the wakeup.
+        drop(lock(&self.queue));
+        self.wake.notify_all();
+        drop(lock(&self.idle_lock));
+        self.idle.notify_all();
+    }
+
     fn finish_one(&self, top: u32) {
         self.top_pending[top as usize].fetch_sub(1, Ordering::AcqRel);
         if self.pending.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.wake.notify_all();
-            self.idle.notify_all();
+            self.notify_over();
         }
     }
 
     fn halt(&self) {
         self.stop.store(true, Ordering::Relaxed);
-        self.wake.notify_all();
-        self.idle.notify_all();
+        self.notify_over();
     }
 }
 
@@ -351,14 +361,14 @@ fn process(sh: &Shared, work: &Work, cancelled: &impl Fn() -> bool) {
         let weight = weigh(&md, mode);
         if !md.is_dir() {
             let weight = if repeat(&mut lock(&sh.links), &md) { 0 } else { weight };
-            node_sum += weight;
-            top_sum += weight;
+            node_sum = node_sum.saturating_add(weight);
+            top_sum = top_sum.saturating_add(weight);
             continue;
         }
         if mode.same_device && md.dev() != sh.dev {
             sh.skipped.fetch_add(1, Ordering::Relaxed);
-            node_sum += weight;
-            top_sum += weight;
+            node_sum = node_sum.saturating_add(weight);
+            top_sum = top_sum.saturating_add(weight);
             continue;
         }
         // The same folder reached twice, which only a bind mount can do.
@@ -367,14 +377,14 @@ fn process(sh: &Shared, work: &Work, cancelled: &impl Fn() -> bool) {
         }
         if work.depth + 1 > MAX_DEPTH {
             sh.too_deep.fetch_add(1, Ordering::Relaxed);
-            node_sum += weight;
-            top_sum += weight;
+            node_sum = node_sum.saturating_add(weight);
+            top_sum = top_sum.saturating_add(weight);
             continue;
         }
         let path = entry.path();
         let node = if work.depth < NODE_DEPTH { sh.node_for(&path, work.node) } else { work.node };
         sh.add_own(node, weight);
-        top_sum += weight;
+        top_sum = top_sum.saturating_add(weight);
         sh.push(Work { node, top: work.top, dir: path, depth: work.depth + 1 });
     }
     sh.add_own(work.node, node_sum);
@@ -437,7 +447,7 @@ pub fn run(
     let RootScan { children, bytes, own, nodes, work, dirs, links, entries, unreadable, skipped, dev } = root;
     let children: Arc<[Child]> = Arc::from(children);
     let room = nodes.len() + MAX_NODES;
-    let total: u64 = own.iter().sum();
+    let total: u64 = own.iter().copied().fold(0u64, u64::saturating_add);
     let sh = Shared {
         opts,
         dev,
@@ -482,8 +492,14 @@ pub fn run(
         let mut last = sh.entries.load(Ordering::Relaxed);
         let mut sent = Instant::now();
         while workers > 0 {
+            if cancelled() {
+                sh.halt();
+            }
             {
                 let guard = lock(&sh.idle_lock);
+                if sh.over() {
+                    break;
+                }
                 let wait = TICK.saturating_sub(sent.elapsed()).max(Duration::from_millis(1));
                 let _ = sh.idle.wait_timeout(guard, wait);
             }
@@ -1065,6 +1081,28 @@ mod tests {
         assert_eq!(find(&dir.join("a/b")), 1001);
         assert_eq!(find(&dir.join("a/b/c")), 1000);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fast_count_does_not_stall_on_missed_wakeup() {
+        let dir = scratch("fast-wakeup");
+        write(&dir.join("sub/file"), 42);
+        let opts = Options { root: dir.clone(), mode: apparent(), threads: 8 };
+        let start = Instant::now();
+        for _ in 0..5 {
+            let report = run(&opts, &|| false, &mut |_| {}).unwrap();
+            assert_eq!(report.total, 42);
+        }
+        // Without locking before notify and checking `over()` under `idle_lock`, each run can sleep a full TICK (100ms).
+        assert!(start.elapsed() < Duration::from_millis(250), "took {:?}", start.elapsed());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn add_sat_clamps_at_u64_max() {
+        let cell = AtomicU64::new(u64::MAX - 5);
+        add_sat(&cell, 10);
+        assert_eq!(cell.load(Ordering::Relaxed), u64::MAX);
     }
 
     #[test]

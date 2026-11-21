@@ -39,7 +39,6 @@ struct Popup {
 
 pub(in crate::ui::app) struct UsageScan {
     serial: u64,
-    pane: usize,
     root: PathBuf,
     mode: Mode,
     medium: Medium,
@@ -64,15 +63,19 @@ impl App {
             .filter(|mode| mode.tab == self.state.pane(id).active && mode.view.path == self.state.tab(id).path)
     }
 
-    pub(in crate::ui::app) fn usage_scan_pane(&self) -> Option<usize> {
-        self.usage_scan.as_ref().map(|scan| scan.pane)
+    pub(in crate::ui::app) fn usage_scanning(&self, pane: usize) -> bool {
+        self.usage_scans[pane].is_some()
+    }
+
+    fn scan_pane_for(&self, serial: u64) -> Option<usize> {
+        self.usage_scans.iter().position(|scan| scan.as_ref().is_some_and(|scan| scan.serial == serial))
     }
 
     // First press counts. While counting it cancels, and once the bars are there it switches the mode off.
     pub(in crate::ui::app) fn toggle_usage(&mut self, sender: &ComponentSender<Self>) {
         let pane = self.state.active.index();
-        if self.usage_scan.as_ref().is_some_and(|scan| scan.pane == pane) {
-            self.cancel_usage();
+        if self.usage_scanning(pane) {
+            self.cancel_usage(pane);
             return;
         }
         if self.usage_valid(pane).is_some() {
@@ -139,7 +142,7 @@ impl App {
     }
 
     fn start_usage_now(&mut self, pane: usize, medium: Medium) {
-        self.stop_scan();
+        self.stop_scan(pane);
         let id = PaneId::from_index(pane);
         let root = self.state.tab(id).path.clone();
         let mode = Mode { apparent: self.cfg.usage_apparent, same_device: true };
@@ -190,9 +193,8 @@ impl App {
         });
         rust_commander::log::info(&format!("usage start {} threads={threads}", root.display()));
         self.status = format!("Counting {}", root.display());
-        self.usage_scan = Some(UsageScan {
+        self.usage_scans[pane] = Some(UsageScan {
             serial,
-            pane,
             root,
             mode,
             medium,
@@ -208,8 +210,8 @@ impl App {
     }
 
     // The thread of a stopped count may live on, stuck in the kernel. Its answers carry an old number and are dropped.
-    fn stop_scan(&mut self) {
-        let Some(scan) = self.usage_scan.take() else { return };
+    fn stop_scan(&mut self, pane: usize) {
+        let Some(scan) = self.usage_scans[pane].take() else { return };
         scan.cancel.store(true, Ordering::Relaxed);
         scan.over.store(true, Ordering::Relaxed);
         if let Some(popup) = scan.popup {
@@ -217,72 +219,93 @@ impl App {
         }
     }
 
-    pub(in crate::ui::app) fn cancel_usage(&mut self) {
-        let Some(pane) = self.usage_scan.as_ref().map(|scan| scan.pane) else { return };
-        self.stop_scan();
+    pub(in crate::ui::app) fn cancel_usage(&mut self, pane: usize) {
+        if self.usage_scans[pane].is_none() {
+            return;
+        }
+        self.stop_scan(pane);
         self.usage_off(pane);
         self.status = "Disk usage cancelled".into();
     }
 
+    pub(in crate::ui::app) fn cancel_usage_serial(&mut self, serial: u64) {
+        if let Some(pane) = self.scan_pane_for(serial) {
+            self.cancel_usage(pane);
+        }
+    }
+
     pub(in crate::ui::app) fn usage_off(&mut self, pane: usize) {
         self.usage_follow[pane] = false;
-        if self.usage_scan.as_ref().is_some_and(|scan| scan.pane == pane) {
-            self.stop_scan();
-        }
-        if self.usage_modes[pane].take().is_none() {
+        self.stop_scan(pane);
+        let Some(held) = self.usage_modes[pane].take() else {
             return;
-        }
+        };
         let id = PaneId::from_index(pane);
-        for entry in self.state.tab_mut(id).entries.iter_mut().filter(|entry| entry.is_dir()) {
-            entry.size = 0;
+        if let Some(tab) = self.state.pane_mut(id).tabs.get_mut(held.tab) {
+            if tab.path == held.view.path {
+                for entry in tab.entries.iter_mut().filter(|entry| entry.is_dir()) {
+                    entry.size = 0;
+                }
+            }
         }
         self.touch(id);
     }
 
+    pub(in crate::ui::app) fn usage_after_close_tab(&mut self, pane: usize, closed: usize) {
+        let Some(held) = self.usage_modes[pane].as_mut() else { return };
+        if held.tab == closed {
+            self.usage_follow[pane] = false;
+            self.stop_scan(pane);
+            self.usage_modes[pane] = None;
+        } else if held.tab > closed {
+            held.tab -= 1;
+        }
+    }
+
     pub(in crate::ui::app) fn on_usage_disk(&mut self, serial: u64, used: u64) {
-        if let Some(scan) = self.usage_scan.as_mut().filter(|scan| scan.serial == serial) {
-            scan.disk_used = Some(used);
+        if let Some(pane) = self.scan_pane_for(serial) {
+            if let Some(scan) = self.usage_scans[pane].as_mut() {
+                scan.disk_used = Some(used);
+            }
         }
     }
 
     pub(in crate::ui::app) fn on_usage_tick(&mut self, serial: u64, snap: Snapshot) {
-        let Some(scan) = self.usage_scan.as_mut().filter(|scan| scan.serial == serial) else { return };
+        let Some(pane) = self.scan_pane_for(serial) else { return };
+        let Some(scan) = self.usage_scans[pane].as_mut() else { return };
         scan.watchdog.feed(snap.entries, Instant::now());
         scan.entries = snap.entries;
         scan.total = snap.total;
-        let (pane, mode) = (scan.pane, scan.mode);
+        let mode = scan.mode;
         let Some(held) = self.usage_modes[pane].as_mut() else { return };
         held.view = View::from_counts(&held.view.path, mode, &snap.children, &snap.bytes, &snap.open, true);
         self.paint_usage_rows(pane);
-        self.paint_usage_popup();
+        self.paint_usage_popup(pane);
     }
 
     pub(in crate::ui::app) fn on_usage_timer(&mut self, serial: u64) {
-        let Some(scan) = self.usage_scan.as_ref().filter(|scan| scan.serial == serial) else { return };
-        let pane = scan.pane;
+        let Some(pane) = self.scan_pane_for(serial) else { return };
         // The folder or tab changed under the count: nobody looks at it any more.
         if self.usage_valid(pane).is_none() {
-            self.stop_scan();
-            self.usage_modes[pane] = None;
-            self.touch(PaneId::from_index(pane));
+            self.usage_off(pane);
             return;
         }
         // Turns the spinners of the folders still being counted.
         self.paint_usage_rows(pane);
-        let Some(scan) = self.usage_scan.as_ref() else { return };
+        let Some(scan) = self.usage_scans[pane].as_ref() else { return };
         let stalled = scan.watchdog.stalled(Instant::now(), STALL_AFTER);
         // A network disk is slow by nature, so it gets its window at once. A stalled count always does.
         let due = scan.started.elapsed() >= POPUP_AFTER || scan.medium == Medium::Network || stalled;
         if due && scan.popup.is_none() {
-            let popup = self.usage_popup();
-            if let Some(scan) = self.usage_scan.as_mut() {
+            let popup = self.usage_popup(serial);
+            if let Some(scan) = self.usage_scans[pane].as_mut() {
                 scan.popup = Some(popup);
             }
         }
-        self.paint_usage_popup();
+        self.paint_usage_popup(pane);
     }
 
-    fn usage_popup(&self) -> Popup {
+    fn usage_popup(&self, serial: u64) -> Popup {
         let window = gtk::Window::new();
         window.set_title(Some("Disk usage"));
         window.set_transient_for(Some(&self.shell.window));
@@ -301,11 +324,11 @@ impl App {
         let cancel = gtk::Button::with_label("Cancel");
         cancel.set_halign(gtk::Align::End);
         let tx = self.tx.clone();
-        crate::ui::shell::on_click(&cancel, move || tx.emit(Msg::UsageCancel));
+        crate::ui::shell::on_click(&cancel, move || tx.emit(Msg::UsageCancel(serial)));
         let tx = self.tx.clone();
         // Closing the window is the same as Cancel.
         window.connect_close_request(move |_| {
-            tx.emit(Msg::UsageCancel);
+            tx.emit(Msg::UsageCancel(serial));
             gtk::glib::Propagation::Proceed
         });
         let esc = window.clone();
@@ -318,8 +341,8 @@ impl App {
         Popup { window, label, bar }
     }
 
-    fn paint_usage_popup(&self) {
-        let Some(scan) = &self.usage_scan else { return };
+    fn paint_usage_popup(&self, pane: usize) {
+        let Some(scan) = &self.usage_scans[pane] else { return };
         let Some(popup) = &scan.popup else { return };
         let mut text = format!("{}\n{} items, {}", scan.root.display(), scan.entries, format_size(scan.total));
         let now = Instant::now();
@@ -337,16 +360,13 @@ impl App {
     }
 
     pub(in crate::ui::app) fn on_usage_done(&mut self, serial: u64, result: Result<Report, String>) {
-        if self.usage_scan.as_ref().is_none_or(|scan| scan.serial != serial) {
-            return;
-        }
-        let Some(scan) = self.usage_scan.take() else { return };
+        let Some(pane) = self.scan_pane_for(serial) else { return };
+        let Some(scan) = self.usage_scans[pane].take() else { return };
         scan.over.store(true, Ordering::Relaxed);
         let spent = scan.started.elapsed();
         if let Some(popup) = &scan.popup {
             popup.window.close();
         }
-        let pane = scan.pane;
         let id = PaneId::from_index(pane);
         let report = match result {
             Ok(report) if !report.cancelled => report,
@@ -372,6 +392,10 @@ impl App {
         ));
         if !report.failed {
             self.usage_cache.store(&report, scan.mode, scan.medium == Medium::Network, Instant::now());
+        }
+        if self.usage_valid(pane).is_none() {
+            self.usage_off(pane);
+            return;
         }
         if let Some(held) = self.usage_modes[pane].as_mut() {
             held.view = View::from_counts(&scan.root, scan.mode, &report.children, &report.bytes, &[], report.failed);
@@ -404,7 +428,12 @@ impl App {
     pub(in crate::ui::app) fn apply_usage_sizes(&mut self, pane: usize) {
         let id = PaneId::from_index(pane);
         let Some(held) = self.usage_modes[pane].as_ref() else { return };
-        for entry in self.state.tab_mut(id).entries.iter_mut().filter(|entry| entry.is_dir() && entry.name.as_ref() != "..") {
+        let active = self.state.pane(id).active;
+        let Some(tab) = self.state.pane_mut(id).tabs.get_mut(held.tab) else { return };
+        if held.tab != active || tab.path != held.view.path {
+            return;
+        }
+        for entry in tab.entries.iter_mut().filter(|entry| entry.is_dir() && entry.name.as_ref() != "..") {
             entry.size = held.view.cell(&entry.name).filter(|cell| !cell.foreign).map_or(0, |cell| cell.bytes);
         }
     }
@@ -431,11 +460,11 @@ impl App {
             self.status = "Disk usage no longer follows folders".into();
             return;
         }
-        let counting = self.usage_scan.as_ref().is_some_and(|scan| scan.pane == pane);
+        let counting = self.usage_scanning(pane);
         if !counting && self.usage_valid(pane).is_none() {
             self.begin_usage(pane, sender);
             // A network disk asks first. Following waits for the answer and the count.
-            if self.usage_scan.as_ref().is_none_or(|scan| scan.pane != pane) {
+            if !self.usage_scanning(pane) {
                 return;
             }
         }
@@ -515,8 +544,8 @@ impl App {
                 .filter_map(|at| store.item(at).and_then(|obj| obj.downcast::<row::EntryObject>().ok()))
                 .find(|obj| obj.entry_name() == name)
         };
-        let count = |app: &mut App, errors: &mut Vec<String>| {
-            let Some(scan) = app.usage_scan.as_ref() else {
+        let count = |app: &mut App, pane: usize, errors: &mut Vec<String>| {
+            let Some(scan) = app.usage_scans[pane].as_ref() else {
                 errors.push("usage: no count started".into());
                 return;
             };
@@ -536,15 +565,15 @@ impl App {
 
         self.toggle_usage(sender);
         self.sync();
-        if self.usage_scan.is_none() || self.usage_valid(0).is_none() {
+        if self.usage_scans[0].is_none() || self.usage_valid(0).is_none() {
             errors.push("usage: mode did not start".into());
             return;
         }
         if !self.shell.panes[0].usage_col.is_visible() {
             errors.push("usage: column hidden while counting".into());
         }
-        count(self, errors);
-        if self.usage_scan.is_some() {
+        count(self, 0, errors);
+        if self.usage_scans[0].is_some() {
             errors.push("usage: count never finished".into());
         }
         match row(self, &folder) {
@@ -575,34 +604,47 @@ impl App {
             }
             self.sync();
             let dimmed = self.usage_modes[0].as_ref().is_some_and(|held| held.view.stale);
-            if self.usage_scan.is_none() || !dimmed {
+            if self.usage_scans[0].is_none() || !dimmed {
                 errors.push(format!("usage: no new count after {name}"));
             }
             // A small folder is not in the cache, so a file shows the dimming.
             if row(self, "note.txt").is_some_and(|obj| !obj.usage_on() || !obj.usage_partial()) {
                 errors.push(format!("usage: numbers not dimmed during the count after {name}"));
             }
-            count(self, errors);
+            count(self, 0, errors);
         }
 
-        // An answer from an older count changes nothing.
+        // Both panes in usage mode at once: a file job restarts both without the second cancelling the first.
+        self.state.active = PaneId::Right;
         self.toggle_usage(sender);
+        count(self, 1, errors);
+        self.usage_after_job(sender);
+        if self.usage_scans[0].is_none() || self.usage_scans[1].is_none() {
+            errors.push("usage: job did not restart both panes".into());
+        }
+        count(self, 0, errors);
+        count(self, 1, errors);
+        self.usage_off(1);
+        self.state.active = id;
+
+        // Escape turns off a finished usage mode too.
+        self.dismiss();
         self.sync();
         if self.usage_valid(0).is_some() || self.shell.panes[0].usage_col.is_visible() {
-            errors.push("usage: mode stayed on".into());
+            errors.push("usage: Escape left finished mode on".into());
         }
         if row(self, &folder).is_some_and(|obj| obj.usage_on() || obj.size_text() != "<DIR>") {
             errors.push("usage: row kept its bar after off".into());
         }
         self.toggle_usage(sender);
-        let serial = self.usage_scan.as_ref().map_or(0, |scan| scan.serial);
+        let serial = self.usage_scans[0].as_ref().map_or(0, |scan| scan.serial);
         // A slow count gets its window, and one that reads nothing says that it is waiting.
-        if let Some(scan) = self.usage_scan.as_mut() {
+        if let Some(scan) = self.usage_scans[0].as_mut() {
             scan.started = Instant::now() - Duration::from_secs(2);
             scan.watchdog = Watchdog::new(Instant::now() - Duration::from_secs(60));
         }
         self.on_usage_timer(serial);
-        let waiting = self.usage_scan.as_ref().and_then(|scan| scan.popup.as_ref()).map(|popup| popup.label.text().to_string());
+        let waiting = self.usage_scans[0].as_ref().and_then(|scan| scan.popup.as_ref()).map(|popup| popup.label.text().to_string());
         match waiting {
             None => errors.push("usage: no window for a slow count".into()),
             Some(text) if !text.contains("No answer") => errors.push(format!("usage: stall not shown: {text}")),
@@ -610,19 +652,20 @@ impl App {
         }
         let stale = serial + 1000;
         self.on_usage_done(stale, Err("old".into()));
-        if self.usage_scan.is_none() {
+        self.cancel_usage_serial(stale);
+        if self.usage_scans[0].is_none() {
             errors.push("usage: an old answer ended the count".into());
         }
         // Escape and the cancel button end a running count and leave nothing behind.
-        self.cancel_usage();
+        self.cancel_usage(0);
         self.sync();
-        if self.usage_scan.is_some() || self.usage_modes[0].is_some() || self.shell.panes[0].usage_col.is_visible() {
+        if self.usage_scans[0].is_some() || self.usage_modes[0].is_some() || self.shell.panes[0].usage_col.is_visible() {
             errors.push("usage: cancel left the mode on".into());
         }
 
         // Another folder ends the mode.
         self.toggle_usage(sender);
-        count(self, errors);
+        count(self, 0, errors);
         let home = self.state.tab(id).path.clone();
         self.state.tab_mut(id).path = std::path::PathBuf::from("/");
         self.usage_after_listing(0);
@@ -640,10 +683,10 @@ impl App {
         if !tips.contains("Stop following") {
             errors.push(format!("usage: tips do not offer to stop following: {tips:?}"));
         }
-        if !self.usage_follow[0] || self.usage_scan.is_none() {
+        if !self.usage_follow[0] || self.usage_scans[0].is_none() {
             errors.push("usage: Ctrl+R did not start a following count".into());
         }
-        count(self, errors);
+        count(self, 0, errors);
         let open_folder = |app: &mut App, path: std::path::PathBuf| {
             let token = app.state.navigate(id, path.clone(), true);
             app.loads.push((token, Arc::new(AtomicBool::new(false))));
@@ -652,18 +695,18 @@ impl App {
             app.on_listed(0, tab, token, Ok(entries), None);
         };
         open_folder(self, home.join(&folder));
-        let followed = self.usage_scan.as_ref().is_some_and(|scan| scan.root == home.join(&folder));
+        let followed = self.usage_scans[0].as_ref().is_some_and(|scan| scan.root == home.join(&folder));
         if !followed || self.usage_valid(0).is_none() {
             errors.push("usage: following did not count the folder it opened".into());
         }
-        count(self, errors);
+        count(self, 0, errors);
         // Ctrl+R again stops following and keeps the bars. The next folder ends the mode.
         self.toggle_usage_follow(sender);
         if self.usage_follow[0] || self.usage_valid(0).is_none() {
             errors.push("usage: Ctrl+R off dropped the bars or kept following".into());
         }
         open_folder(self, home.clone());
-        if self.usage_modes[0].is_some() || self.usage_scan.is_some() {
+        if self.usage_modes[0].is_some() || self.usage_scans[0].is_some() {
             errors.push("usage: counted after following was off".into());
         }
         self.sync();
@@ -702,14 +745,14 @@ impl App {
             1 => {
                 // The question about a network disk comes first, and nothing starts until it is answered.
                 self.toggle_usage(sender);
-                if self.usage_scan.is_some() || self.usage_modes[0].is_some() {
+                if self.usage_scans[0].is_some() || self.usage_modes[0].is_some() {
                     fail("a network count started without asking");
                 }
             }
             2 => {
                 // "Always for this disk" starts the count and remembers the disk.
                 self.usage_go(0, Some(mount.display().to_string()), sender);
-                if self.usage_scan.is_none() {
+                if self.usage_scans[0].is_none() {
                     fail("the count did not start");
                 }
                 if !self.cfg.usage_network_ok.contains(&mount.display().to_string()) {
@@ -717,9 +760,9 @@ impl App {
                 }
             }
             3..=60 => {
-                let shown = self.usage_scan.as_ref().and_then(|scan| scan.popup.as_ref()).map(|popup| popup.label.text().to_string());
+                let shown = self.usage_scans[0].as_ref().and_then(|scan| scan.popup.as_ref()).map(|popup| popup.label.text().to_string());
                 if !hang {
-                    if self.usage_scan.is_none() {
+                    if self.usage_scans[0].is_none() {
                         let ok = self.usage_valid(0).is_some_and(|held| !held.view.partial && held.view.total() > 0);
                         if !ok {
                             fail("the count ended without numbers");
@@ -729,17 +772,17 @@ impl App {
                     }
                     return;
                 }
-                if step == 6 && self.usage_scan.as_ref().is_none_or(|scan| scan.popup.is_none()) {
+                if step == 6 && self.usage_scans[0].as_ref().is_none_or(|scan| scan.popup.is_none()) {
                     fail("a network count showed no window");
                 }
                 if shown.as_ref().is_some_and(|text| text.contains("No answer")) {
                     let start = Instant::now();
-                    self.cancel_usage();
+                    self.cancel_usage(0);
                     self.sync();
                     if start.elapsed() > Duration::from_millis(500) {
                         fail("Cancel was slow");
                     }
-                    if self.usage_scan.is_some() || self.usage_modes[0].is_some() {
+                    if self.usage_scans[0].is_some() || self.usage_modes[0].is_some() {
                         fail("Cancel left the count behind");
                     }
                     println!("SMOKE_NET_OK waiting shown, Cancel took {:?}", start.elapsed());

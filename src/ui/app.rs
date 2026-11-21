@@ -252,7 +252,7 @@ pub struct App {
     usage_modes: [Option<diskusage::UsageMode>; 2],
     // The pane counts every folder it opens.
     usage_follow: [bool; 2],
-    usage_scan: Option<diskusage::UsageScan>,
+    usage_scans: [Option<diskusage::UsageScan>; 2],
     usage_cache: rust_commander::usage::Cache,
     usage_gen: u64,
     search_target: Option<(PaneId, usize, u64, String)>,
@@ -429,7 +429,7 @@ impl SimpleComponent for App {
             search_gen: 0,
             usage_modes: [None, None],
             usage_follow: [false, false],
-            usage_scan: None,
+            usage_scans: [None, None],
             usage_cache: rust_commander::usage::Cache::default(),
             usage_gen: 0,
             search_target: None,
@@ -777,7 +777,7 @@ impl App {
             Msg::UsageDone(serial, result) => self.on_usage_done(serial, result),
             Msg::UsageDisk(serial, used) => self.on_usage_disk(serial, used),
             Msg::UsageTimer(serial) => self.on_usage_timer(serial),
-            Msg::UsageCancel => self.cancel_usage(),
+            Msg::UsageCancel(serial) => self.cancel_usage_serial(serial),
             Msg::UsageGo(pane, remember) => self.usage_go(pane, remember, &sender),
             Msg::DrivesChanged => self.refresh_drives(sender),
             Msg::DriveStatus(text) => self.status = text,
@@ -990,7 +990,12 @@ impl App {
                         self.close_current_shell();
                     } else {
                         let id = self.state.active;
+                        let count = self.state.pane(id).tabs.len();
+                        let closed = self.state.pane(id).active;
                         self.state.close_tab(id);
+                        if self.state.pane(id).tabs.len() < count {
+                            self.usage_after_close_tab(id.index(), closed);
+                        }
                         self.touch(id);
                     }
                 }
@@ -1120,7 +1125,9 @@ impl App {
             Key::Escape if self.shell.editing.get() => {
                 self.leave_quick_edit(sender);
             }
-            Key::Escape if self.usage_scan.is_some() => self.cancel_usage(),
+            Key::Escape if self.usage_scanning(self.state.active.index()) => {
+                self.cancel_usage(self.state.active.index());
+            }
             Key::Escape => self.dismiss(),
             _ => {}
         }
@@ -2459,6 +2466,7 @@ impl App {
     }
 
     fn dismiss(&mut self) {
+        let had_overlay = self.image.is_some() || self.lister.is_some() || self.state.quick_view;
         self.close_image();
         self.close_lister();
         self.state.quick_view = false;
@@ -2469,6 +2477,9 @@ impl App {
         self.shell.panes[id.index()].filter.set_visible(false);
         if open {
             self.focus_list();
+        } else if !had_overlay && self.usage_valid(id.index()).is_some() {
+            self.usage_off(id.index());
+            self.status = "Disk usage off".into();
         }
         self.touch(id);
     }

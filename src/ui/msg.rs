@@ -79,7 +79,7 @@ pub enum Msg {
     UsageDone(u64, Result<rust_commander::usage::Report, String>),
     UsageDisk(u64, u64),
     UsageTimer(u64),
-    UsageCancel,
+    UsageCancel(u64),
     // The network disk question was answered. Some(mount) also remembers the disk.
     UsageGo(usize, Option<String>),
     DrivesChanged,
