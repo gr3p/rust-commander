@@ -33,3 +33,4 @@ pub mod sum;
 pub mod state;
 pub mod syntax;
 pub mod theme;
+pub mod usage;

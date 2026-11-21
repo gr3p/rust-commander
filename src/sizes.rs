@@ -3,6 +3,8 @@ use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::usage;
+
 // File lengths under `root`. Symlinks are not followed, so a link cannot walk out of the tree.
 pub fn folder_bytes(root: &Path, cancel: &AtomicBool) -> io::Result<u64> {
     let meta = fs::symlink_metadata(root)?;
@@ -12,31 +14,20 @@ pub fn folder_bytes(root: &Path, cancel: &AtomicBool) -> io::Result<u64> {
     if !meta.is_dir() {
         return Ok(meta.len());
     }
-    let mut total = 0u64;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
-        }
-        // An unreadable subfolder counts as empty; only the root itself is an error.
-        let read = match fs::read_dir(&dir) {
-            Ok(read) => read,
-            Err(err) if dir == root => return Err(err),
-            Err(_) => continue,
-        };
-        for entry in read.flatten() {
-            let Ok(meta) = fs::symlink_metadata(entry.path()) else { continue };
-            if meta.file_type().is_symlink() {
-                continue;
-            }
-            if meta.is_dir() {
-                stack.push(entry.path());
-            } else {
-                total = total.saturating_add(meta.len());
-            }
-        }
+    let opts = usage::Options {
+        root: root.to_path_buf(),
+        mode: usage::Mode { apparent: true, same_device: false },
+        threads: usage::threads_for(usage::medium_of(root), usage::cores()),
+    };
+    // An unreadable subfolder counts as empty; only the root itself is an error.
+    let report = usage::run(&opts, &|| cancel.load(Ordering::Relaxed), &mut |_| {})?;
+    if report.cancelled {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
     }
-    Ok(total)
+    if report.failed {
+        return Err(io::Error::other("the count stopped unexpectedly"));
+    }
+    Ok(report.total)
 }
 
 // Under 1 GB the number is still readable in MB. From 1 GB, GB.
