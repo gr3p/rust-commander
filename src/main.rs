@@ -1,6 +1,7 @@
 mod ui;
 
 fn main() {
+    rust_commander::log::install_panic_hook();
     if std::env::args().nth(1).as_deref() == Some("--mount-helper") {
         std::process::exit(rust_commander::mount::helper());
     }

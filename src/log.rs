@@ -22,6 +22,27 @@ pub fn error(msg: &str) {
     write("error", msg, true);
 }
 
+/// Writes a panic to the log. A panic inside GTK aborts the process and stderr is often gone, so this is the only trace.
+pub fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current().name().unwrap_or("unnamed").to_string();
+        let trace = std::backtrace::Backtrace::force_capture();
+        let line = format!("{} panic thread={thread} {info}\n{trace}\n", stamp());
+        // try_lock: the panic may have happened while this thread held the log.
+        if let Ok(mut slot) = LOG.try_lock() {
+            if slot.is_none() {
+                *slot = open(&path());
+            }
+            if let Some(sink) = slot.as_mut() {
+                let _ = sink.file.write_all(line.as_bytes());
+                let _ = sink.file.flush();
+            }
+        }
+        default(info);
+    }));
+}
+
 pub fn path() -> PathBuf {
     state_dir().join("rust-commander.log")
 }
