@@ -60,6 +60,12 @@ impl App {
             target.paste_clipboard();
         });
         term.add_controller(paste);
+        // A finished mouse selection is only on PRIMARY. Put it on the clipboard as well.
+        term.connect_selection_changed(|term| {
+            if term.has_selection() {
+                term.copy_clipboard_format(vte4::Format::Text);
+            }
+        });
         let name = theme::active_name(&self.cfg.theme, &rust_commander::config::active_theme_path());
         super::shell::paint_terminal(&term, &theme::load_terminal(&name, &self.cfg.background_color));
         let button = gtk::Button::new();

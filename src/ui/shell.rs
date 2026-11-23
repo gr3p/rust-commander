@@ -308,11 +308,33 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
             }
         }
         let on_term = focused.as_ref().is_some_and(|widget| widget.has_css_class("panel-shell"));
-        if on_term && !terminal_command(key, mods) {
-            if let Some(widget) = focused.as_ref() {
-                controller.forward(widget);
+        if on_term {
+            // Ctrl+Shift+C/V is the terminal chord. Ctrl+C copies a selection, otherwise the shell gets the interrupt. Ctrl+V pastes.
+            if let Some(term) = focused.as_ref().and_then(|widget| widget.downcast_ref::<Terminal>()) {
+                match terminal_clip(key, mods) {
+                    Some(ShellClip::Copy) => {
+                        if term.has_selection() {
+                            term.copy_clipboard_format(vte4::Format::Text);
+                        }
+                        return gtk::glib::Propagation::Stop;
+                    }
+                    Some(ShellClip::CopyIfSelected) if term.has_selection() => {
+                        term.copy_clipboard_format(vte4::Format::Text);
+                        return gtk::glib::Propagation::Stop;
+                    }
+                    Some(ShellClip::Paste) => {
+                        term.paste_clipboard();
+                        return gtk::glib::Propagation::Stop;
+                    }
+                    _ => {}
+                }
             }
-            return gtk::glib::Propagation::Stop;
+            if !terminal_command(key, mods) {
+                if let Some(widget) = focused.as_ref() {
+                    controller.forward(widget);
+                }
+                return gtk::glib::Propagation::Stop;
+            }
         }
         tx.emit(super::msg::Msg::Key(key, mods));
         gtk::glib::Propagation::Stop
@@ -1090,6 +1112,29 @@ pub(crate) fn clipboard_edit(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -
     ctrl && !alt && !shift && matches!(key, Key::c | Key::C | Key::x | Key::X | Key::v | Key::V)
 }
 
+enum ShellClip {
+    Copy,
+    CopyIfSelected,
+    Paste,
+}
+
+// Ctrl+Shift+C/V follows GNOME Terminal. Ctrl+C copies when text is marked. Ctrl+V pastes. Ctrl+X stays in the shell.
+fn terminal_clip(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> Option<ShellClip> {
+    use gtk::gdk::Key;
+    let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+    let alt = mods.contains(gtk::gdk::ModifierType::ALT_MASK);
+    let shift = mods.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+    if !ctrl || alt {
+        return None;
+    }
+    match key {
+        Key::c | Key::C if shift => Some(ShellClip::Copy),
+        Key::c | Key::C => Some(ShellClip::CopyIfSelected),
+        Key::v | Key::V => Some(ShellClip::Paste),
+        _ => None,
+    }
+}
+
 fn terminal_command(key: gtk::gdk::Key, mods: gtk::gdk::ModifierType) -> bool {
     use gtk::gdk::Key;
     let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
@@ -1537,7 +1582,7 @@ pub fn paint_terminal(term: &Terminal, theme: &rust_commander::theme::TerminalTh
 
 #[cfg(test)]
 mod tests {
-    use super::{clipboard_edit, edit_command, entry_input, window_size_key};
+    use super::{clipboard_edit, edit_command, entry_input, terminal_clip, window_size_key, ShellClip};
     use relm4::gtk::gdk::{Key, ModifierType};
 
     #[test]
@@ -1584,5 +1629,17 @@ mod tests {
         assert!(clipboard_edit(Key::x, ModifierType::CONTROL_MASK));
         assert!(clipboard_edit(Key::v, ModifierType::CONTROL_MASK));
         assert!(!clipboard_edit(Key::c, ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK));
+    }
+
+    #[test]
+    fn shell_copy_and_paste_keys() {
+        let ctrl = ModifierType::CONTROL_MASK;
+        let ctrl_shift = ctrl | ModifierType::SHIFT_MASK;
+        assert!(matches!(terminal_clip(Key::c, ctrl_shift), Some(ShellClip::Copy)));
+        assert!(matches!(terminal_clip(Key::c, ctrl), Some(ShellClip::CopyIfSelected)));
+        assert!(matches!(terminal_clip(Key::v, ctrl), Some(ShellClip::Paste)));
+        assert!(matches!(terminal_clip(Key::V, ctrl_shift), Some(ShellClip::Paste)));
+        assert!(terminal_clip(Key::x, ctrl).is_none());
+        assert!(terminal_clip(Key::v, ctrl_shift | ModifierType::ALT_MASK).is_none());
     }
 }
