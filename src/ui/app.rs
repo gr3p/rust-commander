@@ -698,7 +698,7 @@ impl App {
                 self.finish_image_copy(generation, image)
             }
             Msg::ShellExited(id) => self.on_shell_exited(id),
-            Msg::SelectShell(id) => self.select_shell(id),
+            Msg::SelectShell(id, from_files) => self.select_shell(id, from_files),
             Msg::CloseWindow => {
                 if self.leave_quick_edit(sender) {
                     self.shell.window.close();
@@ -755,6 +755,11 @@ impl App {
                     return;
                 }
                 self.audio_unfocus();
+                // The shell covers this pane. Taking the accent would move the shells.
+                if self.state.panel_terminal && self.shell.shell_pane == Some(pane) {
+                    self.shell.active.set(self.state.active.index());
+                    return;
+                }
                 // A click in the quick editor must not make its pane active and hide the editor.
                 if self
                     .quick_edit
@@ -1030,7 +1035,7 @@ impl App {
         }
         if alt {
             if let Some(slot) = drive_slot(key) {
-                self.show_shell_index(slot);
+                self.show_shell_index(slot, sender);
                 return;
             }
             match key {
@@ -1789,7 +1794,7 @@ impl App {
     fn sync(&mut self) {
         SYNCING.store(true, Ordering::Relaxed);
         if self.state.panel_terminal {
-            self.place_panel_terminal(self.state.active.other().index());
+            self.layout_shells();
         }
         self.restamp_shells();
         let mut pending: [Option<Vec<Entry>>; 2] = [None, None];
@@ -1799,7 +1804,7 @@ impl App {
         for pane in 0..2 {
             let id = PaneId::from_index(pane);
             let active = self.state.active == id;
-            let show_terminal = self.state.panel_terminal && !active;
+            let show_terminal = self.state.panel_terminal && self.shell.shell_pane == Some(pane);
             let show_preview = self.state.quick_view && !active && !show_terminal;
             let path = self.state.tab(id).path.display().to_string();
             let cursor = self.state.tab(id).cursor;
@@ -1955,6 +1960,9 @@ impl App {
         self.show_status();
         self.paint_mode_bar();
         self.mark_drives();
+        if self.shell.shell_hold.replace(false) {
+            self.grab_shell();
+        }
         self.accent_painted = true;
         SYNCING.store(false, Ordering::Relaxed);
     }

@@ -100,13 +100,22 @@ pub struct Shell {
     pub shells: Vec<PanelShell>,
     pub shell_current: Option<u64>,
     pub shell_seq: u64,
+    // Pane the shells were opened on. They stay there.
+    pub shell_pane: Option<usize>,
+    // The shell should take the keys again after sync, which can move focus back to the list.
+    pub shell_hold: Cell<bool>,
+    // Bumped when that request is dropped, so a late grab does not steal the list back.
+    pub shell_epoch: Rc<Cell<u64>>,
 }
 
 pub struct PanelShell {
     pub id: u64,
     pub term: Terminal,
+    pub tile: gtk::Box,
     pub button: gtk::Button,
     pub number: gtk::Label,
+    pub caption: gtk::Label,
+    pub cwd: PathBuf,
     pub pid: std::rc::Rc<std::cell::Cell<Option<i32>>>,
 }
 
@@ -371,6 +380,9 @@ pub fn build(window: &gtk::Window, sender: &relm4::Sender<super::msg::Msg>, icon
         shells: Vec::new(),
         shell_current: None,
         shell_seq: 1,
+        shell_pane: None,
+        shell_hold: Cell::new(false),
+        shell_epoch: Rc::new(Cell::new(0)),
     }
 }
 

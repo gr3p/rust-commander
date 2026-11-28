@@ -153,7 +153,7 @@ pub enum Msg {
     SetTheme(String),
     SetIconPack(String),
     ShellExited(u64),
-    SelectShell(u64),
+    SelectShell(u64, bool),
     Smoke,
     // Step of the disk usage test on a slow or silent mount, driven by RUST_COMMANDER_SMOKE_NETFS.
     SmokeNet(u32),

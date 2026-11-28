@@ -1328,6 +1328,18 @@ menubutton.media-icon.media-quiet:hover {{
 .audio-big.focused {{
   border-color: {accent};
 }}
+/* Every tile keeps a border, so marking the current shell does not shift the grid. */
+.shell-tile {{
+  border: 1px solid transparent;
+  border-radius: 4px;
+}}
+.shell-tile.current {{
+  border-color: {accent};
+}}
+/* VTE reads this padding and draws the first cell inside it, on both axes. */
+.panel-shell {{
+  padding: 6px;
+}}
 .audio-mini.focused {{
   box-shadow: inset 0 0 0 2px {accent};
 }}
